@@ -609,7 +609,15 @@ class ModelConfig:
             context_length=(
                 context_length if context_length is not None else cfg.context_length
             ),
-            model_override_args=cfg.json_model_override_args,
+            model_override_args=(
+                (
+                    cfg.speculative_draft_model_override_args
+                    if cfg.speculative_draft_model_override_args is not None
+                    else cfg.json_model_override_args
+                )
+                if is_draft_model
+                else cfg.json_model_override_args
+            ),
             is_embedding=cfg.is_embedding,
             enable_multimodal=cfg.enable_multimodal,
             dtype=cfg.dtype,

@@ -30,6 +30,15 @@ def get_dspark_sample_from_anchor(draft_hf_config: Any) -> bool:
     return bool(_cfg_get(draft_hf_config, "sample_from_anchor", True))
 
 
+def _runtime_draft_model_override_args() -> str:
+    draft_override = get_spec().speculative_draft_model_override_args
+    return (
+        draft_override
+        if draft_override is not None
+        else get_model().json_model_override_args
+    )
+
+
 def draft_is_deepseek_v4() -> bool:
     from sglang.srt.configs.model_config import is_deepseek_v4
     from sglang.srt.utils.hf_transformers_utils import get_config
@@ -41,7 +50,7 @@ def draft_is_deepseek_v4() -> bool:
         draft_model_path,
         trust_remote_code=get_model().trust_remote_code,
         revision=get_spec().speculative_draft_model_revision,
-        model_override_args=json.loads(get_model().json_model_override_args),
+        model_override_args=json.loads(_runtime_draft_model_override_args()),
         model_config_parser=get_model().model_config_parser,
     )
     return draft_hf_config is not None and is_deepseek_v4(draft_hf_config)
@@ -150,7 +159,11 @@ def read_draft_checkpoint_config(*, server_args: ServerArgs) -> DSparkDraftConfi
         resolving.speculative_draft_model_path,
         trust_remote_code=resolving.trust_remote_code,
         revision=resolving.speculative_draft_model_revision,
-        model_override_args=json.loads(resolving.json_model_override_args),
+        model_override_args=json.loads(
+            resolving.speculative_draft_model_override_args
+            if resolving.speculative_draft_model_override_args is not None
+            else resolving.json_model_override_args
+        ),
     )
     return parse_dspark_draft_config(draft_hf_config=draft_hf_config)
 

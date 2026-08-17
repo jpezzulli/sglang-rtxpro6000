@@ -17,6 +17,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _draft_config_kwargs(server_args: ServerArgs) -> dict:
+    cfg = resolving_view(server_args)
+    model_override_args = (
+        cfg.speculative_draft_model_override_args
+        if cfg.speculative_draft_model_override_args is not None
+        else cfg.json_model_override_args
+    )
+    kwargs = {
+        "model_override_args": json.loads(model_override_args)
+    }
+    override_config_file = cfg.decrypted_draft_config_file
+    if override_config_file and override_config_file.strip():
+        kwargs["_configuration_file"] = override_config_file.strip()
+    return kwargs
+
+
 def _disable_overlap_schedule_for_cpu(server_args: ServerArgs) -> None:
     cfg = resolving_view(server_args)
     if cfg.device != "cpu" or cfg.disable_overlap_schedule:
@@ -109,11 +125,7 @@ def handle_speculative_decoding(server_args: ServerArgs) -> None:
             "select the non-overlap (synchronous) path."
         )
 
-    kwargs = {}
-
-    override_config_file = cfg.decrypted_draft_config_file
-    if override_config_file and override_config_file.strip():
-        kwargs["_configuration_file"] = override_config_file.strip()
+    kwargs = _draft_config_kwargs(server_args)
 
     declare_resolution(
         server_args,
@@ -271,7 +283,11 @@ def _handle_dflash(server_args: ServerArgs) -> None:
             parse_dflash_draft_config,
         )
 
-        model_override_args = json.loads(cfg.json_model_override_args)
+        model_override_args = json.loads(
+            cfg.speculative_draft_model_override_args
+            if cfg.speculative_draft_model_override_args is not None
+            else cfg.json_model_override_args
+        )
         inferred_block_size = None
         try:
             from sglang.srt.utils.hf_transformers_utils import get_config
@@ -595,7 +611,11 @@ def _resolve_dflash_draft_attention_backend(server_args: ServerArgs) -> None:
             cfg.speculative_draft_model_path,
             trust_remote_code=cfg.trust_remote_code,
             revision=cfg.speculative_draft_model_revision,
-            model_override_args=json.loads(cfg.json_model_override_args),
+            model_override_args=json.loads(
+                cfg.speculative_draft_model_override_args
+                if cfg.speculative_draft_model_override_args is not None
+                else cfg.json_model_override_args
+            ),
         )
         draft_text_config = (
             getattr(draft_hf_config, "text_config", None) or draft_hf_config
