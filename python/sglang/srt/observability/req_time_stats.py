@@ -1055,13 +1055,29 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
             forward_duration = self.duration_between(
                 self.forward_entry_time, self.completion_time
             )
+            # These are wall-clock lifecycle spans, not accumulated GPU time.
+            # The post-prefill span intentionally includes scheduler waits and
+            # any re-prefill work after a request is retracted.
+            initial_prefill_elapsed = self.duration_between(
+                self.forward_entry_time, self.prefill_finished_time
+            )
+            post_prefill_elapsed = self.duration_between(
+                self.prefill_finished_time, self.completion_time
+            )
 
             if SGLANG_TEST_REQUEST_TIME_STATS:
                 assert (
                     queue_duration >= 0 and forward_duration >= 0
                 ), f"queue_duration={queue_duration} < 0 or forward_duration={forward_duration} < 0"
 
-            return f"queue_duration={self.format_duration(queue_duration)}, forward_duration={self.format_duration(forward_duration)}, entry_time={self.format_wallclock(self.wait_queue_entry_time)}"
+            return (
+                f"queue_duration={self.format_duration(queue_duration)}, "
+                "initial_prefill_elapsed="
+                f"{self.format_duration(initial_prefill_elapsed)}, "
+                f"post_prefill_elapsed={self.format_duration(post_prefill_elapsed)}, "
+                f"forward_duration={self.format_duration(forward_duration)}, "
+                f"entry_time={self.format_wallclock(self.wait_queue_entry_time)}"
+            )
         elif self.disagg_mode == DisaggregationMode.PREFILL:
             bootstrap_queue_duration = self.duration_between(
                 self.prefill_bootstrap_queue_entry_time, self.wait_queue_entry_time

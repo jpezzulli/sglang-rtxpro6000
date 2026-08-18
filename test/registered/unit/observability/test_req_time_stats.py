@@ -40,5 +40,61 @@ class TestSetstatePreservesUnsetTimeSentinels(CustomTestCase):
         self.assertAlmostEqual(hop2.wait_queue_entry_time, 123.456 - 9.0)
 
 
+class TestUnifiedLifecycleSpans(CustomTestCase):
+    def test_reports_initial_and_post_prefill_elapsed_time(self):
+        stats = rts.SchedulerReqTimeStats(
+            wait_queue_entry_time=10.0,
+            forward_entry_time=12.0,
+            prefill_finished_time=15.5,
+            completion_time=20.0,
+        )
+
+        result = stats.convert_to_duration()
+
+        self.assertIn("queue_duration=2000.00ms", result)
+        self.assertIn("initial_prefill_elapsed=3500.00ms", result)
+        self.assertIn("post_prefill_elapsed=4500.00ms", result)
+        self.assertIn("forward_duration=8000.00ms", result)
+
+    def test_unset_prefill_boundary_reports_zero_phase_durations(self):
+        stats = rts.SchedulerReqTimeStats(
+            wait_queue_entry_time=10.0,
+            forward_entry_time=12.0,
+            completion_time=20.0,
+        )
+
+        result = stats.convert_to_duration()
+
+        self.assertIn("initial_prefill_elapsed=0.00ms", result)
+        self.assertIn("post_prefill_elapsed=0.00ms", result)
+
+    def test_one_token_completion_has_no_post_prefill_span(self):
+        stats = rts.SchedulerReqTimeStats(
+            wait_queue_entry_time=10.0,
+            forward_entry_time=12.0,
+            prefill_finished_time=15.5,
+            completion_time=15.5,
+        )
+
+        result = stats.convert_to_duration()
+
+        self.assertIn("initial_prefill_elapsed=3500.00ms", result)
+        self.assertIn("post_prefill_elapsed=0.00ms", result)
+
+    def test_post_prefill_span_includes_retraction_and_reprefill(self):
+        stats = rts.SchedulerReqTimeStats(
+            wait_queue_entry_time=10.0,
+            forward_entry_time=12.0,
+            prefill_finished_time=15.5,
+            completion_time=20.0,
+        )
+        stats.set_retract_time(ts=16.0)
+
+        result = stats.convert_to_duration()
+
+        self.assertIn("initial_prefill_elapsed=3500.00ms", result)
+        self.assertIn("post_prefill_elapsed=4500.00ms", result)
+
+
 if __name__ == "__main__":
     unittest.main()
