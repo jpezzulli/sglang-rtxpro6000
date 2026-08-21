@@ -51,7 +51,11 @@ from sglang.srt.speculative.ragged_verify import (
     resolve_ragged_verify_layout,
 )
 from sglang.srt.utils import is_flashinfer_available
-from sglang.srt.utils.common import is_sm90_supported, is_sm120_supported
+from sglang.srt.utils.common import (
+    get_cuda_graph_max_batch_size,
+    is_sm90_supported,
+    is_sm120_supported,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +281,53 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
                 "SGLANG_TRTLLM_MHA_DECODE_SEQ_LEN_SPLITS must be at least 1, "
                 f"got {self.decode_seq_len_splits}"
             )
+
+        self._xqa_spec_dec_mask = None
+        if (
+            self.is_xqa_impl
+            and self.speculative_num_draft_tokens is not None
+            and self.speculative_num_draft_tokens > 1
+        ):
+            self._xqa_spec_dec_mask = self._build_xqa_spec_dec_causal_mask(
+                max_bs=get_cuda_graph_max_batch_size(
+                    model_runner.server_args, model_runner.req_to_token_pool.size
+                ),
+                q_len=self.speculative_num_draft_tokens,
+                device=self.device,
+            )
+
+    @staticmethod
+    def _build_xqa_spec_dec_causal_mask(
+        max_bs: int, q_len: int, device: torch.device
+    ) -> torch.Tensor:
+        """Build XQA's uint16 view of a uint32-packed causal draft mask."""
+        rows = torch.arange(q_len, dtype=torch.int32, device=device)
+        word_starts = 32 * torch.arange(
+            (q_len + 31) // 32, dtype=torch.int32, device=device
+        )
+        visible = torch.clamp(rows[:, None] + 1 - word_starts[None, :], 0, 32)
+        packed = ((torch.ones_like(visible, dtype=torch.int64) << visible) - 1).to(
+            torch.uint32
+        )
+        mask = packed.contiguous().view(torch.uint16)
+        return mask.unsqueeze(0).expand(max_bs, -1, -1).contiguous()
+
+    def _get_xqa_spec_dec_mask(self, bs: int, q_len: int) -> torch.Tensor:
+        if (
+            self._xqa_spec_dec_mask is None
+            or q_len != self.speculative_num_draft_tokens
+        ):
+            raise RuntimeError(
+                "XQA speculative-decode mask was not preallocated for "
+                f"q_len={q_len} (configured draft length: "
+                f"{self.speculative_num_draft_tokens})."
+            )
+        if bs > self._xqa_spec_dec_mask.shape[0]:
+            raise RuntimeError(
+                f"XQA speculative-decode mask batch capacity is "
+                f"{self._xqa_spec_dec_mask.shape[0]}, but bs={bs} was requested."
+            )
+        return self._xqa_spec_dec_mask[:bs]
 
     def _check_decode_kv_access(self) -> None:
         supported_kinds = {
@@ -1103,10 +1154,13 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         sinks: Optional[torch.Tensor],
         q_len_per_req: int = 1,
         kv_cache_sf=None,
+        mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Run decode, optionally sorting and splitting requests by KV length."""
 
-        def run_group(group_query, group_block_tables, group_seq_lens):
+        num_requests = seq_lens.shape[0]
+
+        def run_group(group_query, group_block_tables, group_seq_lens, group_mask=None):
             kwargs = {}
             if q_len_per_req != 1:
                 kwargs["q_len_per_req"] = q_len_per_req
@@ -1125,13 +1179,13 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
                 out_dtype=self.q_data_type,
                 kv_cache_sf=kv_cache_sf,
                 multi_ctas_kv_counter_buffer=self._multi_ctas_kv_counter_buffer,
+                mask=group_mask,
                 **kwargs,
             )
 
-        num_requests = seq_lens.shape[0]
         num_splits = min(self.decode_seq_len_splits, num_requests)
         if num_splits == 1:
-            return run_group(query, block_tables, seq_lens)
+            return run_group(query, block_tables, seq_lens, mask)
 
         order = torch.argsort(seq_lens)
         query_by_request = query.view(
@@ -1143,12 +1197,14 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
             device=query.device,
         )
         for indices in torch.tensor_split(order, num_splits):
+            group_mask = mask[: indices.numel()] if mask is not None else None
             group_output = run_group(
                 query_by_request.index_select(0, indices).reshape(
                     -1, query.shape[-2], query.shape[-1]
                 ),
                 block_tables.index_select(0, indices),
                 seq_lens.index_select(0, indices),
+                group_mask,
             )
             output_by_request.index_copy_(
                 0,
@@ -1412,6 +1468,16 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
                     multi_ctas_kv_counter_buffer=self._multi_ctas_kv_counter_buffer,
                 )
             else:
+                mask = None
+                if (
+                    self.is_xqa_impl
+                    and forward_batch.forward_mode.is_target_verify()
+                    and self.forward_metadata.max_seq_len_q > 1
+                ):
+                    mask = self._get_xqa_spec_dec_mask(
+                        forward_batch.batch_size,
+                        self.forward_metadata.max_seq_len_q,
+                    )
                 o = self._run_fixed_q_len_decode(
                     q,
                     kv_cache,
@@ -1422,6 +1488,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
                     window_left=layer.sliding_window_size,
                     sinks=attention_sink,
                     q_len_per_req=self.forward_metadata.max_seq_len_q,
+                    mask=mask,
                 )
         elif self.use_fmha_v2 and not cp_v2_active:
             # CP-v2 must go through cp_strategy.run_attention (per-shard

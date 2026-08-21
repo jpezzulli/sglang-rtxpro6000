@@ -49,6 +49,137 @@ def _make_backend_for_hook_test(speculative_num_draft_tokens=None):
     return backend
 
 
+@pytest.mark.parametrize("q_len", [1, 8, 34, 65])
+def test_xqa_spec_dec_causal_mask_matches_scalar_reference(q_len):
+    mask = TRTLLMHAAttnBackend._build_xqa_spec_dec_causal_mask(
+        max_bs=2, q_len=q_len, device=torch.device("cpu")
+    )
+
+    num_words = (q_len + 31) // 32
+    assert mask.shape == (2, q_len, num_words * 2)
+    packed = mask.view(torch.uint32).reshape(2, q_len, num_words)
+    expected = torch.tensor(
+        [
+            [
+                (1 << max(0, min(32, row + 1 - 32 * word))) - 1
+                for word in range(num_words)
+            ]
+            for row in range(q_len)
+        ],
+        dtype=torch.uint32,
+    )
+    torch.testing.assert_close(packed[0], expected)
+    torch.testing.assert_close(packed[1], packed[0])
+
+
+def test_xqa_spec_dec_mask_rejects_wrong_width_and_batch_overflow():
+    backend = TRTLLMHAAttnBackend.__new__(TRTLLMHAAttnBackend)
+    backend.speculative_num_draft_tokens = 8
+    backend._xqa_spec_dec_mask = torch.zeros((6, 8, 2), dtype=torch.uint16)
+
+    assert backend._get_xqa_spec_dec_mask(bs=6, q_len=8).shape == (6, 8, 2)
+    with pytest.raises(RuntimeError, match="q_len=7"):
+        backend._get_xqa_spec_dec_mask(bs=6, q_len=7)
+    with pytest.raises(RuntimeError, match="capacity is 6"):
+        backend._get_xqa_spec_dec_mask(bs=7, q_len=8)
+
+
+@pytest.mark.parametrize("num_splits", [1, 2])
+def test_fixed_q_len_decode_forwards_xqa_mask(monkeypatch, num_splits):
+    calls = []
+
+    def fake_decode(**kwargs):
+        calls.append(kwargs)
+        return torch.zeros_like(kwargs["query"])
+
+    monkeypatch.setattr(
+        trtllm_mha_backend,
+        "flashinfer",
+        SimpleNamespace(
+            decode=SimpleNamespace(trtllm_batch_decode_with_kv_cache=fake_decode)
+        ),
+        raising=False,
+    )
+    backend = TRTLLMHAAttnBackend.__new__(TRTLLMHAAttnBackend)
+    backend.workspace_buffer = torch.empty(1, dtype=torch.uint8)
+    backend.max_context_len = 1024
+    backend.q_data_type = torch.bfloat16
+    backend._multi_ctas_kv_counter_buffer = None
+    backend.decode_seq_len_splits = num_splits
+    mask = (
+        torch.tensor([1, 3, 7, 15], dtype=torch.uint32)
+        .view(torch.uint16)
+        .reshape(1, 4, 2)
+        .expand(2, -1, -1)
+        .contiguous()
+    )
+    query = (
+        torch.arange(2 * 4 * 2 * 4, dtype=torch.float32)
+        .to(torch.bfloat16)
+        .reshape(8, 2, 4)
+    )
+
+    backend._run_fixed_q_len_decode(
+        query,
+        kv_cache=None,
+        block_tables=torch.tensor([[10], [20]], dtype=torch.int32),
+        seq_lens=torch.tensor([200, 10], dtype=torch.int32),
+        bmm1_scale=1.0,
+        bmm2_scale=1.0,
+        window_left=-1,
+        sinks=None,
+        q_len_per_req=4,
+        mask=mask,
+    )
+
+    assert len(calls) == num_splits
+    for call in calls:
+        assert call["q_len_per_req"] == 4
+        assert call["mask"].dtype == torch.uint16
+        assert call["mask"].shape == (2 // num_splits, 4, 2)
+        torch.testing.assert_close(call["mask"], mask[: 2 // num_splits])
+
+
+@pytest.mark.parametrize("q_len_per_req", [1, 5])
+def test_fixed_q_len_decode_leaves_unscoped_calls_unmasked(monkeypatch, q_len_per_req):
+    calls = []
+
+    def fake_decode(**kwargs):
+        calls.append(kwargs)
+        return torch.zeros_like(kwargs["query"])
+
+    monkeypatch.setattr(
+        trtllm_mha_backend,
+        "flashinfer",
+        SimpleNamespace(
+            decode=SimpleNamespace(trtllm_batch_decode_with_kv_cache=fake_decode)
+        ),
+        raising=False,
+    )
+    backend = TRTLLMHAAttnBackend.__new__(TRTLLMHAAttnBackend)
+    backend.workspace_buffer = torch.empty(1, dtype=torch.uint8)
+    backend.max_context_len = 1024
+    backend.q_data_type = torch.bfloat16
+    backend._multi_ctas_kv_counter_buffer = None
+    backend.decode_seq_len_splits = 1
+    query = torch.zeros((q_len_per_req, 2, 4), dtype=torch.bfloat16)
+
+    backend._run_fixed_q_len_decode(
+        query,
+        kv_cache=None,
+        block_tables=torch.zeros((1, 1), dtype=torch.int32),
+        seq_lens=torch.tensor([10], dtype=torch.int32),
+        bmm1_scale=1.0,
+        bmm2_scale=1.0,
+        window_left=-1,
+        sinks=None,
+        q_len_per_req=q_len_per_req,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["mask"] is None
+
+
 def test_cuda_graph_metadata_launch_runs_in_graph_hook(monkeypatch):
     calls = []
 
