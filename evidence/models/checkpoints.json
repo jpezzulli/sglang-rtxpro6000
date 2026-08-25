@@ -1,0 +1,27 @@
+{
+  "target": {
+    "repository": "orcarouter/Qwen3.8-27B-Uncensored-FP8",
+    "revision": "9228df5c6c9c509e1019f83b4e085cf643118bac",
+    "license": "Apache-2.0",
+    "config_sha256": "74227dd615bf1ea975aa676bdf355a0379858c12f394b5365cd9dfa5fc2c70bc",
+    "generation_config_sha256": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+    "safetensors_index_sha256": "e773856674c35cf98a90a4317b891251bed49a0d8af3988932796489210921aa",
+    "weight_lfs_sha256": [
+      "141e200c1950c59bc42ae28744f50db8f6ea4c66ec3312b55f1ccad2b60af858",
+      "e863e88f53ea5a737581638e41334e9f9871a93053c4251a2cebd4aa6aa1f7c0",
+      "7cbf8db425114b9efcfae64364a60e15e223cc5cadb510b7a3a6d3b48c8617cf",
+      "37338dc30b490663b641567a57565408fee5f1385e7860dff16dca7be07e1519",
+      "fc6fb0dd3675e0cc7e83a454376d12b705a51000f6625cf13f85e384018fc5cb",
+      "5fdcbaf80805a750970e076bcd37e6ebe4c3a3d93ce73c767d2854119947952a",
+      "1bed352a0625d22dc606de47fd3563f24fd9fa73915c4ddffe7947c4b56c28bf"
+    ]
+  },
+  "draft": {
+    "repository": "incoai/Qwen3.8-27B-DFlash2",
+    "revision": "adde41d8fde3a75dc905a7df0bd5088d2a44b5a1",
+    "license": "Apache-2.0",
+    "config_sha256": "873e3556509b0da06e29654ba00d4944888d4b5e8a33afde25f7eb27d321e980",
+    "weight_lfs_sha256": "67fc76d68dc5a9415511a4f394ef744d67510cd20e93b37cc2cc7d28e4bab65c"
+  },
+  "weights_included_in_this_repository": false
+}

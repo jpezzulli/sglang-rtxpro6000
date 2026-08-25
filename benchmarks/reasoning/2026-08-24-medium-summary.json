@@ -1,0 +1,40 @@
+{
+  "runtime_source": "8e197ed3afc559f29562a2e7de9026f011f5d28f",
+  "reasoning_effort": "medium",
+  "reasoning": {
+    "dimension_weighted_score": 95.807,
+    "completion_tokens": 33343,
+    "summed_request_wall_seconds": 208.12,
+    "completion_tokens_per_summed_request_second": 160.21,
+    "exactly_three_running_server_tps_median": 486.19,
+    "exactly_three_running_server_tps_mean": 483.29,
+    "exactly_three_running_accept_length_mean": 4.657,
+    "exactly_three_running_accept_rate_mean": 0.522,
+    "cases": {
+      "C1": 96.3043,
+      "C2": 94.2935,
+      "C3": 99.4565,
+      "C4": 94.5109,
+      "C5": 86.6848,
+      "C6": 97.7717,
+      "C7": 98.9674,
+      "C8": 99.5
+    }
+  },
+  "tools": {
+    "invocations": 30,
+    "automatic_passes": 27,
+    "exact_tool_selection_and_arguments": 30,
+    "parseable_tool_arguments": 30,
+    "reviewed_semantic_passes": 29,
+    "request_errors": 0,
+    "campaign_wall_seconds": 56.85,
+    "completion_tokens": 8574,
+    "completion_tokens_per_campaign_second": 150.83
+  },
+  "comparison_to_xhigh": {
+    "reasoning_score_delta": -2.453,
+    "completion_token_reduction_percent": 80.4,
+    "summed_request_time_reduction_percent": 84.74
+  }
+}

@@ -1,0 +1,18 @@
+Capture time: 2026-08-24 19:36:33 EDT
+Repository: https://github.com/sgl-project/sglang.git
+Runtime branch: pennyroyal-main-sm120-final
+Runtime source HEAD: 8e197ed3afc559f29562a2e7de9026f011f5d28f
+Merge base with upstream main: 5a7b26c636deb2def43640bab6c63146dbe536dc
+Fetched upstream main: effe0d14d2e6815c1385df47258985c74d8a3d07
+Divergence at capture: 7 commits ahead, 210 commits behind
+Tracked worktree: clean
+Untracked non-ignored files: 0
+
+Local commits above merge base, oldest first:
+560f06a94e4ce478674572439e9d826d93d72ee9 feat(spec): allow independent draft model config overrides
+b74d971054fc73782bebba58223c859a90cb400b fix(spec): preserve draftless custom algorithm hooks
+5b06cf9f4269398bff715ff22bda55b48da4a183 fix(jit): pin nvcc to the fingerprinted host compiler
+e9971ac6ebf4cc9e8c5d4d59ee210d982d70d802 feat(observability): report request lifecycle spans
+ba600c682a34f15104ece2d6f7c654a544c375bc fix(hicache): bound Mooncake hybrid I/O
+2e79cdc030ddc845e707a686ad7fe58c2263a6bf fix(attention): supply XQA speculative decode mask
+8e197ed3afc559f29562a2e7de9026f011f5d28f fix(hicache): bound concurrent NIXL hybrid transfers

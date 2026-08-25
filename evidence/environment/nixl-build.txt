@@ -1,0 +1,14 @@
+Repository: https://github.com/ai-dynamo/nixl.git
+Commit: aecbc3846d92c34c7507a58d776e1fda50ff4fba
+Worktree at capture: clean, branch main
+Version: 1.4.0
+Packages: nixl==1.4.0, nixl-cu13==1.4.0
+Wheel SHA-256: b2d618bc9593bf78120b44f9d573af8807e83716ae8c539b0f1532cc55a55ad8
+Build type: release
+Compiler: GCC/G++ 15.3.1
+CUDA: 13.3.73
+CUDA architecture: 120
+Enabled plugin set: POSIX only
+Bundled liburing: 2.14
+io_uring: enabled at runtime
+Build jobs: 24

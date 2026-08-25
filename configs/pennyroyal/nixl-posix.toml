@@ -1,0 +1,13 @@
+# NIXL POSIX FILE storage used by the qualified HiCache L3 path.
+use_direct_io = true
+l3_cleaner_enabled = true
+
+# These are whole-filesystem occupancy thresholds, not a 500 GiB byte quota.
+# Tune them for the non-cache occupancy and desired cache band of the filesystem
+# that contains NIXL_STORAGE_BASE.
+l3_cleaner_high_watermark = 68.0
+l3_cleaner_low_watermark = 65.0
+
+[plugin.posix]
+active = true
+use_uring = "true"

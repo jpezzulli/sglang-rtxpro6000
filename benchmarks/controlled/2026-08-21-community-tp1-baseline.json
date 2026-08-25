@@ -1,0 +1,83 @@
+{
+  "source": {
+    "repository": "local-inference-lab/rtx6kpro",
+    "commit": "7ceba1df33bb9c76060a251bba2d851b4f37a485",
+    "path": "models/qwen38-27b.md",
+    "evidence_snapshot": "2026-08-21",
+    "url": "https://github.com/local-inference-lab/rtx6kpro/blob/7ceba1df33bb9c76060a251bba2d851b4f37a485/models/qwen38-27b.md"
+  },
+  "primary_tp1_baseline": {
+    "checkpoint": "Qwen/Qwen3.8-27B-FP8",
+    "runtime": "vLLM Gilded Gnosis r31",
+    "gpu": "one 600 W NVIDIA RTX PRO 6000 Blackwell workstation GPU",
+    "tensor_parallelism": 1,
+    "speculation": "MTP3",
+    "kv_cache": "FP8",
+    "native_kv_offload_gib": 48,
+    "max_sequences": 4,
+    "prefix_caching": true,
+    "status": "research-only",
+    "prefill_tokens_per_second": {
+      "8k": 7686.0,
+      "16k": 7562.0,
+      "32k": 6902.0,
+      "64k": 5877.0,
+      "128k": 4439.0
+    },
+    "decode_tokens_per_second": {
+      "c1": {
+        "ctx0": 77.8,
+        "ctx16k": 76.2,
+        "ctx32k": 73.9,
+        "ctx64k": 81.7,
+        "ctx128k": 69.8
+      },
+      "c2": {
+        "ctx0": 149.2,
+        "ctx16k": 149.6,
+        "ctx32k": 149.3,
+        "ctx64k": 138.7,
+        "ctx128k": 145.9
+      },
+      "c4": {
+        "ctx0": 292.7,
+        "ctx16k": 296.5,
+        "ctx32k": 279.7,
+        "ctx64k": 264.7,
+        "ctx128k": null
+      }
+    }
+  },
+  "this_distribution": {
+    "checkpoint": "orcarouter/Qwen3.8-27B-Uncensored-FP8",
+    "runtime": "frozen SGLang-derived runtime with DFlash2",
+    "gpu": "one 450 W NVIDIA RTX PRO 6000 Blackwell workstation GPU",
+    "tensor_parallelism": 1,
+    "speculation": "DFlash2, eight draft tokens, 2048-token window",
+    "controlled": {
+      "prefill_64k_tokens_per_second": 6163.072012511955,
+      "decode_c1_tokens_per_second": 108.7544738353872,
+      "decode_c4_aggregate_tokens_per_second": 390.2321939117422
+    },
+    "real_agentic": {
+      "zero_to_2k_median_effective_decode": 165.25,
+      "zero_to_2k_token_weighted_effective_decode": 148.35,
+      "100_to_150k_nonoverlap_median_effective_decode": 133.25,
+      "100_to_150k_nonoverlap_token_weighted_effective_decode": 130.36,
+      "340_to_360k_nonoverlap_median_effective_decode": 105.45,
+      "340_to_360k_nonoverlap_token_weighted_effective_decode": 101.69
+    }
+  },
+  "primary_controlled_deltas_percent": {
+    "c1_ctx0": 39.78724143365964,
+    "c4_ctx0": 33.32155582908855,
+    "prefill_64k": 4.86765377764089
+  },
+  "comparison_boundaries": [
+    "Both results are TP1 on an RTX PRO 6000, but they are not a strict A/B.",
+    "The checkpoint, runtime, speculative method, power limit, client harness, output duration, and cache/offload configuration differ.",
+    "The community baseline is research-only and does not publish repeat variance or quality-gate receipts.",
+    "Real-agentic context-band rates are not directly compared numerically with the catalog's fixed-context C1 matrix.",
+    "The catalog also reports an isolated 106.9 tok/s MTP result for a different W8A8 checkpoint and measurement; it is not merged into the primary matrix."
+  ]
+}

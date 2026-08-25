@@ -1,3 +1,61 @@
+# Qwen3.8-27B at ~160 tok/s short-context agentic decode on one RTX PRO 6000
+
+This repository is the complete frozen SGLang-derived source distribution that
+served `orcarouter/Qwen3.8-27B-Uncensored-FP8` with
+`incoai/Qwen3.8-27B-DFlash2` on **one** NVIDIA RTX PRO 6000 Blackwell 96 GB,
+TP=1. It preserves the source that worked; it is deliberately **not** rebased
+onto current SGLang `main` and is not presented as a clean patch series.
+
+The supplied real-use server log contains 124 completed requests after the
+reasoning/tool qualification had ended. Short-context requests had a 165.25
+tok/s per-request median. The full sample had a 131.31 tok/s median, while the
+340-360K non-overlapping band slowed to 105.45 tok/s. Favorable DFlash2 server
+windows reached 258-300 tok/s, but those are instantaneous telemetry—not
+sustained request throughput.
+
+| Measurement class | Context / concurrency | Result |
+|---|---|---:|
+| Real agentic, all completed | 183-350,195 input tokens; 124 requests | 131.31 median / 102.57 token-weighted tok/s |
+| Real agentic, no detected overlap | 117 requests | 133.21 median / 125.36 token-weighted tok/s |
+| Real agentic short context | 0-2K; 36 requests | 165.25 median / 148.35 token-weighted tok/s |
+| Real agentic deep context | 340-360K; 23 non-overlapping requests | 105.45 median / 101.69 token-weighted tok/s |
+| Public community TP1 baseline | official FP8/MTP3, C1 / C4 | 77.8 / 292.7 tok/s |
+| Controlled decode | C1, 1,024 output tokens | 108.75 tok/s after first token |
+| Controlled decode | C4, 4 x 1,024 output tokens | 390.23 aggregate tok/s |
+| Directional controlled gain | versus community C1 / C4 | +39.8% / +33.3% |
+| Reasoning active decode | C3, xhigh | 396.78 server tok/s median |
+| Reasoning active decode | C3, medium | 486.19 server tok/s median |
+| Long prefill | 489,921 prompt tokens | 1,618.31 prompt tok/s; 3/3 needles exact |
+| Reasoning quality | xhigh / medium | 98.26 / 95.807 |
+
+These rows use different methods. Start with [RESULTS.md](RESULTS.md) for exact
+definitions, the public TP1 baseline, and both per-request median and
+token-weighted context bands.
+
+## Reproduce or inspect
+
+- [BUILD.md](BUILD.md) — native Python 3.12, CUDA 13.3, GCC 15, and NIXL build identity.
+- [RUN.md](RUN.md) — sanitized single-GPU launcher and the full runtime shape.
+- [RESULTS.md](RESULTS.md) — controlled, reasoning, real agentic, long-context, telemetry, and community comparison evidence.
+- [LIMITATIONS.md](LIMITATIONS.md) — what the measurements do and do not establish.
+- [PROVENANCE.md](PROVENANCE.md) — exact source lineage, local history, installed-package identity, and checkpoint hashes.
+- [benchmarks](benchmarks/) — sanitized agentic log, parsed CSV/JSON, and compact qualification summaries.
+
+The measured runtime source is
+`8e197ed3afc559f29562a2e7de9026f011f5d28f`, seven commits above upstream base
+`5a7b26c636deb2def43640bab6c63146dbe536dc`. At the 2026-08-24 provenance
+capture it was 210 commits behind fetched upstream `main`. Clone this frozen
+distribution to reproduce it; do not substitute current SGLang and call the
+result equivalent.
+
+HiCache/NIXL provides RAM/NVMe prefix persistence. It is documented because it
+is part of the complete deployment, but it is **not** credited for the active
+GPU decode rates above.
+
+---
+
+## Upstream SGLang README at the frozen source revision
+
 <div align="center" id="sglangtop">
 <img src="https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo.png" alt="logo" width="400" margin="10px"></img>
 
