@@ -1789,6 +1789,47 @@ def test_qsa_sparse_attention_matches_explicit_gqa():
     torch.testing.assert_close(actual, torch.stack(expected_rows), rtol=2e-2, atol=2e-2)
 
 
+def test_qsa_chunk_prefill_accepts_fp8_kv_cache():
+    if not torch.cuda.is_available():
+        return
+
+    from sglang.srt.layers.attention.qsa.sparse_attn import (
+        sparse_gqa_fwd_interface_triton_ck,
+    )
+
+    torch.manual_seed(11)
+    device = "cuda"
+    head_dim = 16
+    q = torch.randn(2, 2, head_dim, dtype=torch.bfloat16, device=device)
+    k = torch.randn(4, 1, head_dim, dtype=torch.bfloat16, device=device).to(
+        torch.float8_e4m3fn
+    )
+    v = torch.randn(4, 1, head_dim, dtype=torch.bfloat16, device=device).to(
+        torch.float8_e4m3fn
+    )
+    indices = torch.tensor(
+        [[0, 1, 2, -1], [0, 1, 2, 3]], dtype=torch.int32, device=device
+    )
+    cu_q = torch.tensor([0, 2], dtype=torch.int32, device=device)
+    cu_k = torch.tensor([0, 4], dtype=torch.int32, device=device)
+    kv_lens = torch.tensor([4], dtype=torch.int32, device=device)
+    scale = head_dim**-0.5
+
+    actual = sparse_gqa_fwd_interface_triton_ck(
+        q, k, v, indices, cu_q, cu_k, kv_lens, scale
+    )
+
+    expected_rows = []
+    for row, selected in enumerate((indices[0, :3], indices[1, :4])):
+        keys = k[selected.long()].float().repeat_interleave(2, dim=1)
+        values = v[selected.long()].float().repeat_interleave(2, dim=1)
+        scores = torch.einsum("hd,khd->hk", q[row].float(), keys) * scale
+        expected_rows.append(
+            torch.einsum("hk,khd->hd", scores.softmax(-1), values).to(torch.bfloat16)
+        )
+    torch.testing.assert_close(actual, torch.stack(expected_rows), rtol=3e-2, atol=3e-2)
+
+
 def test_qsa_mtp_step_out_cache_loc_matches_draft_forward_layout():
     """Each MTP draft step's metadata must reference the same out_cache_loc
     slice EAGLEWorker.draft_forward assigns for that step. The failure mode

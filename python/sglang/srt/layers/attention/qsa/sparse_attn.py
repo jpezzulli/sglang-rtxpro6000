@@ -96,12 +96,12 @@ def _sparse_gqa_prefill(
             k_base + token[None, :] * sk_n + offs_d[:, None] * sk_d,
             mask=valid[None, :],
             other=0.0,
-        )
+        ).to(q_values.dtype)
         values = tl.load(
             v_base + token[:, None] * sv_n + offs_d[None, :] * sv_d,
             mask=valid[:, None],
             other=0.0,
-        )
+        ).to(q_values.dtype)
         scores = tl.where(valid[None, :], tl.dot(q_values, keys), -float("inf"))
         next_max = tl.maximum(max_value, tl.max(scores, 1))
         alpha = tl.math.exp2(max_value - next_max)
@@ -237,12 +237,12 @@ def _sparse_gqa_chunk_prefill(
             k_base + token[None, :] * sk_n + offs_d[:, None] * sk_d,
             mask=valid[None, :],
             other=0.0,
-        )
+        ).to(q_values.dtype)
         values = tl.load(
             v_base + token[:, None] * sv_n + offs_d[None, :] * sv_d,
             mask=valid[:, None],
             other=0.0,
-        )
+        ).to(q_values.dtype)
         scores = tl.where(valid[None, :], tl.dot(q_values, keys), -float("inf"))
         next_max = tl.maximum(max_value, tl.max(scores, 1))
         alpha = tl.math.exp2(max_value - next_max)
