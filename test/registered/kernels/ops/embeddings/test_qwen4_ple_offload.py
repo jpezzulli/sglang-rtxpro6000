@@ -58,6 +58,7 @@ def _make_source_embedding(
     )
     return SimpleNamespace(
         weight=weight,
+        weight_scale=torch.ones(1, dtype=torch.bfloat16, device="cuda"),
         quant_config=None,
         enable_tp=True,
         use_attn_tp_group=False,
