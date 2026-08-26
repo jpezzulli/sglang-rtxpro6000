@@ -3707,10 +3707,11 @@ class ServerArgs:
     ] = None
 
     def get_draft_model_override_args(self) -> str:
+        cfg = resolving_view(self)
         return (
-            self.speculative_draft_model_override_args
-            if self.speculative_draft_model_override_args is not None
-            else self.json_model_override_args
+            cfg.speculative_draft_model_override_args
+            if cfg.speculative_draft_model_override_args is not None
+            else cfg.json_model_override_args
         )
 
     def __post_init__(self):

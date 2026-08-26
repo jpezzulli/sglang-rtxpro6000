@@ -24,9 +24,7 @@ def _draft_config_kwargs(server_args: ServerArgs) -> dict:
         if cfg.speculative_draft_model_override_args is not None
         else cfg.json_model_override_args
     )
-    kwargs = {
-        "model_override_args": json.loads(model_override_args)
-    }
+    kwargs = {"model_override_args": json.loads(model_override_args)}
     override_config_file = cfg.decrypted_draft_config_file
     if override_config_file and override_config_file.strip():
         kwargs["_configuration_file"] = override_config_file.strip()

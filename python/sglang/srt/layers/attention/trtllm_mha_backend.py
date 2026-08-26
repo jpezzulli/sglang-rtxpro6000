@@ -290,7 +290,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         ):
             self._xqa_spec_dec_mask = self._build_xqa_spec_dec_causal_mask(
                 max_bs=get_cuda_graph_max_batch_size(
-                    model_runner.server_args, model_runner.req_to_token_pool.size
+                    model_runner.req_to_token_pool.size
                 ),
                 q_len=self.speculative_num_draft_tokens,
                 device=self.device,
