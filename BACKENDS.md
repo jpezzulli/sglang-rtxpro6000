@@ -17,7 +17,7 @@ available path. Requested flags alone were not treated as resolution evidence.
 | Ordinary/tree state-writing verification | `TritonGDNKernel` | Preserved fallback | SM120 FlashInfer full-state gate deliberately retained |
 | Accepted-state recovery | FlashInfer WY output-only | Source | `280825c3e2`; recovery graphs BS 1-4 |
 | QSA sparse prefill | Triton sparse GQA | Model path | `95da38fb3b` unit-scale FP8 tile fix; long prefill |
-| QSA decode | TRTLLM-Gen | Source | `c1da0eef56` enables the supported SM120 sparse-decode dispatch |
+| QSA sparse decode on SM120 | FlashInfer QSA wrapper resolving to XQA | Source/wrapper dispatch | `c1da0eef56`; direct backend probe and live decode |
 | QSA top-k | `sgl-kernel` | Automatic | Startup args and live decode |
 | QSA MTP index sharing | Enabled | Model path | Startup log and shared-index tests |
 | Target MoE | FlashInfer CUTLASS | Automatic | SM120 modelopt-FP4 resolution in startup log |
@@ -54,12 +54,24 @@ available path. Requested flags alone were not treated as resolution evidence.
    `FlashInferGDNKernel (none-mode WY output-only)` describes the active special
    mode; it is not evidence of broad FlashInfer verification support.
 
-QSA decode had a similar wiring gap: the underlying TRTLLM-Gen sparse path was
-available, while SGLang's dispatch excluded SM120. Commit `c1da0eef56` narrows
-the supported architecture test and adds SM120 dispatch coverage. Commit
-`95da38fb3b` fixes FP8 sparse-prefill tile interpretation for the active
-unit-scale checkpoint. It does not carry the broader calibrated-scale work from
-open PR #36644.
+QSA decode is a distinct case. Commit `c1da0eef56` lets SM120 enter
+FlashInfer's page-aligned QSA wrapper, but the wrapper's SM12x dispatch selects
+XQA—not TRTLLM-Gen. The approximately 35% statement inherited from PR #36497
+was measured while the resolver was SM100-only and is not evidence for SM120.
+There is no matched end-to-end XQA-versus-fallback percentage claim here.
+
+Direct probing also established that TRTLLM-Gen is not merely hidden behind a
+conservative gate. Forced selection reports `Unsupported architecture`; after
+bypassing that guard, the CUDA driver rejects the exact QSA cubin with
+`CUDA_ERROR_NO_BINARY_FOR_GPU (209)`. It targets SM100 and contains the
+`sm10x_tcgen05` instruction family unavailable on SM120. Future support needs
+kernel/compiler adaptation upstream of SGLang; see
+[TensorRT-LLM #11799](https://github.com/NVIDIA/TensorRT-LLM/issues/11799) and
+[FlashInfer #3628](https://github.com/flashinfer-ai/flashinfer/issues/3628).
+
+Commit `95da38fb3b` separately fixes FP8 sparse-prefill tile interpretation for
+the active unit-scale checkpoint. It does not carry the broader
+calibrated-scale work from open PR #36644.
 
 Gates intentionally left untouched include FlashInfer state-writing GDN
 verification, FlashInfer HyperConnection Mix, inactive shared-expert fusion,

@@ -66,7 +66,8 @@ For Flash-Next, confirm log lines for:
 - 24 Mamba slots and zero intermediate speculative SSM;
 - `FlashInferGDNKernel` decode/prefill and
   `none-mode WY output-only` verification/recovery;
-- QSA TRTLLM-Gen decode, `sgl-kernel` top-k, and MTP index sharing;
+- QSA sparse decode through FlashInfer's wrapper resolving to XQA on SM120,
+  `sgl-kernel` top-k, and MTP index sharing;
 - target and native-MTP MoE resolved to FlashInfer CUTLASS;
 - recovery graphs for batch sizes 1-4;
 - attached KV, Mamba/PLE, and QSA HiCache pools.

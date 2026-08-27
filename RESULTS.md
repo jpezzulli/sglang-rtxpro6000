@@ -39,6 +39,10 @@ Source: `64ecd64924fee338e3bf846a32167cd604186827`.
 | Sealed agentic control | controlled request | 148.80 tok/s | normal API path |
 | Natural decode | 3,072 output | 162.05 tok/s | normal response |
 
+Flash-Next QSA sparse decode resolved to XQA inside FlashInfer's wrapper for
+this campaign. These measured results remain valid; they are not evidence for
+TRTLLM-Gen on SM120, and no matched end-to-end backend percentage is claimed.
+
 ### Four-request timing reconciliation
 
 The reported individual streams were 115.13, 127.56, 126.64, and 122.96

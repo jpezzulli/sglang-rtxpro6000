@@ -51,7 +51,7 @@ RecoverSSM, complete hybrid-state persistence, and three-axis fused mRoPE.
 | Local commit | Disposition / upstream relationship | Affected path | Why and focused evidence |
 |---|---|---|---|
 | `7e4c212f7d` | Adapted import from open PR [#36497](https://github.com/sgl-project/sglang/pull/36497) | Flash-Next/Qwen4, QSA, PLE, native MTP, HC | Day-zero model implementation. Imported QSA, HC, PLE, MTP, memory-pool and model tests; full Flash-Next qualification. |
-| `c1da0eef56` | Local bounded SM120 enablement | Flash-Next QSA decode | Routes the existing TRTLLM-Gen sparse-decode path on SM120; focused QSA dispatch tests plus live decode. |
+| `c1da0eef56` | Local bounded SM120 wrapper enablement | Flash-Next QSA decode | Routes SM120 into FlashInfer's page-aligned QSA wrapper, which resolves to XQA on SM12x; focused dispatch tests plus live decode. This does not enable TRTLLM-Gen. |
 | `a8c4404ef8` | Local runtime version; related project PR [#35583](https://github.com/sgl-project/sglang/pull/35583) closed unmerged | All speculative draft config loading; needed by 27B DFlash2 | Target and draft need independent Hugging Face overrides. `test_draft_model_override_args.py`. |
 | `94f362d1f2` | Local follow-up | Draftless custom speculation hooks | Preserves algorithm hooks when no draft checkpoint exists; covered by Flash-Next NEXTN startup/smoke, with no dedicated commit-local test. |
 | `512a95e329` | Local runtime version; open project PR [#35584](https://github.com/sgl-project/sglang/pull/35584) | Native JIT build | Passes fingerprinted `CXX` to NVCC `-ccbin`; JIT cache/toolchain regression. |
@@ -88,7 +88,7 @@ Status and head commits were queried directly from GitHub on 2026-08-27.
 |---|---|---|
 | [#30967](https://github.com/sgl-project/sglang/pull/30967) RecoverSSM | Open; `71c5de2e74c8e9b048bb62ab9cdadedb8ea83100` | Architectural basis adapted by `280825c3e2` |
 | [#35744](https://github.com/sgl-project/sglang/pull/35744) fused mRoPE | Open; `9b2e053ce0d203b368e68e915667295aea24df32` | Integrated by `64ecd64924` |
-| [#36497](https://github.com/sgl-project/sglang/pull/36497) Flash-Next | Open; `7c66045d71f067c1c5da2b85baad3c47d9a19cb7` | Day-zero import and local reconciliation |
+| [#36497](https://github.com/sgl-project/sglang/pull/36497) Flash-Next | Open; `7c66045d71f067c1c5da2b85baad3c47d9a19cb7` | Day-zero import and local reconciliation; its approximately 35% QSA decode statement was SM100-only and is not attributed to SM120 |
 | [#36644](https://github.com/sgl-project/sglang/pull/36644) FP8 QSA scales | Open; `67f705c55e30324f047decf773b0b82d04e1ecb0` | Broader than active unit-scale correction; not integrated |
 | [#35371](https://github.com/sgl-project/sglang/pull/35371) DFlash2 local convolution/selector | Merged 2026-08-19; `e5a3e4d30fa7abda95bafd2d697f9f9c48566114` | Already in integration base; core 27B DFlash2 path |
 | [#35496](https://github.com/sgl-project/sglang/pull/35496) quantized DFlash2 target head | Merged 2026-08-20; `1bb02535dcb0ab03d399fd25e1595076b1db409d` | Present in base; inactive for the BF16 target `lm_head` |

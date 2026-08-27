@@ -26,8 +26,8 @@ The important work is architectural, not merely a collection of launch flags:
   `gdn_mtp_cache_mode=none`.
 - FlashInfer GDN decode and prefill for Flash-Next, plus a deliberately narrow
   SM120 FlashInfer WY output-only RecoverSSM path.
-- QSA sparse attention: Triton sparse-GQA prefill, TRTLLM-Gen decode on SM120,
-  and `sgl-kernel` top-k.
+- QSA sparse attention: Triton sparse-GQA prefill, the FlashInfer QSA wrapper
+  resolving to XQA on SM120, and `sgl-kernel` top-k.
 - FlashInfer CUTLASS MoE for the Flash-Next target and native-MTP layer.
 - Correct three-axis multimodal mRoPE in the fused QK RMSNorm+RoPE kernel.
 - Target, draft, verify, prefill, and accepted-state recovery CUDA graphs.
@@ -76,7 +76,7 @@ executes or accumulates entirely in BF16.
 | Recurrent/GDN SSM state | FP32 | BF16 |
 | Convolution state | BF16 | BF16 |
 | MoE backend | Triton FP8 MoE; auto resolves to Triton with A2A `none` | FlashInfer CUTLASS for target and native MTP |
-| Target attention | FlashInfer prefill; TRTLLM-MHA/XQA decode and fixed-width verify | QSA Triton sparse prefill; TRTLLM-Gen sparse decode; general attention FlashInfer |
+| Target attention | FlashInfer prefill; TRTLLM-MHA/XQA decode and fixed-width verify | QSA Triton sparse prefill; FlashInfer QSA wrapper resolving to XQA for sparse decode; general attention FlashInfer |
 | Linear/GDN attention | Triton decode, prefill, and state-writing verify | FlashInfer decode/prefill; WY output-only verify/recovery in `none` mode |
 | Speculative backend | DFlash2, 8 draft tokens, 2,048-token window | native NEXTN, 3 steps, top-k 1, 4 draft tokens |
 | Served context | 524,288, factor-2 YaRN target and draft | 524,288, factor-2 YaRN |
@@ -127,7 +127,7 @@ this FP8 configuration resolves MoE to Triton.
 | Ordinary/tree state-writing verification | `TritonGDNKernel` | architecture gate deliberately preserved | non-`none` source dispatch and focused tests |
 | Accepted-state recovery | FlashInfer WY output-only | narrow SM120 RecoverSSM route | recovery graphs BS 1-4; long continuation |
 | QSA sparse prefill | Triton sparse GQA | model path + FP8 tile fix `95da38fb3b` | 64K/490K exact qualification |
-| QSA sparse decode | TRTLLM-Gen | SM120 dispatch correction `c1da0eef56` | focused dispatch test and live decode |
+| QSA sparse decode | FlashInfer QSA wrapper resolving to XQA | SM120 wrapper dispatch `c1da0eef56`; FlashInfer selects XQA on SM12x | direct backend probe and live decode |
 | QSA top-k | `sgl-kernel` | automatic | startup resolution |
 | QSA MTP index sharing | enabled | model path | startup line and shared-index tests |
 | Target MoE | FlashInfer CUTLASS | automatic ModelOpt-NVFP4 resolution | startup resolution and live tests |
@@ -161,14 +161,26 @@ three cases:
    batch sizes 1-4, mixed acceptance, positions 63/64/65, `extra_buffer`, prefix
    restoration, retraction, long continuation, and captured-graph replay.
 
-3. **Gate deliberately retained.** Ordinary FlashInfer state-writing target
-   verification remains gated on SM120. Full/tree state-writing verification
-   uses Triton. FlashInfer HyperConnection Mix also remains SM100-only; SM120
-   uses the qualified persistent Triton Mix. Shared-expert fusion and the
-   broader calibrated-scale QSA path are not claimed active.
+3. **QSA wrapper enabled, backend distinguished.** Commit `c1da0eef56` lets
+   SM120 enter FlashInfer's page-aligned QSA decode wrapper. On SM120 that
+   wrapper resolves to XQA, an existing supported implementation; it does not
+   select TRTLLM-Gen. The upstream approximately 35% statement from PR #36497
+   was recorded while this resolver was SM100-only and is not attributed to
+   Penny's SM120 results.
 
-Other bounded corrections follow the same rule. `c1da0eef56` routes SM120 into
-the already-supported TRTLLM-Gen QSA decode path. `0f159cd545` supplies XQA's
+4. **Incompatible gates deliberately retained.** Forced TRTLLM-Gen fails with
+   `Unsupported architecture`. Bypassing the guard and loading the exact
+   BF16-Q/FP8-KV/H256/P64 cubin directly returns
+   `CUDA_ERROR_NO_BINARY_FOR_GPU (209)`: the binary targets SM100 and contains
+   the `sm10x_tcgen05` instruction family unavailable on SM120. Supporting it
+   would require kernel/compiler adaptation upstream of SGLang; see
+   [TensorRT-LLM #11799](https://github.com/NVIDIA/TensorRT-LLM/issues/11799)
+   and [FlashInfer #3628](https://github.com/flashinfer-ai/flashinfer/issues/3628).
+   Ordinary FlashInfer state-writing GDN verification also remains gated and
+   uses Triton, while FlashInfer HyperConnection Mix remains SM100-only and
+   falls back to the qualified persistent Triton Mix.
+
+Other bounded corrections follow the same rule. `0f159cd545` supplies XQA's
 packed mask for fixed-width DFlash2 verification rather than enabling a new
 global attention backend. `64ecd64924` extends the fused rotary kernel to real
 three-axis mRoPE rather than dropping the fused path or ignoring H/W positions.
@@ -224,6 +236,8 @@ The four individual post-first-token rates were 115.13, 127.56, 126.64, and
 122.96 tok/s. They do **not** sum to 427.54 because they use each stream's own
 post-first-token interval. The aggregate is the matched batch metric:
 `4,096 output tokens / 9.580393 seconds`, including TTFT and the batch tail.
+These results were measured with QSA sparse decode resolving to XQA. No matched
+SM120 end-to-end A/B supports a percentage claim against another QSA backend.
 
 ### Qwen3.8-27B/DFlash2 dated performance campaign
 

@@ -53,6 +53,10 @@ reconciled against the active upstream base. Bounded Qwen4, QSA, RecoverSSM,
 HiCache, PLE, and mRoPE corrections were layered on that same source. Exact
 relationships and PR status are in [CHANGES.md](CHANGES.md).
 
+PR #36497's approximately 35% QSA decode statement originated while its
+resolver was SM100-only. Penny's SM120 wrapper dispatch resolves to XQA, so the
+SM100 TRTLLM-Gen attribution is not part of this runtime's provenance.
+
 ## Evidence handling
 
 This repository contains compact, non-private summaries only. Raw service
