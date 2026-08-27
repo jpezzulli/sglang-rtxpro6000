@@ -1523,6 +1523,12 @@ class HybridReqToTokenPool(ReqToTokenPool):
         return self.get_mamba_indices(req_indices)
 
     def get_ngram_context(self, ngram_indices: torch.Tensor) -> torch.Tensor:
+        # HiCache restores slot-indexed PLE state on the same H->D stream as
+        # Mamba, before recording the first layer-done event.  PLE builds its
+        # shared N-gram batch before entering any decoder layer, so it cannot
+        # rely on short_conv_layer_cache()'s per-layer wait to order this read.
+        if self.layer_transfer_counter is not None:
+            self.layer_transfer_counter.wait_until(0)
         return self.ngram_pool.get_context(ngram_indices)
 
     def set_ngram_context(

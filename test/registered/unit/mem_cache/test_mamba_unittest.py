@@ -677,6 +677,31 @@ class TestMamba(unittest.TestCase):
         pool = self._setup_pool_with_ngram()
         self.assertEqual(len(pool.mamba_pool._slot_siblings), 1)
 
+    def test_ngram_read_waits_for_hicache_slot_sibling_restore(self):
+        """PLE reads N-gram state before any decoder layer can order H->D load."""
+        calls = []
+
+        class Counter:
+            def wait_until(self, layer_id):
+                calls.append(("wait", layer_id))
+
+        class NGram:
+            def get_context(self, indices):
+                calls.append(("read", indices.clone()))
+                return torch.tensor([[11, 12]], dtype=torch.long)
+
+        pool = object.__new__(HybridReqToTokenPool)
+        pool.layer_transfer_counter = Counter()
+        pool.ngram_pool = NGram()
+        indices = torch.tensor([3], dtype=torch.long)
+
+        result = pool.get_ngram_context(indices)
+
+        self.assertEqual(calls[0], ("wait", 0))
+        self.assertEqual(calls[1][0], "read")
+        self.assertTrue(torch.equal(calls[1][1], indices))
+        self.assertTrue(torch.equal(result, torch.tensor([[11, 12]])))
+
     def test_ngram_clear_slots_resets_window(self):
         """A recycled slot must not carry its previous owner's N-gram window.
 
