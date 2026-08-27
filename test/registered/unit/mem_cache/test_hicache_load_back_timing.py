@@ -123,6 +123,38 @@ class TestLoadBackDurationMetric(CustomTestCase):
         stub.metrics_collector.observe_load_back_duration.assert_not_called()
         self.assertEqual(stub.cache_controller.ack_load_queue, [])
 
+    def test_slot_siblings_restore_before_layer_release(self):
+        calls = []
+
+        class HostPool:
+            layer_num = 2
+
+            def load_slot_siblings_to_device(self, *args):
+                calls.append("siblings")
+
+            def load_to_device_per_layer(
+                self,
+                device_pool,
+                host_indices,
+                device_indices,
+                layer_id,
+                *args,
+                **kwargs,
+            ):
+                calls.append(f"layer-{layer_id}")
+
+        transfer = self.transfer.L2Transfer(
+            host_pool=HostPool(),
+            device_pool=object(),
+            host_indices=torch.tensor([0], dtype=torch.int64),
+            device_indices=torch.tensor([1], dtype=torch.int64),
+        )
+        engine = self.transfer.L2TransferEngine("kernel")
+        completion = engine.submit_host_to_device([transfer], layer_num=2)
+        completion.finish_event.synchronize()
+
+        self.assertEqual(calls, ["siblings", "layer-0", "layer-1"])
+
 
 if __name__ == "__main__":
     unittest.main()

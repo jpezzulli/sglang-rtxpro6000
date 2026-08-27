@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -36,6 +37,30 @@ if _is_cuda or _is_hip:
     )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _SlotSiblingHostSpec:
+    name: str
+    device_layers: torch.Tensor
+    slot_axis: int
+    host_buffer: Optional[torch.Tensor] = None
+
+    @property
+    def num_layers(self) -> int:
+        return int(self.device_layers.shape[0])
+
+    @property
+    def item_shape(self) -> tuple[int, ...]:
+        return tuple(int(dim) for dim in self.device_layers.shape[2:])
+
+    @property
+    def item_numel(self) -> int:
+        return int(np.prod(self.item_shape))
+
+    @property
+    def bytes_per_slot(self) -> int:
+        return self.num_layers * self.item_numel * self.device_layers.dtype.itemsize
 
 
 class MambaPoolHost(HostKVCache):
@@ -74,6 +99,7 @@ class MambaPoolHost(HostKVCache):
         self.conv_dtype = device_pool.mamba_cache.conv[0].dtype
         self.temporal_dtype = device_pool.mamba_cache.temporal.dtype
         self.dtype = self.conv_dtype
+        self.slot_sibling_specs = self._collect_slot_sibling_specs(device_pool)
         self.size_per_token = self.get_size_per_token()
 
         if host_size > 0:
@@ -132,6 +158,38 @@ class MambaPoolHost(HostKVCache):
         self.lock = threading.RLock()
         self.clear()
 
+    @staticmethod
+    def _collect_slot_sibling_specs(device_pool) -> list[_SlotSiblingHostSpec]:
+        specs = []
+        names = set()
+        for sibling in getattr(device_pool, "_slot_siblings", ()):
+            name, tensor, slot_axis = sibling.hicache_transfer_spec()
+            if name in names:
+                raise ValueError(f"Duplicate HiCache slot-sibling name: {name}")
+            if slot_axis == 0:
+                device_layers = tensor.unsqueeze(0)
+            elif slot_axis == 1:
+                device_layers = tensor
+            else:
+                raise ValueError(
+                    f"HiCache slot sibling {name!r} has unsupported slot axis "
+                    f"{slot_axis}; expected 0 or 1"
+                )
+            if device_layers.ndim < 3 or not device_layers.is_contiguous():
+                raise ValueError(
+                    f"HiCache slot sibling {name!r} must normalize to a contiguous "
+                    f"[layers, slots, ...] tensor, got shape={tuple(device_layers.shape)}"
+                )
+            specs.append(
+                _SlotSiblingHostSpec(
+                    name=name,
+                    device_layers=device_layers,
+                    slot_axis=slot_axis,
+                )
+            )
+            names.add(name)
+        return specs
+
     def init_kv_buffer(self):
         _host_alloc = ALLOC_MEMORY_FUNCS[self.device_pool.device]
 
@@ -174,6 +232,14 @@ class MambaPoolHost(HostKVCache):
                         allocator=self.allocator,
                     )
                 )
+            for spec in self.slot_sibling_specs:
+                spec.host_buffer = alloc_func(
+                    (self.size, spec.num_layers, 1) + spec.item_shape,
+                    dtype=spec.device_layers.dtype,
+                    device=self.device,
+                    pin_memory=self.pin_memory,
+                    allocator=self.allocator,
+                )
         else:
             # layer-first: (num_layers, size, *shape)
             temporal_dims = (
@@ -199,11 +265,25 @@ class MambaPoolHost(HostKVCache):
                         allocator=self.allocator,
                     )
                 )
+            for spec in self.slot_sibling_specs:
+                spec.host_buffer = alloc_func(
+                    (spec.num_layers, self.size) + spec.item_shape,
+                    dtype=spec.device_layers.dtype,
+                    device=self.device,
+                    pin_memory=self.pin_memory,
+                    allocator=self.allocator,
+                )
         # destroy() unregisters via kv_buffer; without this list the pinned
         # registrations leak past the buffers' mmap. 0-element buffers
         # (conv-only models' temporal state) were never registered.
         return [
-            buf for buf in (self.temporal_buffer, *self.conv_buffer) if buf.numel() > 0
+            buf
+            for buf in (
+                self.temporal_buffer,
+                *self.conv_buffer,
+                *(spec.host_buffer for spec in self.slot_sibling_specs),
+            )
+            if buf is not None and buf.numel() > 0
         ]
 
     def _init_write_back_staging_buffers(self):
@@ -218,18 +298,34 @@ class MambaPoolHost(HostKVCache):
         self._conv_can_use_jit = [False] * len(self.conv_buffer)
 
     def get_hybrid_pool_buffer(self):
-        # Expose all mamba host tensors that need Mooncake buffer registration.
-        return [self.temporal_buffer, *self.conv_buffer]
+        # Expose all Mamba host tensors that need storage-backend registration.
+        return [
+            self.temporal_buffer,
+            *self.conv_buffer,
+            *(spec.host_buffer for spec in self.slot_sibling_specs),
+        ]
+
+    def get_storage_component_names(self) -> list[str]:
+        names = []
+        if self.temporal_state_elem_size > 0:
+            names.append("temporal")
+        names.extend(f"conv_{i}" for i in range(len(self.conv_buffer)))
+        names.extend(spec.name for spec in self.slot_sibling_specs)
+        return names
 
     def _iter_page_tensors(self, index: int):
         if self.layout in ["page_first", "page_first_direct"]:
             yield self.temporal_buffer[index]
             for conv_buf in self.conv_buffer:
                 yield conv_buf[index]
+            for spec in self.slot_sibling_specs:
+                yield spec.host_buffer[index]
         else:
             yield self.temporal_buffer[:, index : index + self.page_size]
             for conv_buf in self.conv_buffer:
                 yield conv_buf[:, index : index + self.page_size]
+            for spec in self.slot_sibling_specs:
+                yield spec.host_buffer[:, index : index + self.page_size]
 
     @staticmethod
     def _flatten_tensor_bytes(tensor: torch.Tensor) -> torch.Tensor:
@@ -278,7 +374,9 @@ class MambaPoolHost(HostKVCache):
             for conv_elem_size in self.conv_state_elem_sizes
         )
         temporal_size = self.temporal_state_elem_size * self.temporal_dtype.itemsize
-        return (conv_total_size + temporal_size) * self.num_mamba_layers
+        return (conv_total_size + temporal_size) * self.num_mamba_layers + sum(
+            spec.bytes_per_slot for spec in self.slot_sibling_specs
+        )
 
     def get_ksize_per_token(self):
         return self.get_size_per_token()
@@ -453,6 +551,27 @@ class MambaPoolHost(HostKVCache):
                     io_backend,
                 )
 
+    def load_slot_siblings_to_device(
+        self, device_pool, host_indices, device_indices, io_backend="kernel"
+    ) -> None:
+        """Restore slot-indexed PLE state before any layer is released."""
+        if not self.slot_sibling_specs:
+            return
+        host_slots = host_indices.to("cpu").tolist()
+        device_slots = device_indices.to("cpu").tolist()
+        for spec in self.slot_sibling_specs:
+            host_buffer = spec.host_buffer
+            assert host_buffer is not None
+            for host_slot, device_slot in zip(host_slots, device_slots):
+                if self.layout in ["page_first", "page_first_direct"]:
+                    spec.device_layers[:, device_slot].copy_(
+                        host_buffer[host_slot].squeeze(1), non_blocking=True
+                    )
+                else:
+                    spec.device_layers[:, device_slot].copy_(
+                        host_buffer[:, host_slot], non_blocking=True
+                    )
+
     def backup_from_device_all_layer(
         self, device_pool, host_indices, device_indices, io_backend="kernel"
     ):
@@ -498,6 +617,20 @@ class MambaPoolHost(HostKVCache):
                         device_indices,
                         host_indices,
                         io_backend,
+                    )
+        host_slots = host_indices.to("cpu").tolist()
+        device_slots = device_indices.to("cpu").tolist()
+        for spec in self.slot_sibling_specs:
+            host_buffer = spec.host_buffer
+            assert host_buffer is not None
+            for host_slot, device_slot in zip(host_slots, device_slots):
+                if self.layout in ["page_first", "page_first_direct"]:
+                    host_buffer[host_slot].squeeze(1).copy_(
+                        spec.device_layers[:, device_slot], non_blocking=True
+                    )
+                else:
+                    host_buffer[:, host_slot].copy_(
+                        spec.device_layers[:, device_slot], non_blocking=True
                     )
 
     def get_data_page(self, index, flat: bool = True) -> torch.Tensor:
@@ -549,6 +682,9 @@ class MambaPoolHost(HostKVCache):
         # Compute base pointers once; each page pointer is offset from these bases.
         temporal_base_ptr = self.temporal_buffer.data_ptr()
         conv_base_ptrs = [buf.data_ptr() for buf in self.conv_buffer]
+        sibling_base_ptrs = [
+            spec.host_buffer.data_ptr() for spec in self.slot_sibling_specs
+        ]
         # Component sizes are constant across pages, so precompute once as well.
         temporal_element_size = (
             self.page_size
@@ -564,6 +700,9 @@ class MambaPoolHost(HostKVCache):
                 * self.conv_state_elem_sizes[i]
             )
             for i in range(len(self.conv_state_shapes))
+        ]
+        sibling_element_sizes = [
+            self.page_size * spec.bytes_per_slot for spec in self.slot_sibling_specs
         ]
 
         for i in range(0, len(indices), self.page_size):
@@ -591,6 +730,10 @@ class MambaPoolHost(HostKVCache):
                 )
                 ptr_list.append(conv_ptr)
                 element_size_list.append(conv_element_sizes[j])
+            for j, spec in enumerate(self.slot_sibling_specs):
+                sibling_ptr = sibling_base_ptrs[j] + indices[i] * spec.bytes_per_slot
+                ptr_list.append(sibling_ptr)
+                element_size_list.append(sibling_element_sizes[j])
         return ptr_list, element_size_list
 
     def is_stride_page_aligned(self, page_size_bytes: int = 4096) -> bool:
@@ -610,5 +753,12 @@ class MambaPoolHost(HostKVCache):
             if buf.data_ptr() % page_size_bytes != 0:
                 return False
             if conv_stride % page_size_bytes != 0:
+                return False
+        for spec in self.slot_sibling_specs:
+            host_buffer = spec.host_buffer
+            assert host_buffer is not None
+            if host_buffer.data_ptr() % page_size_bytes != 0:
+                return False
+            if spec.bytes_per_slot % page_size_bytes != 0:
                 return False
         return True

@@ -198,12 +198,23 @@ class HiCacheNixl(HiCacheStorage):
         return [self._get_component_key(key, pool_name) for key in keys]
 
     def _get_hybrid_component_keys(
-        self, keys: List[str], pool_name: PoolName, key_multiplier: int
+        self,
+        keys: List[str],
+        pool_name: PoolName,
+        key_multiplier: int,
+        component_names: Optional[List[str]] = None,
     ) -> List[str]:
         if key_multiplier == 1:
             return self._get_component_keys(keys, pool_name)
 
-        if pool_name == PoolName.MAMBA:
+        if component_names is not None:
+            if len(component_names) != key_multiplier:
+                raise ValueError(
+                    f"Pool {pool_name} exposed {len(component_names)} component "
+                    f"names for multiplier {key_multiplier}"
+                )
+            suffixes = [f"_{pool_name}_{name}" for name in component_names]
+        elif pool_name == PoolName.MAMBA:
             suffixes = [f"_{pool_name}_temporal"] + [
                 f"_{pool_name}_conv_{i}" for i in range(key_multiplier - 1)
             ]
@@ -508,8 +519,11 @@ class HiCacheNixl(HiCacheStorage):
             )
             return [], [], 0
         key_multiplier = len(ptr_list) // page_num
+        component_names = getattr(
+            ctx.host_pool, "get_storage_component_names", lambda: None
+        )()
         key_strs = self._get_hybrid_component_keys(
-            transfer.keys or [], transfer.name, key_multiplier
+            transfer.keys or [], transfer.name, key_multiplier, component_names
         )
         if len(key_strs) != len(ptr_list):
             logger.error(
@@ -940,7 +954,15 @@ class HiCacheNixl(HiCacheStorage):
                 else 1
             )
             component_keys = self._get_hybrid_component_keys(
-                keys[:kv_pages], transfer.name, key_multiplier
+                keys[:kv_pages],
+                transfer.name,
+                key_multiplier,
+                (
+                    ctx.host_pool.get_storage_component_names()
+                    if ctx.is_zero_copy
+                    and hasattr(ctx.host_pool, "get_storage_component_names")
+                    else None
+                ),
             )
             exists_results = self._query_keys_exist(component_keys)
             page_exists = self._page_results(exists_results, key_multiplier)

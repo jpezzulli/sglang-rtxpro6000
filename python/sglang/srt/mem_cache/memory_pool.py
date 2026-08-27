@@ -1211,7 +1211,11 @@ class MambaPool:
         return subdims_per_tensor
 
     def get_kv_size_bytes(self):
-        return self.mamba_cache.mem_usage_bytes()
+        sibling_bytes = 0
+        for sibling in self._slot_siblings:
+            _, tensor, _ = sibling.hicache_transfer_spec()
+            sibling_bytes += get_tensor_size_bytes(tensor)
+        return self.mamba_cache.mem_usage_bytes() + sibling_bytes
 
 
 class HybridReqToTokenPool(ReqToTokenPool):

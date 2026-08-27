@@ -85,6 +85,20 @@ class L2TransferEngine:
         with device_module.stream(self.host_to_device_stream):
             start_event.wait(self.host_to_device_stream)
             ack_start.record()
+            # Slot-indexed side state (for example Qwen4 PLE short-conv and
+            # n-gram context) is consumed outside the layer-local attention
+            # load points. Restore it before releasing any per-layer event.
+            for transfer in transfers:
+                load_slot_siblings = getattr(
+                    transfer.host_pool, "load_slot_siblings_to_device", None
+                )
+                if load_slot_siblings is not None:
+                    load_slot_siblings(
+                        transfer.device_pool,
+                        transfer.host_indices,
+                        transfer.device_indices,
+                        self.io_backend,
+                    )
             for layer_id in range(layer_num):
                 for transfer in transfers:
                     local_layer_id = (

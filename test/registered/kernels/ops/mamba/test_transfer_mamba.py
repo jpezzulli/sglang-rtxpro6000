@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from sglang.srt.mem_cache.ple_state_pool import NGramPool, ShortConvPool
 from sglang.srt.mem_cache.pool_host.mamba import MambaPoolHost
 from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
 
@@ -43,6 +44,8 @@ def make_device_pool(dtype, device=DEVICE):
         mamba_cache=mamba_cache,
         size=SIZE,
         device=device,
+        num_mamba_layers=NUM_LAYERS,
+        _slot_siblings=(),
     )
 
 
@@ -68,6 +71,7 @@ def make_host_pool(dtype, layout):
     host.conv_dtype = dtype
     host.temporal_dtype = dtype
     host.dtype = dtype
+    host.slot_sibling_specs = []
     host.size_per_token = host.get_size_per_token()
 
     # Allocate host buffers (page_first layout)
@@ -124,6 +128,7 @@ def assert_host_mock_complete(host):
         "conv_dtype",
         "temporal_dtype",
         "dtype",
+        "slot_sibling_specs",
         "size_per_token",
         "temporal_buffer",
         "conv_buffer",
@@ -343,6 +348,73 @@ def test_mamba_kernel_full_indices(dtype, layout):
         )
     torch.cuda.synchronize()
     assert_device_matches_host(host, device_pool, host_indices, load_indices)
+
+
+def test_mamba_kernel_ple_slot_siblings_roundtrip_and_page_payload():
+    """HiCache carries Qwen4 PLE short-conv and n-gram slot state with GDN."""
+    device_pool = make_device_pool(torch.bfloat16)
+    short_conv = ShortConvPool(
+        size=SIZE,
+        state_shape=(3, 4),
+        layer_ids=[0, 1],
+        dtype=torch.bfloat16,
+        device=DEVICE,
+    )
+    ngram = NGramPool(
+        size=SIZE,
+        context_len=5,
+        eos_token_id=248044,
+        device=DEVICE,
+    )
+    device_pool._slot_siblings = (short_conv, ngram)
+    host = MambaPoolHost(
+        device_pool=device_pool,
+        host_to_device_ratio=1.0,
+        host_size=0,
+        pin_memory=True,
+        layout="page_first",
+    )
+
+    source = torch.tensor([1, 5, 10], dtype=torch.int64, device=DEVICE)
+    host_indices = torch.tensor([0, 1, 2], dtype=torch.int64)
+    destination = torch.tensor([3, 7, 12], dtype=torch.int64, device=DEVICE)
+    short_values = torch.arange(
+        2 * len(source) * 3 * 4, dtype=torch.bfloat16, device=DEVICE
+    ).reshape(2, len(source), 3, 4)
+    ngram_values = torch.arange(
+        len(source) * 5, dtype=torch.int64, device=DEVICE
+    ).reshape(len(source), 5)
+    short_conv.conv_state[:, source] = short_values
+    ngram.context[source] = ngram_values
+
+    host.backup_from_device_all_layer(
+        device_pool, host_indices, source, io_backend="kernel"
+    )
+    torch.cuda.synchronize()
+
+    short_conv.conv_state[:, destination] = 0
+    ngram.context[destination] = ngram.eos_token_id
+    host.load_slot_siblings_to_device(
+        device_pool, host_indices, destination, io_backend="kernel"
+    )
+    torch.cuda.synchronize()
+    torch.testing.assert_close(short_conv.conv_state[:, destination], short_values)
+    torch.testing.assert_close(ngram.context[destination], ngram_values)
+
+    self_contained_page = host.get_data_page(0).clone()
+    for tensor in host._iter_page_tensors(0):
+        tensor.zero_()
+    host.set_from_flat_data_page(0, self_contained_page)
+    torch.testing.assert_close(host.get_data_page(0), self_contained_page)
+    assert host.get_dummy_flat_data_page().numel() == host.size_per_token
+    assert host.get_storage_component_names() == [
+        "temporal",
+        "conv_0",
+        "ple_short_conv",
+        "ple_ngram",
+    ]
+    assert not host.is_stride_page_aligned(4096)
+    host.destroy()
 
 
 if __name__ == "__main__":

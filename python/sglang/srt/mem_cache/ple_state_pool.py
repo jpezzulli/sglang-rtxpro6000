@@ -38,6 +38,10 @@ class SlotIndexedState(Protocol):
 
     def load_cpu_slots(self, data: Any, indices: torch.Tensor) -> None: ...
 
+    def hicache_transfer_spec(self) -> Tuple[str, torch.Tensor, int]:
+        """Return ``(stable_name, tensor, slot_axis)`` for HiCache persistence."""
+        ...
+
 
 class ShortConvPool:
     def __init__(
@@ -127,6 +131,10 @@ class ShortConvPool:
         if self.conv_state is None or data is None:
             return
         self.conv_state[:, indices] = data.to(self.conv_state.device, non_blocking=True)
+
+    def hicache_transfer_spec(self) -> Tuple[str, torch.Tensor, int]:
+        assert self.conv_state is not None
+        return "ple_short_conv", self.conv_state, 1
 
 
 class NGramPool:
@@ -222,3 +230,7 @@ class NGramPool:
         self.context[indices.to(dtype=torch.long)] = data.to(
             self.context.device, non_blocking=True
         )
+
+    def hicache_transfer_spec(self) -> Tuple[str, torch.Tensor, int]:
+        assert self.context is not None
+        return "ple_ngram", self.context, 0
