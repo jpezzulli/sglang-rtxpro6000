@@ -26,6 +26,7 @@ from sglang.srt.mem_cache.pool_host.mha import (
     get_mha_host_pool_cls,
 )
 from sglang.srt.mem_cache.pool_host.mla import MLATokenToKVPoolHost
+from sglang.srt.mem_cache.pool_host.qsa import QSACompressedPoolHost
 from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
 from sglang.srt.runtime_context import (
     get_memory,
@@ -698,6 +699,7 @@ def build_hybrid_mamba_stack(
     server_args: ServerArgs,
     kv_pool: Any,
     mamba_pool: Any,
+    qsa_pool: Any = None,
     full_layer_mapping: dict[int, int],
     mamba_layer_mapping: dict[int, int],
     load_cache_event,
@@ -715,11 +717,56 @@ def build_hybrid_mamba_stack(
     mtp_draft_device_pools = tuple(
         pool.full_kv_pool for pool in params.mtp_draft_device_pools
     )
+    mtp_qsa_device_pools = tuple(
+        pool
+        for pool in params.mtp_draft_device_pools
+        if hasattr(pool, "qsa_compressed_k_buffer_pool")
+    )
     kv_host_size, mamba_host_size = None, 0
     if get_memory().hicache_size > 0:
-        kv_host_size, mamba_host_size = _split_hicache_size(
-            get_memory().hicache_size, (kv_pool, mamba_pool)
-        )
+        if qsa_pool is None:
+            kv_host_size, mamba_host_size = _split_hicache_size(
+                get_memory().hicache_size, (kv_pool, mamba_pool)
+            )
+        else:
+            qsa_pools = (qsa_pool, *mtp_qsa_device_pools)
+            kv_device_bytes = sum(kv_pool.get_kv_size_bytes()) + sum(
+                sum(pool.get_kv_size_bytes()) for pool in mtp_draft_device_pools
+            )
+            qsa_device_bytes = sum(
+                tensor.numel() * tensor.element_size()
+                for pool in qsa_pools
+                for tensor in pool.qsa_compressed_k_buffer_pool
+            )
+            mamba_device_bytes = mamba_pool.get_kv_size_bytes()
+            total_device_bytes = (
+                kv_device_bytes + qsa_device_bytes + mamba_device_bytes
+            )
+            mamba_host_size = (
+                get_memory().hicache_size
+                * mamba_device_bytes
+                / total_device_bytes
+            )
+            kv_qsa_budget = get_memory().hicache_size - mamba_host_size
+            kv_bytes_per_token = (
+                kv_pool.head_dim
+                * kv_pool.head_num
+                * (
+                    kv_pool.layer_num
+                    + sum(pool.layer_num for pool in mtp_draft_device_pools)
+                )
+                * kv_pool.store_dtype.itemsize
+                * 2
+            )
+            qsa_bytes_per_token = QSACompressedPoolHost.bytes_per_full_token(
+                qsa_pools
+            )
+            host_tokens = int(
+                kv_qsa_budget
+                * 1e9
+                // (kv_bytes_per_token + qsa_bytes_per_token)
+            )
+            kv_host_size = host_tokens * kv_bytes_per_token / 1e9
     kv_host_pool = build_kv_host_pool(
         kv_pool=kv_pool,
         page_size=params.page_size,
@@ -764,6 +811,25 @@ def build_hybrid_mamba_stack(
             device_free_fn=mamba_allocator.free,
         ),
     ]
+    if qsa_pool is not None:
+        qsa_host_pool = QSACompressedPoolHost(
+            qsa_pool,
+            kv_host_pool,
+            get_memory().hicache_mem_layout,
+            draft_device_pools=mtp_qsa_device_pools,
+            allocator_type=_get_allocator_type(),
+        )
+        entries.append(
+            build_pool_entry(
+                name=PoolName.QSA_COMPRESSED,
+                host_pool=qsa_host_pool,
+                device_pool=qsa_pool,
+                layer_mapping=full_layer_mapping,
+                transfer_layer_num=transfer_layer_num
+                + len(mtp_qsa_device_pools),
+                packed_draft_device_pools=mtp_qsa_device_pools,
+            )
+        )
     host_pool_group = HostPoolGroup(entries)
     cache_controller = HybridCacheController(
         params.token_to_kv_pool_allocator,
@@ -1309,6 +1375,11 @@ class _MambaStrategy(StackStrategy):
             server_args=server_args,
             kv_pool=kvcache.full_kv_pool,
             mamba_pool=params.req_to_token_pool.mamba_pool,
+            qsa_pool=(
+                kvcache
+                if hasattr(kvcache, "qsa_compressed_k_buffer_pool")
+                else None
+            ),
             full_layer_mapping=full_layer_mapping,
             mamba_layer_mapping=mamba_layer_mapping,
             load_cache_event=load_cache_event,
@@ -1321,6 +1392,15 @@ class _MambaStrategy(StackStrategy):
             storage_backend_extra_config=storage_backend_extra_config,
             enable_storage_metrics=enable_storage_metrics,
         )
+        sidecars = []
+        if PoolName.QSA_COMPRESSED in host_pool_group.entry_map:
+            sidecars.append(
+                SidecarPoolSpec(
+                    pool_name=PoolName.QSA_COMPRESSED,
+                    indices_from_pool=PoolName.KV,
+                    hit_policy=PoolHitPolicy.ALL_PAGES,
+                )
+            )
         return StackBuildResult(
             host_pool_group=host_pool_group,
             cache_controller=cache_controller,
@@ -1329,8 +1409,13 @@ class _MambaStrategy(StackStrategy):
                 ComponentType.MAMBA: host_pool_group.get_pool(PoolName.MAMBA),
             },
             register_req_to_token_counter=True,
+            sidecars=sidecars,
             transfer_layer_num=len(full_layer_mapping | mamba_layer_mapping),
-            pools_desc="KV + MAMBA",
+            pools_desc=(
+                "KV + MAMBA + QSA compressed"
+                if sidecars
+                else "KV + MAMBA"
+            ),
         )
 
 
