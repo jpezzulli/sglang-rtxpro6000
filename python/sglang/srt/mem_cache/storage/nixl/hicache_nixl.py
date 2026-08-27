@@ -64,6 +64,8 @@ class _HybridPoolContext:
     bounce_set: Optional[torch.Tensor] = None
     bounce_get: Optional[torch.Tensor] = None
     bounce_page_bytes: int = 0
+    bounce_payload_bytes: int = 0
+    bounce_payload_dtype: Optional[torch.dtype] = None
 
 
 class HiCacheNixl(HiCacheStorage):
@@ -436,23 +438,36 @@ class HiCacheNixl(HiCacheStorage):
             )
         else:
             sample = host_pool.get_dummy_flat_data_page()
-            page_numel = sample.numel()
-            page_bytes = page_numel * sample.element_size()
+            payload_bytes = sample.numel() * sample.element_size()
+            transfer_bytes = (
+                ((payload_bytes + 4095) // 4096) * 4096
+                if self.needs_page_alignment
+                else payload_bytes
+            )
+            payload_dtype = sample.dtype
             del sample
 
             pin_memory = bool(getattr(host_pool, "pin_memory", False))
             bounce_set = self._alloc_registered(
-                page_numel, host_pool.dtype, pin_memory, f"{host_pool_name}_bounce_set"
+                transfer_bytes,
+                torch.uint8,
+                pin_memory,
+                f"{host_pool_name}_bounce_set",
             )
             bounce_get = self._alloc_registered(
-                page_numel, host_pool.dtype, pin_memory, f"{host_pool_name}_bounce_get"
+                transfer_bytes,
+                torch.uint8,
+                pin_memory,
+                f"{host_pool_name}_bounce_get",
             )
             self._hybrid_pool_ctx[host_pool_name] = _HybridPoolContext(
                 host_pool=host_pool,
                 is_zero_copy=False,
                 bounce_set=bounce_set,
                 bounce_get=bounce_get,
-                bounce_page_bytes=page_bytes,
+                bounce_page_bytes=transfer_bytes,
+                bounce_payload_bytes=payload_bytes,
+                bounce_payload_dtype=payload_dtype,
             )
 
         logger.info(
@@ -586,7 +601,18 @@ class HiCacheNixl(HiCacheStorage):
         if for_write:
             for i, page_offset in enumerate(page_offsets):
                 src = host_pool.get_data_page(page_offset, flat=True)
-                bounce[i].copy_(src)
+                src_bytes = src.contiguous().view(torch.uint8).reshape(-1)
+                if src_bytes.numel() != ctx.bounce_payload_bytes:
+                    logger.error(
+                        "HiCacheNixl: hybrid pool %s payload size changed: "
+                        "expected %s bytes, got %s",
+                        transfer.name,
+                        ctx.bounce_payload_bytes,
+                        src_bytes.numel(),
+                    )
+                    return host_pool, [], [], [], 0
+                bounce[i].zero_()
+                bounce[i, : ctx.bounce_payload_bytes].copy_(src_bytes)
 
         host_buffers = self._get_bounce_slot_buffers(
             bounce, ctx.bounce_page_bytes, len(page_offsets)
@@ -1079,7 +1105,10 @@ class HiCacheNixl(HiCacheStorage):
                     ):
                         if not ok:
                             break
-                        host_pool.set_from_flat_data_page(page_offset, data_page)
+                        payload = data_page[: ctx.bounce_payload_bytes].view(
+                            ctx.bounce_payload_dtype
+                        )
+                        host_pool.set_from_flat_data_page(page_offset, payload)
                 pool_results.extend(page_results)
                 if len(page_results) != batch_pages or not all(page_results):
                     break

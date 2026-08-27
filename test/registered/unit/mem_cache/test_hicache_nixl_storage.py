@@ -81,6 +81,26 @@ class MockHybridPool:
         return True
 
 
+class MockMixedStateHybridPool:
+    """Hybrid pool whose serialized page is raw bytes, not ``pool.dtype``."""
+
+    def __init__(self, num_pages: int = 2, payload_bytes: int = 40):
+        self.page_size = 1
+        self.dtype = torch.bfloat16
+        self.device = "cpu"
+        self.pin_memory = False
+        self.raw_buffer = torch.zeros((num_pages, payload_bytes), dtype=torch.uint8)
+
+    def get_dummy_flat_data_page(self):
+        return torch.zeros(self.raw_buffer.shape[1], dtype=torch.uint8)
+
+    def get_data_page(self, index, flat=True):
+        return self.raw_buffer[index]
+
+    def set_from_flat_data_page(self, index, data_page):
+        self.raw_buffer[index].copy_(data_page)
+
+
 class MockMemPoolHost:
     """Minimal MHA-style HostKVCache stand-in supporting the v1 paths.
 
@@ -641,6 +661,48 @@ class TestNixlUnified(CustomTestCase):
         self.assertIsNotNone(ctx.bounce_set)
         self.assertIsNotNone(ctx.bounce_get)
         self.assertEqual(ctx.bounce_page_bytes, pool.get_dummy_flat_data_page().numel())
+
+    def test_direct_io_bounce_preserves_mixed_state_raw_payload(self):
+        pool = MockMixedStateHybridPool()
+        self.hicache.needs_page_alignment = True
+        self.hicache.register_mem_host_pool_v2(pool, PoolName.MAMBA)
+
+        ctx = self.hicache._hybrid_pool_ctx[PoolName.MAMBA]
+        self.assertEqual(ctx.bounce_set.dtype, torch.uint8)
+        self.assertEqual(ctx.bounce_payload_dtype, torch.uint8)
+        self.assertEqual(ctx.bounce_payload_bytes, 40)
+        self.assertEqual(ctx.bounce_page_bytes, 4096)
+
+        expected = torch.arange(40, dtype=torch.uint8)
+        pool.raw_buffer[0].copy_(expected)
+
+        def fake_set(keys, key_strs, host_buffers, direction):
+            self.assertEqual(direction, "WRITE")
+            self.assertEqual(host_buffers[0][1], 4096)
+            self.assertTrue(torch.equal(ctx.bounce_set[0, :40], expected))
+            self.assertTrue(torch.all(ctx.bounce_set[0, 40:] == 0))
+            return [True]
+
+        self.hicache._batch_xfer = fake_set
+        transfer = PoolTransfer(
+            name=PoolName.MAMBA,
+            keys=["p0"],
+            host_indices=torch.tensor([0], dtype=torch.int64),
+        )
+        self.assertEqual(self.hicache.batch_set_v2([transfer])[PoolName.MAMBA], [True])
+
+        pool.raw_buffer.zero_()
+
+        def fake_get(keys, key_strs, host_buffers, direction):
+            self.assertEqual(direction, "READ")
+            self.assertEqual(host_buffers[0][1], 4096)
+            ctx.bounce_get[0, :40].copy_(expected)
+            ctx.bounce_get[0, 40:].fill_(255)
+            return [True]
+
+        self.hicache._batch_xfer = fake_get
+        self.assertEqual(self.hicache.batch_get_v2([transfer])[PoolName.MAMBA], [True])
+        self.assertTrue(torch.equal(pool.raw_buffer[0], expected))
 
     def test_batch_set_v2_expands_zero_copy_mamba_component_keys(self):
         pool = MockHybridPool(expose_zero_copy=True)
