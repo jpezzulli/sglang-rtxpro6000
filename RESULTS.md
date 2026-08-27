@@ -1,73 +1,221 @@
 # Results
 
-All throughput is measured on one RTX PRO 6000 96 GB. Controlled requests used
-the ordinary OpenAI-compatible chat path with thinking enabled. Results from
-the two model configurations are intentionally separate.
+This document preserves the complete useful 27B/DFlash2 measurement record and
+adds Flash-Next as a separate configuration of the same SGLang source. Metrics
+with different timing windows are never added together or presented as one
+interchangeable throughput number.
 
-## Flash-Next final run — source `64ecd64924`
+## Measurement definitions
 
-| Test | Result |
-|---|---:|
-| 64K cold prefill | 10,103.70 tok/s |
-| ~490K cold prefill | 7,872.15 tok/s |
-| Long-context needles | 3/3 exact |
-| 1x 1,024-token decode | 171.09 tok/s |
-| 4x 1,024-token synchronized batch | 427.54 tok/s aggregate |
-| Per-stream post-first-token decode | 115.13 / 127.56 / 126.64 / 122.96 tok/s |
-| MTP mean accepted length | 2.58 |
-| MTP acceptance rate | 52.74% |
-| Reasoning | 97.49/100; 139,863 completion tokens |
-| Tools | 30/30 semantic; 27/30 strict literal checker |
-| Vision | complete 1,024-token validation passed |
-| Sealed agentic control | 148.80 tok/s |
-| Natural 3,072-token decode | 162.05 tok/s |
+- **Cold prefill:** prompt tokens divided by time to first token with no matching
+  radix or persistent prefix.
+- **Completed-request effective decode:** output tokens divided by SGLang's
+  post-prefill elapsed span. This excludes initial prefill but includes waits,
+  re-prefill after retraction, and interference after the prefill boundary.
+- **Per-request median:** median of completed-request effective decode rates.
+- **Token-weighted effective decode:** `sum(output_tokens) /
+  sum(post_prefill_seconds)`.
+- **Instantaneous server throughput:** SGLang periodic `gen throughput`; a short
+  telemetry window, not completed-request throughput.
+- **Concurrent aggregate:** all group output tokens divided by synchronized
+  group makespan.
+- **Restored-prefix effective prefill:** input tokens divided by TTFT after
+  NIXL restoration. It is not cold model prefill.
 
-The four-request aggregate uses all 4,096 output tokens over the synchronized
-9.580393-second batch. Per-stream rates use 1,023 tokens over each stream's own
-post-first-token interval, so their arithmetic sum is not the aggregate metric.
+## Flash-Next final campaign
 
-### Persistent restart
+Source: `64ecd64924fee338e3bf846a32167cd604186827`.
 
-| Prefix | Restored | Recomputed | Effective restored-prefix rate |
-|---|---:|---:|---:|
-| ~64K | 63,808 | 56 | not used as cold-prefill comparison |
-| ~490K | 489,856 | 23 | 62,040.60 tok/s |
+| Workload | Context / concurrency | Result | Correctness / note |
+|---|---|---:|---|
+| Cold prefill | ~64K, C1 | 10,103.70 tok/s | normal chat request |
+| Cold prefill + needles | ~490K, C1 | 7,872.15 tok/s | 3/3 exact needles |
+| Decode | 1 x 1,024 output | 171.09 tok/s | post-first-token |
+| Decode | 4 x 1,024 output | 427.54 tok/s aggregate | synchronized batch makespan |
+| Native NEXTN acceptance | final suite | 2.58 mean accepted / 52.74% | live speculative telemetry |
+| Reasoning | full suite | 97.49/100 | 139,863 completion tokens |
+| Tools | 30 invocations | 30/30 exact calls and semantic success | legacy literal checker was 27/30 |
+| Vision | complete request | passed | 1,024-token validation |
+| Sealed agentic control | controlled request | 148.80 tok/s | normal API path |
+| Natural decode | 3,072 output | 162.05 tok/s | normal response |
 
-All three needles remained exact after the 490K restore. The effective rate
-measures restoration plus a tiny computed suffix, not model execution over
-490K cold tokens.
+### Four-request timing reconciliation
 
-### Real agentic window
+The reported individual streams were 115.13, 127.56, 126.64, and 122.96
+tok/s. Each uses 1,023 post-first-token tokens over its own 8.02-8.89 second
+decode interval. The aggregate instead uses all 4,096 completion tokens over
+the synchronized 9.580393-second batch, including TTFT and the slowest tail:
+
+```text
+4096 / 9.580393 = 427.539869 tok/s
+```
+
+The stream values are useful latency observations but are not additive. The
+427.54 figure is the matched aggregate measurement.
+
+### Flash-Next real agentic sample
 
 | Measurement | Result |
 |---|---:|
-| Requests / output tokens | 96 / 100,666 |
-| Token-weighted / median / mean | 139.5 / 153.5 / 155.1 tok/s |
-| Sustained completed-request peak | 218.8 tok/s |
-| Instantaneous single / four-stream peak | 247.0 / 543.1 tok/s |
-| 90K-279K weighted / median | 138.7 / 148.4 tok/s |
+| Completed requests | 96 |
+| Output tokens | 100,666 |
+| Token-weighted effective decode | 139.54 tok/s |
+| Per-request median | 153.48 tok/s |
+| Arithmetic mean | 155.05 tok/s |
+| Sustained completed-request peak | 218.84 tok/s |
+| Instantaneous C1 peak | 246.99 tok/s |
+| Brief instantaneous C4 peak | 543.07 tok/s |
+| 90K-279K lane | 138.66 weighted / 148.41 median tok/s |
 
-The first post-prefill telemetry sample was excluded because its window mixed
-prefill or idle time with decode. The window showed no high-context cliff;
-acceptance variation dominated the visible throughput spread.
+The first telemetry sample after a large prefill was excluded because its
+window mixed prefill or idle time with decode. The sample showed no high-
+context cliff; acceptance variation caused most visible throughput movement.
 
-## Qwen3.8-27B + DFlash2 qualified run
+### Flash-Next persistent restoration
 
-This is the verified 27B runtime-line evidence, not a reuse of Flash-Next data.
+| Prefix | Restored | Recomputed | Effective restored-prefix rate | Result |
+|---|---:|---:|---:|---|
+| ~64K | 63,808 | 56 | not used as a cold-prefill comparison | coherent response |
+| ~490K | 489,856 | 23 | 62,040.60 tok/s | 3/3 needles exact |
 
-| Test | Result |
+## Qwen3.8-27B/DFlash2 current-launcher confirmation
+
+This 2026-08-26 campaign qualified the current 24-slot, five-state path setting
+at runtime-line source `8e197ed3af`. It is separate from the earlier dated
+performance release below.
+
+| Property | Result |
 |---|---:|
-| 64K prefill | 6,163 tok/s |
-| ~490K prefill | 1,618 tok/s; three needles exact |
-| 1x decode | 108.75 tok/s |
-| 4x decode | 390.23 tok/s aggregate |
-| Reasoning, xhigh | 98.26/100 |
-| Reasoning, medium | 95.807/100 |
+| Target/draft FP8 KV capacity | 1,118,784 tokens each |
+| Mamba slots / state-path cap | 24 / 5 |
+| Maximum observed Mamba entries | 10 |
+| 64K prefill | 6,169.18 tok/s |
+| ~490K prefill | 1,616.29 tok/s; 3/3 needles exact |
+| 1x decode | 108.93 tok/s |
+| 4x aggregate decode | 375.81 tok/s |
+| 4x individual post-first-token | 98.69 / 103.00 / 96.51 / 105.61 tok/s |
+| DFlash2 acceptance during C4 | 2.92 mean accepted / 27.67% |
+| Reasoning | 96.92/100 across 50,986 completion tokens |
+| Reasoning token-weighted effective decode | 156.70 tok/s |
+| Tool selection and arguments | 30/30 |
+| Reviewed response discipline | 29/30; no tool-use or security failure |
 
-The final qualified 27B allocation used 1,118,784 target and draft KV tokens,
-FP8 E4M3 for both pools, 24 Mamba slots, five retained states per path, and
-FP32 recurrent state. Core DFlash2 support was in the upstream base; local XQA
-and NIXL corrections remained active.
+## Qwen3.8-27B/DFlash2 dated performance release
 
-The maintained public validation logs and harness are at
+Tag: `qwen38-dflash2-pro6000-20260824`. This is the established 27B result set
+and is retained exactly rather than overwritten by the later allocation.
+
+### Controlled results
+
+| Workload | Context | Concurrency | Effort | Output | Result | Notes |
+|---|---:|---:|---|---:|---:|---|
+| Prefill | 63,906 | 1 | xhigh request | 28 | 6,163.07 prompt tok/s | 10.369 s TTFT |
+| Prefill + needles | 489,921 | 1 | xhigh request | 203 | 1,618.31 prompt tok/s | 3/3 exact |
+| Decode ceiling | 136 prompt | 1 | xhigh | 1,024 | 108.75 tok/s | post-first-token; 107.52 makespan |
+| Decode ceiling | 136 each | 4 | xhigh | 4 x 1,024 | 390.23 tok/s aggregate | group makespan |
+| Reasoning active decode | case-dependent | 3 | xhigh | 70,770 group tokens | 396.78 server tok/s median | telemetry while C3 active |
+| Reasoning active decode | case-dependent | 3 | medium | suite-dependent | 486.19 server tok/s median | acceptance 4.657 / 0.522 |
+
+The four individual decode rates were 120.79, 99.78, 102.82, and 104.26 tok/s.
+As with Flash-Next, these are post-first-token per-stream windows, while 390.23
+uses the synchronized group makespan; they are not additive.
+
+### Public TP1 directional baseline
+
+The cited community baseline is the
+[`local-inference-lab/rtx6kpro` Qwen3.8-27B catalog](https://github.com/local-inference-lab/rtx6kpro/blob/7ceba1df33bb9c76060a251bba2d851b4f37a485/models/qwen38-27b.md)
+at commit `7ceba1df33bb9c76060a251bba2d851b4f37a485`. Its closest TP1 row used the
+official FP8 checkpoint, vLLM Gilded Gnosis r31, MTP3, FP8 KV, prefix caching,
+and one RTX PRO 6000.
+
+| Metric | Community official-FP8/MTP3 | DFlash2 dated release | Directional change |
+|---|---:|---:|---:|
+| C1 near empty context | 77.8 tok/s | 108.75 tok/s | +39.8% |
+| C4 near empty context | 292.7 tok/s | 390.23 tok/s | +33.3% |
+| 64K prefill | 5,877 tok/s | 6,163 tok/s | +4.9% |
+
+This is not a strict A/B. Checkpoint, runtime, speculation, power, client,
+prompt, duration, and cache/offload configuration differ. No “fastest” claim is
+made.
+
+### Reasoning and tools
+
+| Qualification | Result |
+|---|---:|
+| xhigh reasoning | 98.26/100 dimension-weighted |
+| medium reasoning | 95.807/100 dimension-weighted |
+| Medium completion-token reduction vs xhigh | 80.4% |
+| Medium summed-request-time reduction vs xhigh | 84.74% |
+| Medium completion tokens / summed request second | 160.21 tok/s |
+| xhigh completion tokens / summed request second | 124.74 tok/s |
+| Medium tool suite | 27/30 automatic; 30/30 exact calls; 29/30 reviewed semantic |
+
+The two automatic tool misses caused by wording/checker mismatch were retained
+as raw checker outcomes; the reviewed result distinguishes those from the one
+substantive response-discipline miss.
+
+### Real agentic completed requests
+
+The sanitized sample spans 2026-08-24 15:56:11-18:18:51 EDT and contains 124
+completed requests, 85,156 output tokens, and 183-350,195 input tokens. It
+begins one hour after the reasoning/tool suite ended.
+
+#### Non-overlapping request intervals
+
+| Input context | Requests | Output tokens | Median effective decode | Token-weighted effective decode |
+|---|---:|---:|---:|---:|
+| 0-2K | 34 | 12,791 | 165.68 tok/s | 175.46 tok/s |
+| 64-100K | 5 | 1,250 | 168.01 tok/s | 151.46 tok/s |
+| 100-150K | 14 | 13,901 | 133.25 tok/s | 130.36 tok/s |
+| 150-262K | 2 | 605 | 117.96 tok/s | 116.10 tok/s |
+| 300-325K | 21 | 19,944 | 110.81 tok/s | 116.69 tok/s |
+| 325-340K | 18 | 11,263 | 133.03 tok/s | 130.98 tok/s |
+| 340-360K | 23 | 14,415 | 105.45 tok/s | 101.69 tok/s |
+| **All non-overlapping** | **117** | **74,169** | **133.21 tok/s** | **125.36 tok/s** |
+
+#### Full sample, including interference
+
+| Input context | Requests | Output tokens | Median effective decode | Token-weighted effective decode |
+|---|---:|---:|---:|---:|
+| 0-2K | 36 | 13,118 | 165.25 tok/s | 148.35 tok/s |
+| 2-64K | 1 | 4,123 | 43.02 tok/s | 43.02 tok/s |
+| 64-100K | 5 | 1,250 | 168.01 tok/s | 151.46 tok/s |
+| 100-150K | 15 | 16,922 | 130.25 tok/s | 124.36 tok/s |
+| 150-262K | 3 | 676 | 112.29 tok/s | 111.06 tok/s |
+| 300-325K | 21 | 19,944 | 110.81 tok/s | 116.69 tok/s |
+| 325-340K | 18 | 11,263 | 133.03 tok/s | 130.98 tok/s |
+| 340-360K | 25 | 17,860 | 103.81 tok/s | 74.83 tok/s |
+| **All observed** | **124** | **85,156** | **131.31 tok/s** | **102.57 tok/s** |
+
+Seven overlapping requests measured 68.37 tok/s median and 46.05 tok/s
+weighted. That is valid user experience under interference, not an isolated
+engine-speed estimate.
+
+### DFlash2 acceptance
+
+Across single-running-request telemetry, median instantaneous throughput was
+106.22 tok/s and mean accepted length was 3.81. The strongest window reached
+300.16 tok/s at 7.75 accepted tokens and 0.96 acceptance. The fastest completed
+request reached 244.24 tok/s and contained successive 258.26, 276.34, and
+278.40 tok/s telemetry windows. At 340-360K, single-request telemetry measured
+90.10 tok/s median with 3.32 mean accepted length and 0.332 acceptance.
+
+### 27B HiCache/NIXL qualification
+
+- 518,528 tokens restored with a six-token tail in 14.64 seconds; all needles
+  exact.
+- Identical 60K configuration restored 60,032 tokens after restart in 3.16
+  seconds.
+- Changing page size selected another namespace; restoring the original setting
+  selected and reused the original namespace.
+- Three approximately 60K requests restored concurrently after restart in 6.92
+  seconds.
+- 375K/200K/200K concurrent restoration reused 775,168 tokens and computed only
+  320 tail/page-rounding tokens.
+
+These results establish prefix persistence. They do not explain or cause
+DFlash2's GPU-resident decode rate.
+
+The dated tag retains the sanitized raw 27B agentic log and machine-generated
+summaries. The current maintained harness and published result catalog are in
 [`jpezzulli/pennyroyal-validation`](https://github.com/jpezzulli/pennyroyal-validation).

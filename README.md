@@ -1,130 +1,399 @@
-# SGLang on one RTX PRO 6000 Blackwell
+# One SGLang runtime, two Qwen3.8 configurations, one RTX PRO 6000
 
-This repository is the canonical source for a tuned SGLang runtime used on one
-96 GB NVIDIA RTX PRO 6000 Blackwell Workstation Edition (SM120). The same
-patched runtime supports two independently qualified launch configurations:
+> One optimized SGLang runtime for a single RTX PRO 6000, with qualified
+> launch configurations for both Qwen3.8-27B/DFlash2 and Qwen3.8 Flash-Next.
 
-- `RadixArk/Qwen3.8-Flash-Next-NVFP4` with native NEXTN MTP;
-- Qwen3.8-27B FP8 with `incoai/Qwen3.8-27B-DFlash2`.
+This repository contains the complete SGLang-derived source used on one
+NVIDIA RTX PRO 6000 Blackwell Workstation Edition (96 GB, SM120, TP=1). It is
+not two builds: both model configurations run from the same patched source.
 
-Flash-Next support is day-one integration work. It is heavily qualified on this
-specific system, including 524K context, multimodal requests, reasoning, tools,
-agentic workloads, speculative recovery, and persistent prefix restoration. It
-can still contain model- or hardware-specific assumptions and should not be
-read as a claim of general SM120 support.
+- **Qwen3.8-27B** pairs an FP8 target with `incoai/Qwen3.8-27B-DFlash2`.
+- **Qwen3.8 Flash-Next** pairs an NVFP4 target with its native NEXTN MTP layer.
 
-## Published runtime
+Flash-Next is day-one engineering. It has extensive qualification on this exact
+machine—including 524K context, multimodal input, reasoning, tools, agentic
+workloads, CUDA-graph recovery, and persistent prefix restoration—but it may
+still contain rough edges or hardware/model-specific assumptions.
+
+## Why this runtime exists
+
+The important work is architectural, not merely a collection of launch flags:
+
+- DFlash2 integration for Qwen3.8-27B, with the selector inside the draft CUDA
+  graph, fused draft KV materialization, and fixed-width TRTLLM-MHA/XQA target
+  verification on SM120.
+- Native NEXTN MTP for Flash-Next with QSA index sharing, recovery graphs, and
+  `gdn_mtp_cache_mode=none`.
+- FlashInfer GDN decode and prefill for Flash-Next, plus a deliberately narrow
+  SM120 FlashInfer WY output-only RecoverSSM path.
+- QSA sparse attention: Triton sparse-GQA prefill, TRTLLM-Gen decode on SM120,
+  and `sgl-kernel` top-k.
+- FlashInfer CUTLASS MoE for the Flash-Next target and native-MTP layer.
+- Correct three-axis multimodal mRoPE in the fused QK RMSNorm+RoPE kernel.
+- Target, draft, verify, prefill, and accepted-state recovery CUDA graphs.
+- FP8 KV and 524,288-token factor-2 YaRN for both launch configurations.
+- HiCache/NIXL persistence for complete hybrid state—not KV alone—including
+  DFlash2 side state or Flash-Next GDN, Qwen4 PLE, and compressed QSA state.
+- Restart restoration, representation-specific FILE namespaces, and radix-
+  prefix reuse followed by long continuation.
+- Measured reasoning, tool-calling, vision, long-context needle, controlled
+  decode, and real agentic behavior.
+
+## Published identity
 
 | Item | Value |
 |---|---|
-| Release tag | `sglang-rtxpro6000-20260827` |
-| Release source | `64ecd64924fee338e3bf846a32167cd604186827` |
+| Canonical branch | `pennyroyal-main-sm120-final` |
+| Current executable source | `64ecd64924fee338e3bf846a32167cd604186827` |
+| Current dated tag | `sglang-rtxpro6000-20260827` |
+| Earlier 27B dated tag | `qwen38-dflash2-pro6000-20260824` |
 | Upstream integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| SGLang package | `0.5.19.dev485+g64ecd6492` |
+| Installed SGLang | `0.5.19.dev485+g64ecd6492` |
 | Python / PyTorch | `3.12.13` / `2.13.0+cu130` |
 | CUDA / compiler | CUDA `13.3` (NVCC `13.3.73`) / GCC `15.3.1` |
 | FlashInfer / NIXL | `0.6.17` / `1.4.0` |
 | GPU / driver | RTX PRO 6000 96 GB, SM120 / `610.57.04` |
 
-The executable tree is upstream SGLang plus the ordered local commits listed in
-[CHANGES.md](CHANGES.md). Some changes were imported or adapted from open
-upstream PRs; three portable fixes were submitted by this project. The source
-history, rather than a parallel patch directory, is the authoritative runtime.
+The current documentation commit sits above the executable source. It does not
+change `python/`, `rust/`, or the kernel trees. Exact source lineage and current
+upstream status are in [CHANGES.md](CHANGES.md) and
+[PROVENANCE.md](PROVENANCE.md).
 
-## Feature matrix
+## Qualified configuration matrix
 
-| Capability | Flash-Next | Qwen3.8-27B + DFlash2 |
+Rows intentionally separate representation, datatype, backend, and capacity.
+The BF16 runtime dtype is not presented as a claim that every quantized kernel
+executes or accumulates entirely in BF16.
+
+| Property | Qwen3.8-27B + DFlash2 | Qwen3.8 Flash-Next |
 |---|---|---|
-| Weights / compute / KV | NVFP4 / BF16 / FP8 E4M3 | block-FP8 / BF16 / target+draft FP8 E4M3 |
-| Speculation | Native NEXTN, 4 draft tokens | DFlash2, 8 draft tokens, 2,048-token window |
-| Served context | 524,288, factor-2 YaRN | 524,288, factor-2 YaRN target+draft |
-| Linear state | BF16 GDN, 24 Mamba slots | FP32 GDN, 24 Mamba slots, 5 retained states/path |
-| Verification state | RecoverSSM `none`; WY output-only recovery | DFlash2 fused KV materialization and compact draft cache |
-| Sparse attention | QSA Triton prefill, TRTLLM-Gen decode, shared MTP index | Not applicable |
-| HiCache/NIXL | 32 GB host tier; packed target/native-MTP KV, GDN, PLE, QSA keys | 96 GB host tier; target KV, Mamba/GDN, DFlash2 sidecar |
-| Persistent prefix reuse | Qualified across service restart | Qualified on the 27B runtime line |
-| Multimodal | Vision and three-axis mRoPE qualified | Vision mRoPE corrected by the same runtime source |
-| Reasoning / tools | Qualified | Qualified |
+| Target checkpoint | `orcarouter/Qwen3.8-27B-Uncensored-FP8` family | `RadixArk/Qwen3.8-Flash-Next-NVFP4` |
+| Target weight format | block FP8 E4M3, 128x128 blocks | ModelOpt NVFP4, group size 16 on selected Linear modules |
+| Quantized-path activations | dynamic FP8 E4M3 | NVFP4 input activations on selected Linear modules |
+| Runtime dtype for unquantized tensors | BF16; includes excluded layers and BF16 `lm_head` | BF16; includes ignored layers, native MTP, PLE, QSA/GDN state-facing tensors, and vision |
+| Target KV datatype | FP8 E4M3 | FP8 E4M3 |
+| Speculative KV datatype | DFlash2 draft: FP8 E4M3 | native-MTP: FP8 E4M3 |
+| Recurrent/GDN SSM state | FP32 | BF16 |
+| Convolution state | BF16 | BF16 |
+| MoE backend | Triton FP8 MoE; auto resolves to Triton with A2A `none` | FlashInfer CUTLASS for target and native MTP |
+| Target attention | FlashInfer prefill; TRTLLM-MHA/XQA decode and fixed-width verify | QSA Triton sparse prefill; TRTLLM-Gen sparse decode; general attention FlashInfer |
+| Linear/GDN attention | Triton decode, prefill, and state-writing verify | FlashInfer decode/prefill; WY output-only verify/recovery in `none` mode |
+| Speculative backend | DFlash2, 8 draft tokens, 2,048-token window | native NEXTN, 3 steps, top-k 1, 4 draft tokens |
+| Served context | 524,288, factor-2 YaRN target and draft | 524,288, factor-2 YaRN |
+| KV page size | 64 | 64 |
+| Current GPU KV capacity | 1,118,784 target and draft tokens | 824,384 target and native-MTP tokens |
+| Mamba capacity | 24 slots; maximum 5 retained states/path | 24 slots; `extra_buffer`, tracking interval 64 |
+| HiCache/NIXL | 96 GB configured host tier; target KV + Mamba/GDN + DFlash2 state | 32 GB configured host tier; packed target/native-MTP KV + GDN + PLE + QSA keys |
+| Maximum active requests | 4 | 4 |
 
-The two configurations share a runtime, not benchmark results. Flash-Next-only
-QSA, PLE, and RecoverSSM behavior must not be inferred for the 27B model.
+The current 27B launcher uses the 24-slot/five-state setting qualified on
+2026-08-26. The earlier 2026-08-24 performance release used 16 slots, a
+three-state path cap, and a 1,194,496-token KV pool. Both campaigns are retained
+in [RESULTS.md](RESULTS.md) rather than silently merging their allocations.
 
-## Flash-Next final qualification
+## Resolved backends: Qwen3.8-27B/DFlash2
 
-| Measurement | Result |
+| Component or phase | Resolved implementation | How selected or enabled | Evidence |
+|---|---|---|---|
+| Target prefill attention | FlashInfer | explicit hybrid prefill backend | 64K and 490K controlled prefill |
+| Target decode attention | TRTLLM-MHA with XQA | explicit decode backend; SM120 supported path | controlled and agentic decode |
+| Fixed-width target verification | TRTLLM-MHA/XQA with packed causal mask | local `0f159cd545` | graph-metadata regression; 1x/4x decode |
+| Linear/GDN decode, prefill, verify | Triton | resolved linear backend | startup configuration and long-context suite |
+| Target FP8 MoE | Triton | `auto` + A2A `none` resolves `Fp8MoEMethod` to Triton | server args plus source resolver |
+| DFlash2 draft attention | FlashInfer | explicit draft backend | draft-runner startup line |
+| Draft local convolution | DFlash2 local-convolution path | merged upstream PR #35371 | DFlash2 startup and decode |
+| Candidate selection | folded into draft CUDA graph | upstream DFlash2 integration | graph-capture startup line |
+| DFlash fused KV materialization | enabled, 5 layers / 8 KV heads / 128 head dim | upstream DFlash2 integration | allocation/startup line |
+| Multimodal attention | `triton_attn` | automatic | startup log; vision smoke |
+| Multimodal rotary | fused three-axis mRoPE | local `64ecd64924`, PR #35744 | numerical kernel tests and vision |
+| Sampling / grammar | FlashInfer / XGrammar | automatic | startup log; reasoning and tools |
+| HiCache transfer | NIXL POSIX, io_uring, O_DIRECT | explicit storage backend | restart and concurrent restoration |
+| Persistent representation | target KV + Mamba/GDN + DFlash2 sidecar | local NIXL integration | namespace and restore qualification |
+
+The selected 27B target keeps `lm_head` in BF16. The quantized-head selector
+from upstream PR #35496 is present in the base but is not the source of this
+checkpoint's measured speed. No separate local DeepGEMM SM120 patch is claimed;
+this FP8 configuration resolves MoE to Triton.
+
+## Resolved backends: Qwen3.8 Flash-Next
+
+| Component or phase | Resolved implementation | How selected or enabled | Evidence |
+|---|---|---|---|
+| Target GDN decode | `FlashInferGDNKernel` | narrow phase override | startup dispatcher; 1x/4x decode |
+| Target GDN prefill | `FlashInferGDNKernel` | narrow phase override | 64K/490K prefill and needles |
+| Native-MTP draft decode | `FlashInferGDNKernel` | shared GDN dispatch | draft CUDA graphs and live decode |
+| Native-MTP draft extend | `FlashInferGDNKernel` | shared GDN dispatch | draft extend graph capture |
+| Active GDN target verification | FlashInfer WY output-only | local `280825c3e2`, `none` mode only | direct state parity and graph replay |
+| Ordinary/tree state-writing verification | `TritonGDNKernel` | architecture gate deliberately preserved | non-`none` source dispatch and focused tests |
+| Accepted-state recovery | FlashInfer WY output-only | narrow SM120 RecoverSSM route | recovery graphs BS 1-4; long continuation |
+| QSA sparse prefill | Triton sparse GQA | model path + FP8 tile fix `95da38fb3b` | 64K/490K exact qualification |
+| QSA sparse decode | TRTLLM-Gen | SM120 dispatch correction `c1da0eef56` | focused dispatch test and live decode |
+| QSA top-k | `sgl-kernel` | automatic | startup resolution |
+| QSA MTP index sharing | enabled | model path | startup line and shared-index tests |
+| Target MoE | FlashInfer CUTLASS | automatic ModelOpt-NVFP4 resolution | startup resolution and live tests |
+| Native-MTP MoE | FlashInfer CUTLASS | automatic speculative resolution | startup resolution and live tests |
+| HyperConnection Mix | persistent Triton Mix | automatic SM120 fallback | HC numerical tests; FlashInfer gate retained |
+| HyperConnection Combine | fused SGLang CUDA | Qwen4 model path | kernel tests and full suite |
+| Multimodal attention | `triton_attn` | automatic | full 1,024-token vision validation |
+| Sampling / grammar | FlashInfer / XGrammar | automatic | startup log; reasoning and tool suite |
+| HiCache transfer | NIXL POSIX, io_uring, O_DIRECT | explicit storage backend | 64K/490K restart restoration |
+| Persistent representation | packed target/native-MTP KV + complete GDN/PLE siblings + compressed QSA keys | local hybrid-pool integration | restart restore, needles, continuation |
+
+## SM120 enablement was scoped, not indiscriminate
+
+Several upstream checks treated SM100 as the only eligible architecture even
+when an underlying kernel already compiled for SM120. This runtime distinguishes
+three cases:
+
+1. **Explicit phase override.** Automatic GDN selection used an SM100 helper and
+   therefore did not select FlashInfer on SM120. FlashInfer 0.6.17 already
+   supported the BF16 decode and prefill operations used here. The launcher
+   selects only those phases with `--linear-attn-decode-backend flashinfer` and
+   `--linear-attn-prefill-backend flashinfer`. Long prefill, exact needles,
+   decode, and vision/reasoning qualification cover the resulting runtime.
+
+2. **Narrow source integration.** RecoverSSM needed FlashInfer WY output-only
+   state output and accepted-state recovery. FlashInfer already contained an
+   `sm_120a` implementation, but SGLang did not route SM120 into it. Commit
+   `280825c3e2` enables only the output/recovery route used by
+   `gdn_mtp_cache_mode=none` and preserves Qwen4 PLE accepted-state commit
+   ordering. Direct tests cover all accepted lengths for four draft tokens,
+   batch sizes 1-4, mixed acceptance, positions 63/64/65, `extra_buffer`, prefix
+   restoration, retraction, long continuation, and captured-graph replay.
+
+3. **Gate deliberately retained.** Ordinary FlashInfer state-writing target
+   verification remains gated on SM120. Full/tree state-writing verification
+   uses Triton. FlashInfer HyperConnection Mix also remains SM100-only; SM120
+   uses the qualified persistent Triton Mix. Shared-expert fusion and the
+   broader calibrated-scale QSA path are not claimed active.
+
+Other bounded corrections follow the same rule. `c1da0eef56` routes SM120 into
+the already-supported TRTLLM-Gen QSA decode path. `0f159cd545` supplies XQA's
+packed mask for fixed-width DFlash2 verification rather than enabling a new
+global attention backend. `64ecd64924` extends the fused rotary kernel to real
+three-axis mRoPE rather than dropping the fused path or ignoring H/W positions.
+
+## Memory recovery and automatic KV sizing
+
+| Flash-Next configuration | Intermediate SSM | Mamba slots | GPU KV capacity |
+|---|---:|---:|---:|
+| BF16 before RecoverSSM | 1.05 GiB | 24 | 745,600 tokens |
+| RecoverSSM `none` mode | 0 | 24 | 824,384 tokens |
+
+The sequence matters:
+
+1. BF16 reduced recurrent-state bytes per slot.
+2. Automatic Mamba sizing then expanded from 21 to 49 slots and consumed much
+   of that saving.
+3. The workload needed far fewer slots; 24 remained above observed demand and
+   returned the rest of the budget to KV.
+4. RecoverSSM removed the separate 1.05 GiB intermediate speculative SSM pool.
+5. With no forced KV-token count, the measured KV pool increased by 78,784
+   tokens—from 745,600 to 824,384, or 10.6%.
+
+The physical pool is removed in `280825c3e2`, but the current
+`kv_cache_configurator.py::_handle_max_mamba_cache` estimator only omits that
+reserve for ReplaySSM, not RecoverSSM `none`. There is no separate allocator
+correction commit in this runtime. The qualified launcher increases
+`--mem-fraction-static` from `.97` to `.981`, approximately the recovered GPU
+fraction, so automatic KV sizing can consume the physically freed memory. The
+824,384-token result was measured, not hard-coded, but the estimator debt is
+real and documented.
+
+## Performance and qualification
+
+These rows are observations from different model configurations and are not a
+single A/B benchmark.
+
+### Flash-Next final campaign — source `64ecd64924`
+
+| Test | Result |
 |---|---:|
 | 64K cold prefill | 10,103.70 tok/s |
 | ~490K cold prefill | 7,872.15 tok/s; 3/3 exact needles |
-| 1x decode | 171.09 tok/s |
-| 4x synchronized batch | 427.54 tok/s aggregate |
-| Individual post-first-token streams | 115.13, 127.56, 126.64, 122.96 tok/s |
-| MTP accepted length / rate | 2.58 / 52.74% |
+| 1x 1,024-token decode | 171.09 tok/s |
+| 4x 1,024-token synchronized batch | 427.54 tok/s aggregate |
+| MTP mean accepted length / rate | 2.58 / 52.74% |
 | Reasoning | 97.49/100 across 139,863 completion tokens |
-| Tools | 30/30 semantically correct; 27/30 literal-checker exact |
-| Vision | Complete 1,024-token validation passed |
+| Tools | 30/30 exact calls and semantically correct after review |
+| Vision | complete 1,024-token validation passed |
 | Sealed agentic control | 148.80 tok/s |
 | Natural 3,072-token decode | 162.05 tok/s |
 
-The 427.54 tok/s figure is `4,096 completion tokens / 9.580393 s` for the
-synchronized four-request batch, including TTFT and the batch tail. Each listed
-stream rate uses that request's own post-first-token interval. The values are
-therefore deliberately not additive.
+The four individual post-first-token rates were 115.13, 127.56, 126.64, and
+122.96 tok/s. They do **not** sum to 427.54 because they use each stream's own
+post-first-token interval. The aggregate is the matched batch metric:
+`4,096 output tokens / 9.580393 seconds`, including TTFT and the batch tail.
 
-After a service restart, HiCache/NIXL restored 63,808 of 63,864 tokens in the
-64K case and 489,856 of 489,879 tokens in the long case. Only 56 and 23 tokens
-were recomputed. The long restored-prefix request measured 62,040.60 effective
-input tok/s and retained all three exact needles. This is restored-prefix
-throughput, not cold model prefill throughput.
+### Qwen3.8-27B/DFlash2 dated performance campaign
 
-## Real agentic workload
+| Test | Result |
+|---|---:|
+| 64K prefill | 6,163.07 tok/s |
+| 489,921-token prefill | 1,618.31 tok/s; 3/3 exact needles |
+| 1x 1,024-token decode | 108.75 tok/s after first token |
+| 4x 1,024-token decode | 390.23 tok/s aggregate |
+| Reasoning, xhigh / medium | 98.26 / 95.807 |
+| Medium tool suite | 30/30 tool selections and arguments; 29/30 reviewed response discipline |
 
-This is separate from controlled qualification. A decontaminated window of 96
-completed requests produced 100,666 tokens at 139.5 tok/s token-weighted,
-153.5 tok/s median, and 155.1 tok/s arithmetic mean. The sustained completed-
-request peak was 218.8 tok/s; instantaneous telemetry reached 247.0 tok/s for
-one stream and briefly 543.1 tok/s with four concurrent requests. The 90K-279K
-input band measured 138.7 tok/s weighted and 148.4 tok/s median. There was no
-high-context cliff; verification frequency declined modestly and speculative
-acceptance explained most visible variation. The first sample after a large
-prefill was excluded because its telemetry window mixed prefill or idle time
-with decode.
+Against the cited public TP1 official-FP8/MTP3 community capture, the dated
+DFlash2 campaign measured +39.8% at C1, +33.3% at C4, and +4.9% at 64K prefill.
+This remains directional rather than a strict A/B because checkpoint, runtime,
+speculation, power, harness, output duration, and cache configuration differ.
 
-## Current Flash-Next capacity
+The current 24-slot/five-state confirmation measured 6,169.18 tok/s at 64K,
+1,616.29 tok/s at ~490K with all needles exact, 108.93 tok/s at C1, and
+375.81 tok/s aggregate at C4. It reached a 96.92 reasoning score across 50,986
+completion tokens and used at most 10 of 24 Mamba entries.
 
-- served context: 524,288 tokens;
-- automatically sized GPU KV pool: 824,384 tokens;
-- Mamba slots: 24;
-- recovery graphs: captured for batch sizes 1-4 and active;
-- endpoint model name: `pennyroyal`;
-- final post-restart logs: no CUDA error, OOM, retraction, traceback, or
-  exception.
+### 27B real agentic context behavior
 
-See [MEMORY-AND-PERSISTENCE.md](MEMORY-AND-PERSISTENCE.md) for allocation and
-restart details, including a candid allocator-estimator limitation.
+The dated 124-request sample contained 85,156 output tokens and inputs from 183
+to 350,195 tokens. All observed requests measured 131.31 tok/s median and
+102.57 tok/s token-weighted. Excluding seven overlapping request intervals,
+the result was 133.21 median / 125.36 weighted. Short 0-2K requests reached
+165.25 median / 148.35 weighted; the non-overlapping 340-360K band measured
+105.45 median / 101.69 weighted. The fastest completed request was 244.24 tok/s,
+while a favorable instantaneous DFlash2 telemetry window reached 300.16 tok/s
+at 7.75 accepted tokens and 0.96 acceptance. Telemetry is not reported as
+sustained completed-request throughput.
 
-## Reproduce or inspect
+### Flash-Next real agentic context behavior
 
-- [BUILD.md](BUILD.md) — native build and exact dependency envelope.
-- [RUN.md](RUN.md) — the two sanitized launch configurations and validation.
-- [BACKENDS.md](BACKENDS.md) — resolved implementations and narrow SM120 gates.
-- [RESULTS.md](RESULTS.md) — controlled, persistent-cache, agentic, and 27B data.
-- [CHANGES.md](CHANGES.md) — local source changes and verified upstream status.
-- [PROVENANCE.md](PROVENANCE.md) — source, package, checkpoint, and release identity.
-- [LIMITATIONS.md](LIMITATIONS.md) — known portability and evidence boundaries.
+A separate decontaminated 96-request window produced 100,666 output tokens at
+139.5 tok/s token-weighted, 153.5 median, and 155.1 arithmetic mean. The
+sustained completed-request peak was 218.8 tok/s; instantaneous telemetry
+reached 247.0 tok/s for one stream and briefly 543.1 tok/s at four concurrent
+requests. The 90K-279K input lane measured 138.7 weighted / 148.4 median. The
+first sample after a large prefill was excluded because its telemetry interval
+mixed prefill or idle time with decode.
 
-The reusable launchers are in [`configs/pennyroyal`](configs/pennyroyal), and
-the deterministic NIXL namespace helper is in
-[`scripts/pennyroyal`](scripts/pennyroyal). Model weights, private prompts, raw
-conversation logs, persistent cache contents, and host-specific secrets are not
-included.
+Detailed definitions, complete 27B context bands, both 27B campaigns, and
+persistence evidence are in [RESULTS.md](RESULTS.md).
 
-## How I got here
+## HiCache/NIXL persistence
 
-The engineering path—including experiments, regressions, DFlash2 work, and the
-HiCache/Mooncake/NIXL detour—is documented at
+HiCache/NIXL does not cause GPU-resident decode speed. It provides disposable,
+reusable prefix state across GPU/host eviction and service restart:
+
+```text
+GPU radix state
+  -> page-first HiCache host RAM, kernel I/O, write-through
+  -> NIXL POSIX FILE storage, io_uring + O_DIRECT
+```
+
+Flash-Next restart evidence:
+
+- 63,808 of 63,864 input tokens restored; 56 recomputed.
+- 489,856 of 489,879 restored; 23 recomputed.
+- restored 490K effective input rate: 62,040.60 tok/s.
+- all three needles exact after restart.
+
+The 62,040.60 figure is restored-prefix throughput, not cold model prefill.
+
+The earlier 27B work also demonstrated 518,528 restored tokens with a six-token
+tail in 14.64 seconds, 60,032-token namespace reuse after restart, A→B→A page-
+size namespace rollback, three concurrent ~60K restores, and a 775,168-token
+three-request concurrent restore with only 320 tail/page-rounding tokens
+computed.
+
+Two portable NIXL fixes from this project remain open upstream: PR #36520
+isolates overlapping path registrations, and PR #36524 bounds bounce-backed
+hybrid transfers. Flash-Next adds complete PLE/GDN/QSA sibling-state persistence
+and load/COW ordering. [MEMORY-AND-PERSISTENCE.md](MEMORY-AND-PERSISTENCE.md)
+documents the representation namespace and actual failure boundaries.
+
+## Build and launch
+
+There is one native build procedure and exactly two canonical launch recipes:
+
+```bash
+uv python install 3.12.13
+uv venv --python 3.12.13 .venv
+source .venv/bin/activate
+
+export CUDA_HOME=/usr/local/cuda
+export CC=/usr/bin/gcc-15 CXX=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15
+export MAX_JOBS=24 CMAKE_BUILD_PARALLEL_LEVEL=24
+export FLASHINFER_NINJA_JOBS=24 FLASHINFER_NVCC_THREADS=4
+export TORCHINDUCTOR_COMPILE_THREADS=24
+
+uv pip install --prerelease=allow --index-strategy unsafe-best-match \
+  --extra-index-url https://docs.sglang.ai/whl/cu130/ \
+  --no-build-isolation -e python
+```
+
+Set `REPO_ROOT`, `CACHE_BASE`, `NIXL_STORAGE_BASE`, and the checkpoint paths,
+then choose one recipe:
+
+```bash
+configs/pennyroyal/serve-qwen38-27b-dflash2.sh
+configs/pennyroyal/serve-flash-next.sh
+```
+
+Do not run them simultaneously on one GPU. [BUILD.md](BUILD.md) records exact
+dependencies and [RUN.md](RUN.md) provides startup assertions, ordinary
+OpenAI-compatible smoke requests, and cold/radix/NIXL cache distinctions.
+
+## Source changes and upstream work
+
+The cumulative history starts with the 2026-08-24 27B release, then layers the
+unified runtime and Flash-Next work on the same source line. The current active
+stack contains 19 commits above its integration base. Major groups are:
+
+- Qwen3.8-27B/DFlash2: independent target/draft overrides, fixed-width XQA mask,
+  NVCC host-compiler identity, request-span observability, and NIXL correctness.
+- Flash-Next: Qwen4 model support, QSA/HC/PLE/native-MTP integration, SM120 QSA
+  decode, FP8 QSA prefill, RecoverSSM, complete hybrid persistence, and mRoPE.
+- Open project PRs: #36520, #36524, and #35584.
+- Closed project submissions retained in runtime history: #35583; transient
+  ragged/DSpARK PR #35586 is documented but not in the active source.
+- Related upstream work: #30967, #35371, #35496, #35744, #36497, and #36644.
+
+[CHANGES.md](CHANGES.md) lists every material current commit, the earlier dated
+release hashes, exact PR links/status/heads, affected execution paths, and test
+coverage.
+
+## Scope and limitations
+
+- One RTX PRO 6000, TP=1, exact checkpoint families, and the recorded CUDA,
+  PyTorch, FlashInfer, compiler, NIXL, and SGLang source.
+- SM120 paths were qualified narrowly; unsupported-by-default is not treated as
+  proof of incompatibility, but no architecture gate was globally deleted.
+- Benchmark observations are not guarantees for another system.
+- Flash-Next and 27B results remain separate; neither model's features or
+  numbers are silently attributed to the other.
+- Current Flash-Next qualification ran at `64ecd64924`. The later Flash-Next-
+  specific commits were not all re-benchmarked on the 27B campaign, so the
+  dated/current 27B evidence is labeled by its actual runtime line.
+- NIXL cleaner thresholds are whole-filesystem occupancy percentages, not an
+  absolute directory byte quota.
+
+See [LIMITATIONS.md](LIMITATIONS.md) for measurement and reproducibility detail.
+
+## Documentation map
+
+- [BUILD.md](BUILD.md) — one native build and dependency identity.
+- [RUN.md](RUN.md) — the two canonical launch configurations.
+- [BACKENDS.md](BACKENDS.md) — source-backed resolved backend and SM120 tables.
+- [RESULTS.md](RESULTS.md) — controlled, reasoning, tools, context, agentic, and
+  persistence measurements for both models.
+- [MEMORY-AND-PERSISTENCE.md](MEMORY-AND-PERSISTENCE.md) — GPU allocation and
+  hybrid state representation.
+- [CHANGES.md](CHANGES.md) — cumulative release and upstream history.
+- [PROVENANCE.md](PROVENANCE.md) — source, package, checkpoint, and tag identity.
+- [LIMITATIONS.md](LIMITATIONS.md) — what the evidence does and does not prove.
+- [`jpezzulli/pennyroyal-validation`](https://github.com/jpezzulli/pennyroyal-validation)
+  — maintained public validation harness and result catalog.
+
+## Engineering history
+
+The experimental path—including DFlash2 work and the HiCache/Mooncake/NIXL
+detour—is described at
 [msoexpert.com](https://msoexpert.com/articles/qwen38-dflash2-rtx-pro-6000/).
+Mooncake is not a fallback in this runtime; it was rejected and removed.
 
 ## License
 
-The SGLang-derived source remains under the repository's Apache-2.0 license.
-Third-party runtimes and model checkpoints retain their own licenses.
+The SGLang-derived source remains under Apache-2.0. Model checkpoints and
+third-party runtimes retain their own licenses.

@@ -1,29 +1,52 @@
 {
-  "qualification_date": "2026-08-21",
-  "latest_allocation_confirmation_date": "2026-08-26",
-  "qualified_runtime_line_commit": "8e197ed3afc559f29562a2e7de9026f011f5d28f",
+  "model_configuration": "Qwen3.8-27B target plus incoai DFlash2 draft",
   "served_context_tokens": 524288,
   "target_and_draft_kv_dtype": "fp8_e4m3",
-  "target_and_draft_kv_capacity_tokens": 1118784,
-  "mamba_slots": 24,
-  "mamba_max_states_per_path": 5,
-  "mamba_ssm_dtype": "float32",
   "dflash2": {
     "draft_tokens": 8,
     "draft_window_tokens": 2048,
     "compact_cache": true,
     "fused_kv_materialization": true
   },
-  "performance": {
-    "prefill_64k_tokens_per_second": 6163.0,
-    "prefill_490k_tokens_per_second": 1618.0,
-    "decode_1x_tokens_per_second": 108.75,
-    "decode_4x_aggregate_tokens_per_second": 390.23
+  "dated_release_2026_08_24": {
+    "source_commit": "8e197ed3afc559f29562a2e7de9026f011f5d28f",
+    "gpu_kv_capacity_tokens": 1194496,
+    "mamba_slots": 16,
+    "mamba_max_states_per_path": 3,
+    "performance": {
+      "prefill_64k_tokens_per_second": 6163.07,
+      "prefill_489921_tokens_per_second": 1618.31,
+      "decode_1x_tokens_per_second": 108.75,
+      "decode_4x_aggregate_tokens_per_second": 390.23
+    },
+    "correctness": {
+      "long_context_needles_exact": "3/3",
+      "reasoning_xhigh_score": 98.26,
+      "reasoning_medium_score": 95.807,
+      "tools_automatic": "27/30",
+      "tools_exact_calls": "30/30",
+      "tools_reviewed_semantic": "29/30"
+    }
   },
-  "correctness": {
-    "long_context_needles_exact": "3/3",
-    "reasoning_xhigh_score": 98.26,
-    "reasoning_medium_score": 95.807
+  "current_launcher_confirmation_2026_08_26": {
+    "source_commit": "8e197ed3afc559f29562a2e7de9026f011f5d28f",
+    "gpu_kv_capacity_tokens": 1118784,
+    "mamba_slots": 24,
+    "mamba_max_states_per_path": 5,
+    "maximum_observed_mamba_entries": 10,
+    "performance": {
+      "prefill_64k_tokens_per_second": 6169.182683344778,
+      "prefill_490k_tokens_per_second": 1616.294137814264,
+      "decode_1x_tokens_per_second": 108.93118208123954,
+      "decode_4x_aggregate_tokens_per_second": 375.80559144353714
+    },
+    "correctness": {
+      "long_context_needles_exact": "3/3",
+      "reasoning_score": 96.92,
+      "reasoning_completion_tokens": 50986,
+      "tool_selection_and_arguments": "30/30",
+      "reviewed_response_discipline": "29/30"
+    }
   },
-  "note": "These are 27B/DFlash2 results and are not inferred from Flash-Next."
+  "note": "The two campaigns are retained separately; Flash-Next results are not applied to this model."
 }

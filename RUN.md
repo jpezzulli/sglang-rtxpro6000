@@ -39,9 +39,11 @@ the sample NIXL watermarks before first use.
 configs/pennyroyal/serve-flash-next.sh
 ```
 
-The qualified shape is NVFP4 weights, BF16 compute/recurrent state, FP8 E4M3
-KV, native NEXTN, 524K YaRN, 24 Mamba slots, RecoverSSM `none`, explicit
-FlashInfer linear decode/prefill, 32 GB HiCache, and NIXL POSIX persistence.
+The qualified shape uses ModelOpt NVFP4 weights and input activations on selected
+Linear modules, BF16 for excluded/unquantized tensors and recurrent state, FP8
+E4M3 target/native-MTP KV, native NEXTN, 524K YaRN, 24 Mamba slots,
+RecoverSSM `none`, explicit FlashInfer GDN decode/prefill, 32 GB HiCache, and
+NIXL POSIX persistence. This is not a claim that every kernel computes in BF16.
 
 ## Launch 27B with DFlash2
 
@@ -49,10 +51,12 @@ FlashInfer linear decode/prefill, 32 GB HiCache, and NIXL POSIX persistence.
 configs/pennyroyal/serve-qwen38-27b-dflash2.sh
 ```
 
-The qualified shape is BF16 compute, target/draft FP8 E4M3 KV, eight DFlash2
-draft tokens, a 2,048-token draft window, TRTLLM-MHA/XQA target decode,
-FlashInfer target prefill and draft attention, 24 Mamba slots, five retained
-states per path, 96 GB HiCache, and NIXL POSIX persistence.
+The target uses block-FP8 E4M3 weights and dynamic FP8 activations on quantized
+paths, with BF16 for unquantized tensors. Target/draft KV are FP8 E4M3; GDN SSM
+state is FP32 and convolution state BF16. The shape uses eight DFlash2 draft
+tokens, a 2,048-token draft window, TRTLLM-MHA/XQA target decode, FlashInfer
+target prefill/draft attention, Triton FP8 MoE and GDN, 24 Mamba slots, five
+retained states per path, 96 GB HiCache, and NIXL POSIX persistence.
 
 ## Startup checks
 
@@ -63,6 +67,7 @@ For Flash-Next, confirm log lines for:
 - `FlashInferGDNKernel` decode/prefill and
   `none-mode WY output-only` verification/recovery;
 - QSA TRTLLM-Gen decode, `sgl-kernel` top-k, and MTP index sharing;
+- target and native-MTP MoE resolved to FlashInfer CUTLASS;
 - recovery graphs for batch sizes 1-4;
 - attached KV, Mamba/PLE, and QSA HiCache pools.
 
@@ -72,6 +77,8 @@ For 27B, confirm:
 - `Initialized DFLASH draft runner` with eight tokens and window 2,048;
 - fused KV materialization;
 - FlashInfer prefill/draft and TRTLLM-MHA target decode/verify;
+- FP8 MoE resolved to Triton rather than DeepGEMM under A2A `none`;
+- 24 Mamba slots, five retained states/path, and 1,118,784 KV tokens;
 - target prefill, target verify, and draft verify graph capture.
 
 ## Smoke through the normal API

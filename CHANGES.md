@@ -1,6 +1,6 @@
-# What changed since the frozen build
+# Cumulative changes and upstream status
 
-The published runtime is the ordered range
+The current runtime is the ordered range
 `e7e78940168f..64ecd64924fe`. All 19 commits remain in source history. Current
 upstream `main` was fetched at `20a491d1d311553bbab3f22e19bbafb86ef3c0cc`;
 none of the commits was patch-equivalent there on 2026-08-27.
@@ -10,7 +10,43 @@ commit has not merged upstream. Where a PR has a later refined head, that is
 shown separately rather than pretending the local commit and PR head are
 identical.
 
-## Ordered runtime changes
+## 2026-08-24: Qwen3.8-27B/DFlash2 dated release
+
+Tag: `qwen38-dflash2-pro6000-20260824`.
+
+That release established the 27B architecture, DFlash2 performance, XQA target
+verification, request-span measurement, and HiCache/NIXL persistence later
+carried into the unified runtime. Its seven source commits were:
+
+| Dated-release commit | Function | Current lineage |
+|---|---|---|
+| `560f06a94e` | independent target/draft Hugging Face overrides | represented by current `a8c4404ef8`; project PR #35583 closed unmerged |
+| `b74d971054` | preserve draftless custom speculative hooks | represented by current `94f362d1f2` |
+| `5b06cf9f42` | pass fingerprinted host compiler to NVCC | represented by current `512a95e329`; project PR #35584 open |
+| `e9971ac6eb` | queue/prefill/post-prefill/forward elapsed spans | represented by current `730d244a08` |
+| `ba600c682a` | Mooncake hybrid-I/O experiment | obsolete; Mooncake was rejected and is not in the active deployment |
+| `2e79cdc030` | XQA packed mask for fixed-width speculative verification | represented by current `0f159cd545` |
+| `8e197ed3af` | NIXL bounce-transfer and overlapping-registration corrections | split into current `8b786639e4` and `067c639c0a`; project PRs #36520/#36524 |
+
+Core DFlash2 support was already upstream-derived: PR #35371 added local
+convolution and the selector; PR #35496 added quantized target-`lm_head`
+selection; PR #35663 added the Qwen3.8-27B recipe. The selected target's
+`lm_head` is BF16, so #35496 is present but not the measured fast path.
+
+The dated release preserved the controlled 6,163.07 tok/s 64K prefill,
+1,618.31 tok/s 489K prefill, 108.75 tok/s C1, 390.23 tok/s C4, 98.26 xhigh
+reasoning, 95.807 medium reasoning, and the 124-request real agentic context
+curve. Those measurements remain in [RESULTS.md](RESULTS.md).
+
+## 2026-08-27: unified runtime and Flash-Next
+
+Tag: `sglang-rtxpro6000-20260827`.
+
+The branch moved to the current upstream integration base, carried the required
+27B behavior forward, and added day-one Flash-Next/Qwen4, QSA, native MTP,
+RecoverSSM, complete hybrid-state persistence, and three-axis fused mRoPE.
+
+### Ordered active runtime changes
 
 | Local commit | Disposition / upstream relationship | Affected path | Why and focused evidence |
 |---|---|---|---|
@@ -55,6 +91,8 @@ Status and head commits were queried directly from GitHub on 2026-08-27.
 | [#36497](https://github.com/sgl-project/sglang/pull/36497) Flash-Next | Open; `7c66045d71f067c1c5da2b85baad3c47d9a19cb7` | Day-zero import and local reconciliation |
 | [#36644](https://github.com/sgl-project/sglang/pull/36644) FP8 QSA scales | Open; `67f705c55e30324f047decf773b0b82d04e1ecb0` | Broader than active unit-scale correction; not integrated |
 | [#35371](https://github.com/sgl-project/sglang/pull/35371) DFlash2 local convolution/selector | Merged 2026-08-19; `e5a3e4d30fa7abda95bafd2d697f9f9c48566114` | Already in integration base; core 27B DFlash2 path |
+| [#35496](https://github.com/sgl-project/sglang/pull/35496) quantized DFlash2 target head | Merged 2026-08-20; `1bb02535dcb0ab03d399fd25e1595076b1db409d` | Present in base; inactive for the BF16 target `lm_head` |
+| [#35663](https://github.com/sgl-project/sglang/pull/35663) Qwen3.8-27B DFlash2 recipe | Merged 2026-08-20; `34f4be339b122bac9783ea44a23097eab31ea064` | Upstream recipe lineage |
 
 ## Deliberate exclusions
 

@@ -70,19 +70,22 @@ and auto-selected FP4/BF16 GEMM runners.
 | Component or phase | Resolved implementation | Selection | Change / evidence |
 |---|---|---|---|
 | Target prefill attention | FlashInfer | Explicit hybrid backend | 64K/490K tests |
-| Target decode / fixed-width verify | TRTLLM-MHA with XQA | Explicit + source mask fix | `0f159cd545`; graph metadata regression |
+| Target decode attention | TRTLLM-MHA with XQA | Explicit hybrid decode backend | controlled and real agentic decode |
+| Fixed-width target full-attention verify | TRTLLM-MHA/XQA with packed causal mask | Explicit + source mask fix | `0f159cd545`; graph metadata regression |
 | DFlash2 draft attention | FlashInfer | Explicit | draft-runner startup line |
 | DFlash2 local convolution | upstream DFlash2 path | Upstream base | merged PR #35371 |
 | Candidate selector | folded into draft CUDA graph | Upstream base | startup graph line |
 | DFlash fused KV materialization | Enabled | Upstream base | five-layer/8-head startup line |
 | Target and draft KV | FP8 E4M3 | Explicit | 1,118,784-token startup pools |
-| GDN decode/prefill/verify | Triton | Explicit/default | startup args and qualified run |
+| GDN decode/prefill/state verify | Triton | Resolved linear backend | startup args and qualified run |
+| Target routed-expert MoE | Triton FP8 MoE | Auto resolves to Triton because A2A is `none` | server args plus `Fp8MoEMethod.create_moe_runner` |
+| Target prefill / verify / draft graphs | Breakable prefill; full fixed-width verify | Automatic capture | startup graph-capture lines and live `cuda graph: True` |
 | Multimodal attention | `triton_attn` | Automatic | startup log; mRoPE fixed by `64ecd64924` |
 | Sampling / grammar | FlashInfer / XGrammar | Automatic | startup args |
 | HiCache transfer | NIXL POSIX | Explicit | persistent restore qualification |
 | Persistent state | target KV, Mamba/GDN, DFlash2 sidecar | Local NIXL integration | `8b786639e4`, `067c639c0a` |
 
 No separate local DeepGEMM SM120 patch is part of this 19-commit runtime stack.
-The DFlash2 support used here comes from the upstream base plus the explicit
-XQA mask and NIXL fixes above; this document does not infer a DeepGEMM backend
-from older experiments.
+With `moe_runner_backend=auto` and A2A `none`, the active FP8 method's source
+resolver selects Triton rather than DeepGEMM. The DFlash2 support used here
+comes from the upstream base plus the explicit XQA mask and NIXL fixes above.

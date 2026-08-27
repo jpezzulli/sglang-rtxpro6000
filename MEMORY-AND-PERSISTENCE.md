@@ -40,6 +40,29 @@ The final startup allocation was:
 Peak physical use was 95,817 of 97,887 MiB, leaving 1,475 MiB. The final full
 suite recorded no OOM, CUDA error, or retraction.
 
+## Qwen3.8-27B/DFlash2 GPU allocation
+
+The dated 2026-08-24 performance release and the later current-launcher
+confirmation used different recurrent-state safety margins:
+
+| 27B configuration | Mamba slots | States/path | Target/draft KV capacity |
+|---|---:|---:|---:|
+| Dated performance release | 16 | 3 | 1,194,496 tokens |
+| Current launcher confirmation | 24 | 5 | 1,118,784 tokens |
+
+The current configuration intentionally spends part of the token-pool headroom
+on recurrent-state concurrency. Its startup allocation was:
+
+- target FP8 KV: 17.07 GiB K + 17.07 GiB V;
+- DFlash2 FP8 KV: 5.34 GiB K + 5.34 GiB V;
+- Mamba convolution state: 0.07 GiB;
+- Mamba SSM state: 3.52 GiB;
+- speculative intermediate SSM: 5.62 GiB;
+- intermediate convolution window: 0.05 GiB.
+
+The full suite used at most 10 of 24 Mamba entries. The five-state path cap is a
+retained-prefix correctness/concurrency setting, not a decode optimization.
+
 ## HiCache and NIXL
 
 The deployed hierarchy is:

@@ -91,6 +91,27 @@ python -m pip install build-posix/src/bindings/python/nixl-meta/nixl-*-py3-none-
 The recorded `nixl-cu13==1.4.0` wheel SHA-256 was
 `b2d618bc9593bf78120b44f9d573af8807e83716ae8c539b0f1532cc55a55ad8`.
 
+## Qualified checkpoints
+
+Weights are not distributed here. To reproduce the exact model identities:
+
+```bash
+hf download RadixArk/Qwen3.8-Flash-Next-NVFP4 \
+  --revision 7b719225242aacd3dbd3f9407468c2ee9a9d2594 \
+  --local-dir /path/to/flash-next
+
+hf download orcarouter/Qwen3.8-27B-Uncensored-FP8 \
+  --revision 9228df5c6c9c509e1019f83b4e085cf643118bac \
+  --local-dir /path/to/qwen38-27b-target
+
+hf download incoai/Qwen3.8-27B-DFlash2 \
+  --revision adde41d8fde3a75dc905a7df0bd5088d2a44b5a1 \
+  --local-dir /path/to/qwen38-27b-draft
+```
+
+The 27B target is an uncensored/abliterated derivative. That is material to its
+reasoning, refusal, and behavioral results. Review each model card and license.
+
 ## Build verification
 
 Run the focused tests named in [CHANGES.md](CHANGES.md), then perform a real
