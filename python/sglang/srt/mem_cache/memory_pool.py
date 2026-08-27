@@ -1531,6 +1531,13 @@ class HybridReqToTokenPool(ReqToTokenPool):
             self.layer_transfer_counter.wait_until(0)
         return self.ngram_pool.get_context(ngram_indices)
 
+    def wait_for_hicache_load_complete(self) -> None:
+        """Order whole-slot consumers after an active layerwise H->D load."""
+        if self.layer_transfer_counter is not None:
+            self.layer_transfer_counter.wait_until(
+                self.layer_transfer_counter.num_layers - 1
+            )
+
     def set_ngram_context(
         self, ngram_indices: torch.Tensor, context: torch.Tensor
     ) -> None:

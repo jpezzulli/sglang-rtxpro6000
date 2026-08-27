@@ -1678,6 +1678,12 @@ class ModelRunner:
             forward_batch.mamba_cow_src_indices is not None
             and len(forward_batch.mamba_cow_src_indices) > 0
         ):
+            # A HiCache load publishes the radix slot layerwise on its H->D
+            # stream.  Deferred COW reads the complete source slot at once, so
+            # it must wait for the final layer rather than racing ahead of the
+            # per-layer attention waits and copying an uninitialized source
+            # over the independently restored request slot.
+            pool.wait_for_hicache_load_complete()
             if pool.mamba_ckpt_pool is not None:
                 # int8 checkpoints: dequantize src int8 ckpt slot into the active bf16 dst.
                 pool.mamba_ckpt_pool.load_to_active(
