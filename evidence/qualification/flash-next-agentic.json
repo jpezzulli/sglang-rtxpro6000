@@ -1,0 +1,24 @@
+{
+  "date": "2026-08-27",
+  "scope": "first 96 decontaminated real agentic requests in the retained analysis window",
+  "requests": 96,
+  "output_tokens": 100666,
+  "effective_decode_tokens_per_second": {
+    "token_weighted": 139.535264,
+    "per_request_median": 153.477875,
+    "arithmetic_mean": 155.051476,
+    "completed_request_peak": 218.842593
+  },
+  "instantaneous_telemetry_peak_tokens_per_second": {
+    "running_1": 246.99,
+    "running_2": 254.17,
+    "running_3": 413.91,
+    "running_4": 543.07
+  },
+  "input_band_90000_to_279999": {
+    "requests": 73,
+    "token_weighted": 138.657289,
+    "per_request_median": 148.414055
+  },
+  "exclusion": "The first telemetry sample after a large prefill was excluded because it mixed prefill or idle time with decode."
+}

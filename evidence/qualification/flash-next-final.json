@@ -1,0 +1,36 @@
+{
+  "date": "2026-08-27",
+  "source_commit": "64ecd64924fee338e3bf846a32167cd604186827",
+  "served_context_tokens": 524288,
+  "gpu_kv_capacity_tokens": 824384,
+  "mamba_slots": 24,
+  "performance": {
+    "prefill_64k_tokens_per_second": 10103.70,
+    "prefill_490k_tokens_per_second": 7872.15,
+    "decode_1x_tokens_per_second": 171.09,
+    "decode_4x_batch_tokens": 4096,
+    "decode_4x_batch_seconds": 9.580393,
+    "decode_4x_aggregate_tokens_per_second": 427.539869,
+    "decode_4x_post_first_token_streams": [115.133, 127.563, 126.640, 122.965],
+    "mtp_mean_accepted_length": 2.5839,
+    "mtp_acceptance_percent": 52.7391,
+    "sealed_agentic_control_tokens_per_second": 148.80,
+    "natural_3072_decode_tokens_per_second": 162.05
+  },
+  "correctness": {
+    "long_context_needles_exact": "3/3",
+    "reasoning_score": 97.49,
+    "reasoning_completion_tokens": 139863,
+    "tools_semantic": "30/30",
+    "tools_literal_checker": "27/30",
+    "vision_1024": "passed"
+  },
+  "persistent_restart": {
+    "prefix_64k_restored_tokens": 63808,
+    "prefix_64k_recomputed_tokens": 56,
+    "prefix_490k_restored_tokens": 489856,
+    "prefix_490k_recomputed_tokens": 23,
+    "prefix_490k_effective_input_tokens_per_second": 62040.60,
+    "needles_exact": "3/3"
+  }
+}
