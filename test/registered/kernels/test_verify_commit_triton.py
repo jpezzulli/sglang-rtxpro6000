@@ -30,7 +30,9 @@ def _reference(accept_index, accept_lens, seq_lens, draft_token_num, track_inter
     post = seq_lens + accept_lens
     mask = pre // track_interval != post // track_interval
     point = post // track_interval * track_interval
-    ith = torch.clamp(point - pre - 1, min=0).to(torch.int64)
+    ith = torch.clamp(torch.minimum(point - pre, accept_lens - 1), min=0).to(
+        torch.int64
+    )
     cand = accept_index[req_idx, ith] - offset
     track = torch.where(mask, cand, torch.full_like(cand, -1))
     return last, track
@@ -73,6 +75,26 @@ def test_verify_commit_steps_matches_eager(bs, track_interval):
         assert torch.equal(got_track, exp_track)
     else:
         assert got_track is None
+
+
+def test_verify_commit_steps_clamp_to_accepted_path():
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+
+    draft_token_num = 4
+    accept_lens = torch.full((4,), 4, dtype=torch.int64, device="cuda")
+    accept_index = torch.arange(16, dtype=torch.int64, device="cuda").reshape(4, 4)
+    seq_lens = torch.tensor([63, 62, 61, 60], dtype=torch.int64, device="cuda")
+
+    _, track = fused_commit_track_indices(
+        accept_index,
+        accept_lens,
+        seq_lens,
+        draft_token_num,
+        64,
+    )
+
+    assert torch.equal(track, torch.tensor([1, 2, 3, 3], device="cuda"))
 
 
 if __name__ == "__main__":
