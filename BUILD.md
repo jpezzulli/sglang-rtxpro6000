@@ -25,7 +25,11 @@ The installed SGLang wheel built from source commit `1ba0b2a1b5` had SHA-256
 
 ## Native build
 
-Check out this release tag and create an isolated Python 3.12 environment:
+The release tag includes documentation commits above the executable source.
+For an exact rebuild of the installed wheel and version string, check out
+`1ba0b2a1b51f7cb04d0e5a7ce4623d5c9c2cab6b`; use
+`pennyroyal-v2.1.0` when browsing the complete release documentation. Then
+create an isolated Python 3.12 environment:
 
 ```bash
 uv python install 3.12.13
