@@ -351,7 +351,10 @@ def test_qsa_glue_fetches_indexer_metadata_without_model_unwrap():
     )
     hybrid = HybridLinearAttnBackend(
         full_attn_backend=full,
-        linear_attn_backend=SimpleNamespace(needs_cpu_seq_lens=True),
+        linear_attn_backend=SimpleNamespace(
+            needs_cpu_seq_lens=True,
+            _recover_ssm=False,
+        ),
         full_attn_layers=[3],
     )
     # Full-attention layers fetch through the hybrid wrapper directly.
@@ -378,6 +381,7 @@ def test_qsa_cuda_graph_padding_reaches_hybrid_children():
             self.token_to_kv_pool = None
             self.req_to_token_pool = None
             self.needs_cpu_seq_lens = True
+            self._recover_ssm = False
 
         def init_forward_metadata_out_graph(self, forward_batch, in_capture=False):
             self.num_padding = getattr(forward_batch, "num_padding", None)
