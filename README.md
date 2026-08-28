@@ -15,6 +15,14 @@ machine—including 524K context, multimodal input, reasoning, tools, agentic
 workloads, CUDA-graph recovery, and persistent prefix restoration—but it may
 still contain rough edges or hardware/model-specific assumptions.
 
+## Validation suite
+
+The canonical test suite used to qualify these runtimes—including reasoning,
+tool calling, long-context needles, vision, and concurrent decode—is maintained
+in [`jpezzulli/pennyroyal-validation`](https://github.com/jpezzulli/pennyroyal-validation).
+This repository contains the runtime source, configuration, and measured
+results; `pennyroyal-validation` contains the reusable tests and result catalog.
+
 ## Why this runtime exists
 
 The important work is architectural, not merely a collection of launch flags:
