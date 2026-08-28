@@ -260,6 +260,13 @@ batch tail. These results were measured with QSA sparse decode resolving to
 XQA. No matched SM120 end-to-end A/B supports a percentage claim against
 another QSA backend.
 
+### Independent TP=2 FP8 validation
+
+H3PO independently validated this runtime on a dual-GPU TP=2/EP=2 FP8
+deployment with native MTP after removing the optional overlap-plan-stream
+setting. The raw third-party table, corpus description, capacity result, and
+scope limits are preserved in [RESULTS.md](RESULTS.md#independent-tp2-fp8-validation).
+
 ### Qwen3.8-27B/DFlash2 dated performance campaign
 
 | Test | Result |

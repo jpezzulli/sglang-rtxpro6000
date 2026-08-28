@@ -82,6 +82,73 @@ context cliff; acceptance variation caused most visible throughput movement.
 | ~64K | 63,808 | 56 | not used as a cold-prefill comparison | coherent response |
 | ~490K | 489,856 | 23 | 62,040.60 tok/s | 3/3 needles exact |
 
+## Independent TP=2 FP8 Validation
+
+These are third-party results reported by Reddit user H3PO, not Penny's TP=1
+benchmark campaign. H3PO used the published runtime with a dual-RTX PRO 6000
+TP=2/EP=2 deployment without NVLink, the
+`Qwen/Qwen3.8-Flash-Next-FP8` checkpoint, FP8 KV, native NEXTN MTP, and a
+StackOverflow-derived coding corpus. The complete report and surrounding
+diagnostic chain are in [H3PO's Reddit
+comment](https://www.reddit.com/r/BlackwellPerformance/comments/1w04xb7/comment/p6ek6e8/).
+
+The decisive configuration result was removing
+`SGLANG_ENABLE_OVERLAP_PLAN_STREAM=1`, an optional setting absent from Penny's
+qualified launcher. Native MTP then booted and sustained generation. This did
+not require disabling CUDA graphs, MTP, QSA, GDN, TP=2/EP=2, or FP8. The
+earlier `custom_all_reduce.cuh` graph-capture failure was separate and had
+already been resolved by removing
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+
+The headline observations are:
+
+- C1 prefill: **13,414.47 ± 82.74 tok/s** on the coding corpus.
+- Aggregate decode scaled from **200.93 ± 12.87 tok/s at C1** to
+  **295.88 ± 29.07 at C2**, **330.76 ± 22.04 at C4**, and
+  **339.34 ± 11.14 at C6**.
+- `mem-fraction-static=0.95` yielded a **3,182,848-token** KV pool, described by
+  H3PO as approximately six 512K contexts.
+- The high-concurrency prefill rows have very large variance and visible
+  scheduler effects. They are retained below as raw evidence, not promoted as
+  comparative headline results.
+
+Third-party benchmark shape, with the private endpoint anonymized:
+
+```bash
+~/.venv/bin/llama-benchy \
+  --base-url http://<server>:6000/v1 \
+  --model Qwen/Qwen3.8-Flash-Next-FP8 \
+  --served-model-name Qwen3.8-Flash-Next-FP8-TP2 \
+  --pp 4096 --tg 1024 --latency-mode generation \
+  --concurrency 1 2 4 6 --runs 3 --depth 0 \
+  --book-url local://coding.txt
+```
+
+Raw table as reported:
+
+| Model | Test | t/s (total) | t/s (req) | Peak t/s | Peak t/s (req) | TTFR (ms) | Est. PPT (ms) | E2E TTFT (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Qwen/Qwen3.8-Flash-Next-FP8 | pp4096 (c1) | 13414.47 ± 82.74 | 13414.47 ± 82.74 |  |  | 408.69 ± 1.89 | 305.43 ± 1.89 | 408.69 ± 1.89 |
+| Qwen/Qwen3.8-Flash-Next-FP8 | tg1024 (c1) | 200.93 ± 12.87 | 200.93 ± 12.87 | 201.33 ± 12.81 | 201.33 ± 12.81 |  |  |  |
+| Qwen/Qwen3.8-Flash-Next-FP8 | pp4096 (c2) | 10770.55 ± 20.76 | 6723.66 ± 491.07 |  |  | 715.87 ± 44.74 | 612.61 ± 44.74 | 715.87 ± 44.74 |
+| Qwen/Qwen3.8-Flash-Next-FP8 | tg1024 (c2) | 295.88 ± 29.07 | 165.99 ± 9.30 | 333.00 ± 4.90 | 166.50 ± 9.18 |  |  |  |
+| Qwen/Qwen3.8-Flash-Next-FP8 | pp4096 (c4) | 2806.18 ± 790.40 | 4119.82 ± 2284.63 |  |  | 2260.41 ± 2428.25 | 2157.14 ± 2428.25 | 2260.41 ± 2428.25 |
+| Qwen/Qwen3.8-Flash-Next-FP8 | tg1024 (c4) | 330.76 ± 22.04 | 144.41 ± 10.83 | 426.33 ± 8.18 | 144.75 ± 10.83 |  |  |  |
+| Qwen/Qwen3.8-Flash-Next-FP8 | pp4096 (c6) | 2848.10 ± 249.01 | 2981.79 ± 2520.70 |  |  | 4068.86 ± 3489.61 | 3965.60 ± 3489.61 | 4068.86 ± 3489.61 |
+| Qwen/Qwen3.8-Flash-Next-FP8 | tg1024 (c6) | 339.34 ± 11.14 | 135.70 ± 15.21 | 471.33 ± 56.84 | 136.11 ± 15.11 |  |  |  |
+
+This independently extends the integration evidence across:
+
+- TP=1 NVFP4 and TP=2 FP8;
+- different checkpoints;
+- different hardware configurations;
+- different workloads; and
+- another operator's deployment.
+
+It is useful upstream evidence that the integration is not confined to
+Penny's exact TP=1 shape. It is not a controlled TP=1-versus-TP=2 comparison,
+and the third-party result has not been reproduced locally.
+
 ## Qwen3.8-27B/DFlash2 current-launcher confirmation
 
 This 2026-08-26 campaign qualified the current 24-slot, five-state path setting
