@@ -227,6 +227,19 @@ single A/B benchmark.
 
 ### Flash-Next final campaign — source `64ecd64924`
 
+The published campaign below used `lactd` with the workstation card's fan
+curve active and this relevant power/clock profile:
+
+```yaml
+power_cap: 450.0
+min_core_clock: 210
+max_core_clock: 2750
+gpu_clock_offsets:
+  0: 1000
+mem_clock_offsets:
+  0: 2000
+```
+
 | Test | Result |
 |---|---:|
 | 64K cold prefill | 10,103.70 tok/s |
@@ -246,6 +259,17 @@ post-first-token interval. The aggregate is the matched batch metric:
 `4,096 output tokens / 9.580393 seconds`, including TTFT and the batch tail.
 These results were measured with QSA sparse decode resolving to XQA. No matched
 SM120 end-to-end A/B supports a percentage claim against another QSA backend.
+
+On 2026-08-28 the same runtime was retested after removing the `lactd` power
+cap and clock limits, restoring the card's stock 600 W envelope. A
+cache-busted 64K cold prefill improved from **10,103.70** to **12,812.44
+tok/s** (+26.8%); SGLang's prefill-only time fell from 5.539 to 4.323 seconds.
+The card drew 530-572 W during that pass. Everything else was effectively
+unchanged: the cache-busted ~490K prefill measured 7,926.36 tok/s (+0.69%) with
+3/3 exact needles, and the warmed four-request decode measured 434.03 tok/s
+aggregate (+1.5%). Single-request decode never reached the former 450 W limit
+(about 377-381 W) and remained dominated by run-to-run native-MTP acceptance
+variation rather than the power setting.
 
 ### Qwen3.8-27B/DFlash2 dated performance campaign
 
