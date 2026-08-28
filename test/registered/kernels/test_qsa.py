@@ -42,7 +42,31 @@ BLOCK_TOPK = TOKEN_TOPK // COMPRESS_RATIO
 FINAL_TOPK = TOKEN_TOPK + COMPRESS_RATIO - 1
 
 
-def test_qsa_trtllm_sparse_decode_is_enabled_on_sm120(monkeypatch):
+@pytest.mark.parametrize(
+    ("capability", "expected"),
+    [((12, 0), True), ((12, 1), False), ((10, 0), False)],
+)
+def test_is_sm120_matches_exact_capability(monkeypatch, capability, expected):
+    from sglang.srt.utils import common
+
+    common.is_sm120.cache_clear()
+    monkeypatch.setattr(common, "is_cuda", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: capability)
+
+    try:
+        assert common.is_sm120() is expected
+    finally:
+        common.is_sm120.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("sm100", "sm120", "expected_enabled"),
+    [(False, True, True), (True, False, True), (False, False, False)],
+    ids=["sm120", "sm100", "other-sm12x"],
+)
+def test_qsa_trtllm_sparse_decode_arch_gate(
+    monkeypatch, sm100, sm120, expected_enabled
+):
     resolver = qsa_backend_module._resolve_trtllm_sparse_decode
     resolver.cache_clear()
 
@@ -50,12 +74,13 @@ def test_qsa_trtllm_sparse_decode_is_enabled_on_sm120(monkeypatch):
     flashinfer_decode = ModuleType("flashinfer.decode")
     flashinfer_decode.trtllm_batch_decode_with_kv_cache = trtllm_decode_func
 
-    monkeypatch.setattr("sglang.srt.utils.is_sm100_supported", lambda: False)
-    monkeypatch.setattr("sglang.srt.utils.is_sm120_supported", lambda: True)
+    monkeypatch.setattr("sglang.srt.utils.is_sm100_supported", lambda: sm100)
+    monkeypatch.setattr("sglang.srt.utils.is_sm120", lambda: sm120)
     monkeypatch.setitem(sys.modules, flashinfer_decode.__name__, flashinfer_decode)
 
     try:
-        assert resolver() is trtllm_decode_func
+        expected = trtllm_decode_func if expected_enabled else None
+        assert resolver() is expected
     finally:
         resolver.cache_clear()
 
