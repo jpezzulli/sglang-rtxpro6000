@@ -121,6 +121,3 @@ provides the clearest semantics.
 ```text
 490K restart: 489,856 / 489,879 input tokens restored; 23 recomputed; 3/3 needles exact
 ```
-
-The effective restored-prefix rate was 62,040.60 input tok/s. It must not be
-reported as cold model prefill speed.

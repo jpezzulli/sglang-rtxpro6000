@@ -174,8 +174,7 @@ three cases:
    SM120 enter FlashInfer's page-aligned QSA decode wrapper, while `8de07a058f`
    adopts upstream #36806's exact `(12, 0)` gate so SM121/GB10 is not admitted.
    On SM120 the wrapper resolves to XQA, an existing supported implementation;
-   it does not select TRTLLM-Gen. The upstream approximately 35% statement from
-   PR #36497 was recorded while this resolver was SM100-only and is not
+   it does not select TRTLLM-Gen. No upstream SM100 throughput claim is
    attributed to Penny's SM120 results.
 
 4. **Incompatible gates deliberately retained.** Forced TRTLLM-Gen fails with
@@ -255,23 +254,11 @@ mem_clock_offsets:
 | Sealed agentic control | 148.80 tok/s |
 | Natural 3,072-token decode | 162.05 tok/s |
 
-The four individual post-first-token rates were 115.13, 127.56, 126.64, and
-122.96 tok/s. They do **not** sum to 427.54 because they use each stream's own
-post-first-token interval. The aggregate is the matched batch metric:
-`4,096 output tokens / 9.580393 seconds`, including TTFT and the batch tail.
-These results were measured with QSA sparse decode resolving to XQA. No matched
-SM120 end-to-end A/B supports a percentage claim against another QSA backend.
-
-On 2026-08-28 the same runtime was retested after removing the `lactd` power
-cap and clock limits, restoring the card's stock 600 W envelope. A
-cache-busted 64K cold prefill improved from **10,103.70** to **12,812.44
-tok/s** (+26.8%); SGLang's prefill-only time fell from 5.539 to 4.323 seconds.
-The card drew 530-572 W during that pass. Everything else was effectively
-unchanged: the cache-busted ~490K prefill measured 7,926.36 tok/s (+0.69%) with
-3/3 exact needles, and the warmed four-request decode measured 434.03 tok/s
-aggregate (+1.5%). Single-request decode never reached the former 450 W limit
-(about 377-381 W) and remained dominated by run-to-run native-MTP acceptance
-variation rather than the power setting.
+Per-stream post-first-token rates do **not** sum to the synchronized aggregate
+because each stream uses its own interval. The aggregate includes TTFT and the
+batch tail. These results were measured with QSA sparse decode resolving to
+XQA. No matched SM120 end-to-end A/B supports a percentage claim against
+another QSA backend.
 
 ### Qwen3.8-27B/DFlash2 dated performance campaign
 
@@ -284,35 +271,25 @@ variation rather than the power setting.
 | Reasoning, xhigh / medium | 98.26 / 95.807 |
 | Medium tool suite | 30/30 tool selections and arguments; 29/30 reviewed response discipline |
 
-Against the cited public TP1 official-FP8/MTP3 community capture, the dated
-DFlash2 campaign measured +39.8% at C1, +33.3% at C4, and +4.9% at 64K prefill.
-This remains directional rather than a strict A/B because checkpoint, runtime,
-speculation, power, harness, output duration, and cache configuration differ.
+The cited public TP1 official-FP8/MTP3 community capture is directional rather
+than a strict A/B because checkpoint, runtime, speculation, power, harness,
+output duration, and cache configuration differ.
 
-The current 24-slot/five-state confirmation measured 6,169.18 tok/s at 64K,
-1,616.29 tok/s at ~490K with all needles exact, 108.93 tok/s at C1, and
-375.81 tok/s aggregate at C4. It reached a 96.92 reasoning score across 50,986
-completion tokens and used at most 10 of 24 Mamba entries.
+The current 24-slot/five-state confirmation retained exact long-context
+needles, reached a 96.92 reasoning score across 50,986 completion tokens, and
+used at most 10 of 24 Mamba entries.
 
 ### 27B real agentic context behavior
 
-The dated 124-request sample contained 85,156 output tokens and inputs from 183
-to 350,195 tokens. All observed requests measured 131.31 tok/s median and
-102.57 tok/s token-weighted. Excluding seven overlapping request intervals,
-the result was 133.21 median / 125.36 weighted. Short 0-2K requests reached
-165.25 median / 148.35 weighted; the non-overlapping 340-360K band measured
-105.45 median / 101.69 weighted. The fastest completed request was 244.24 tok/s,
-while a favorable instantaneous DFlash2 telemetry window reached 300.16 tok/s
-at 7.75 accepted tokens and 0.96 acceptance. Telemetry is not reported as
-sustained completed-request throughput.
+The dated 124-request sample covered 85,156 output tokens and inputs from 183
+to 350,195 tokens. [RESULTS.md](RESULTS.md) preserves the context-band tables,
+overlap treatment, and distinction between completed-request and instantaneous
+telemetry measurements.
 
 ### Flash-Next real agentic context behavior
 
-A separate decontaminated 96-request window produced 100,666 output tokens at
-139.5 tok/s token-weighted, 153.5 median, and 155.1 arithmetic mean. The
-sustained completed-request peak was 218.8 tok/s; instantaneous telemetry
-reached 247.0 tok/s for one stream and briefly 543.1 tok/s at four concurrent
-requests. The 90K-279K input lane measured 138.7 weighted / 148.4 median. The
+A separate decontaminated 96-request window covered 100,666 output tokens.
+[RESULTS.md](RESULTS.md) preserves its context-band and aggregate tables. The
 first sample after a large prefill was excluded because its telemetry interval
 mixed prefill or idle time with decode.
 
@@ -334,10 +311,7 @@ Flash-Next restart evidence:
 
 - 63,808 of 63,864 input tokens restored; 56 recomputed.
 - 489,856 of 489,879 restored; 23 recomputed.
-- restored 490K effective input rate: 62,040.60 tok/s.
 - all three needles exact after restart.
-
-The 62,040.60 figure is restored-prefix throughput, not cold model prefill.
 
 The earlier 27B work also demonstrated 518,528 restored tokens with a six-token
 tail in 14.64 seconds, 60,032-token namespace reuse after restart, A→B→A page-
@@ -417,9 +391,9 @@ coverage.
   numbers are silently attributed to the other.
 - The full published Flash-Next reasoning/tool/vision campaign ran at
   `64ecd64924`. The v2.1 correctness sync at `1ba0b2a1b5` received focused
-  CPU/CUDA tests, Flash-Next 1x/3x/73K-prefix tests plus restart restoration,
-  and a separate 27B DFlash2 1x/3x/73K compatibility run; the full reasoning
-  and tool suites were not rerun for this narrow update.
+  CPU/CUDA tests, Flash-Next prefix reuse plus restart restoration, and a
+  separate 27B DFlash2 compatibility check; the full reasoning and tool suites
+  were not rerun for this narrow update.
 - NIXL cleaner thresholds are whole-filesystem occupancy percentages, not an
   absolute directory byte quota.
 

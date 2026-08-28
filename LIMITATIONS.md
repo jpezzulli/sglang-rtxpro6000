@@ -38,8 +38,8 @@
 - Cold prefill, restored-prefix effective prefill, completed-request decode,
   per-stream post-first-token rates, synchronized aggregate throughput, and
   instantaneous server telemetry are different measurements.
-- Favorable 250-300 tok/s DFlash2 and 543 tok/s Flash-Next samples are short
-  telemetry windows, not sustained completed-request rates.
+- Favorable instantaneous samples are short telemetry windows, not sustained
+  completed-request rates.
 - DFlash2 and native-MTP acceptance vary with content and context and explain a
   large part of throughput variation.
 - The 27B community comparison is directional. Checkpoint, runtime,

@@ -56,9 +56,9 @@ available path. Requested flags alone were not treated as resolution evidence.
 
 QSA decode is a distinct case. Commit `c1da0eef56` lets SM120 enter
 FlashInfer's page-aligned QSA wrapper, but the wrapper's SM12x dispatch selects
-XQA—not TRTLLM-Gen. The approximately 35% statement inherited from PR #36497
-was measured while the resolver was SM100-only and is not evidence for SM120.
-There is no matched end-to-end XQA-versus-fallback percentage claim here.
+XQA—not TRTLLM-Gen. The throughput statement inherited from PR #36497 was
+measured while the resolver was SM100-only and is not evidence for SM120. There
+is no matched end-to-end XQA-versus-fallback percentage claim here.
 
 Direct probing also established that TRTLLM-Gen is not merely hidden behind a
 conservative gate. Forced selection reports `Unsupported architecture`; after

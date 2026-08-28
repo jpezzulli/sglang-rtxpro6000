@@ -23,10 +23,10 @@ Version 2.1 retains the qualified launch shapes and adds three source commits:
 
 Focused validation: 72 QSA/Mamba/CUDA tests passed. Flash-Next retained its
 824,384-token FP8 target/native-MTP pools, 24 Mamba slots, recovery graphs,
-1x/3x decode, 73,664-token reuse, and post-restart NIXL restoration. The 27B
+73,664-token prefix reuse, and post-restart NIXL restoration. The 27B
 DFlash2 launcher retained 1,118,784-token FP8 target/draft pools, fused KV
-materialization, graph capture, 1x/3x decode, and 73,664-token reuse. No CUDA
-errors or retractions were observed. Full reasoning/tool suites were not rerun.
+materialization, graph capture, and 73,664-token prefix reuse. No CUDA errors
+or retractions were observed. Full reasoning/tool suites were not rerun.
 
 ## 2026-08-24: Qwen3.8-27B/DFlash2 dated release
 
@@ -51,10 +51,9 @@ convolution and the selector; PR #35496 added quantized target-`lm_head`
 selection; PR #35663 added the Qwen3.8-27B recipe. The selected target's
 `lm_head` is BF16, so #35496 is present but not the measured fast path.
 
-The dated release preserved the controlled 6,163.07 tok/s 64K prefill,
-1,618.31 tok/s 489K prefill, 108.75 tok/s C1, 390.23 tok/s C4, 98.26 xhigh
-reasoning, 95.807 medium reasoning, and the 124-request real agentic context
-curve. Those measurements remain in [RESULTS.md](RESULTS.md).
+The dated release preserved the controlled performance, reasoning,
+long-context, and real-agentic evidence documented in
+[RESULTS.md](RESULTS.md).
 
 ## 2026-08-27: unified runtime and Flash-Next
 
@@ -109,7 +108,7 @@ Status and head commits were queried directly from GitHub on 2026-08-27.
 |---|---|---|
 | [#30967](https://github.com/sgl-project/sglang/pull/30967) RecoverSSM | Open; `71c5de2e74c8e9b048bb62ab9cdadedb8ea83100` | Architectural basis adapted by `280825c3e2` |
 | [#35744](https://github.com/sgl-project/sglang/pull/35744) fused mRoPE | Open; `9b2e053ce0d203b368e68e915667295aea24df32` | Integrated by `64ecd64924` |
-| [#36497](https://github.com/sgl-project/sglang/pull/36497) Flash-Next | Open; `7c66045d71f067c1c5da2b85baad3c47d9a19cb7` | Day-zero import and local reconciliation; its approximately 35% QSA decode statement was SM100-only and is not attributed to SM120 |
+| [#36497](https://github.com/sgl-project/sglang/pull/36497) Flash-Next | Open; `7c66045d71f067c1c5da2b85baad3c47d9a19cb7` | Day-zero import and local reconciliation; its SM100-only QSA throughput statement is not attributed to SM120 |
 | [#36644](https://github.com/sgl-project/sglang/pull/36644) FP8 QSA scales | Open; `67f705c55e30324f047decf773b0b82d04e1ecb0` | Broader than active unit-scale correction; not integrated |
 | [#35821](https://github.com/sgl-project/sglang/pull/35821) Mamba radix ghost node / track bound | Merged to Qwen optimization lineage; `b81d082abb5caec5d43a731a19b2bb898e93e3b0` | Adapted by `23e51dddcb` across Penny's additional fused/KDA paths |
 | [#36806](https://github.com/sgl-project/sglang/pull/36806) exact SM120 QSA route | Merged to `qwen4-main-squashed`; `99c9362e6685db579c469f6e0e566b08827b3477` | Adapted by `8de07a058f` |
