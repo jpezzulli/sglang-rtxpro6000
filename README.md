@@ -52,11 +52,12 @@ The important work is architectural, not merely a collection of launch flags:
 | Item | Value |
 |---|---|
 | Canonical branch | `pennyroyal-main-sm120-final` |
-| Current executable source | `64ecd64924fee338e3bf846a32167cd604186827` |
-| Current dated tag | `sglang-rtxpro6000-20260827` |
+| Current executable source | `1ba0b2a1b51f7cb04d0e5a7ce4623d5c9c2cab6b` |
+| Current release tag | `pennyroyal-v2.1.0` |
+| Initial unified dated tag | `sglang-rtxpro6000-20260827` |
 | Earlier 27B dated tag | `qwen38-dflash2-pro6000-20260824` |
 | Upstream integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Installed SGLang | `0.5.19.dev485+g64ecd6492` |
+| Installed SGLang | `0.5.19.dev488+g1ba0b2a1b` |
 | Python / PyTorch | `3.12.13` / `2.13.0+cu130` |
 | CUDA / compiler | CUDA `13.3` (NVCC `13.3.73`) / GCC `15.3.1` |
 | FlashInfer / NIXL | `0.6.17` / `1.4.0` |
@@ -135,7 +136,7 @@ this FP8 configuration resolves MoE to Triton.
 | Ordinary/tree state-writing verification | `TritonGDNKernel` | architecture gate deliberately preserved | non-`none` source dispatch and focused tests |
 | Accepted-state recovery | FlashInfer WY output-only | narrow SM120 RecoverSSM route | recovery graphs BS 1-4; long continuation |
 | QSA sparse prefill | Triton sparse GQA | model path + FP8 tile fix `95da38fb3b` | 64K/490K exact qualification |
-| QSA sparse decode | FlashInfer QSA wrapper resolving to XQA | SM120 wrapper dispatch `c1da0eef56`; FlashInfer selects XQA on SM12x | direct backend probe and live decode |
+| QSA sparse decode | FlashInfer QSA wrapper resolving to XQA | SM120 wrapper dispatch `c1da0eef56`, narrowed to exact SM120 by `8de07a058f`; FlashInfer selects XQA on SM120 | direct backend probe and live decode |
 | QSA top-k | `sgl-kernel` | automatic | startup resolution |
 | QSA MTP index sharing | enabled | model path | startup line and shared-index tests |
 | Target MoE | FlashInfer CUTLASS | automatic ModelOpt-NVFP4 resolution | startup resolution and live tests |
@@ -170,11 +171,12 @@ three cases:
    restoration, retraction, long continuation, and captured-graph replay.
 
 3. **QSA wrapper enabled, backend distinguished.** Commit `c1da0eef56` lets
-   SM120 enter FlashInfer's page-aligned QSA decode wrapper. On SM120 that
-   wrapper resolves to XQA, an existing supported implementation; it does not
-   select TRTLLM-Gen. The upstream approximately 35% statement from PR #36497
-   was recorded while this resolver was SM100-only and is not attributed to
-   Penny's SM120 results.
+   SM120 enter FlashInfer's page-aligned QSA decode wrapper, while `8de07a058f`
+   adopts upstream #36806's exact `(12, 0)` gate so SM121/GB10 is not admitted.
+   On SM120 the wrapper resolves to XQA, an existing supported implementation;
+   it does not select TRTLLM-Gen. The upstream approximately 35% statement from
+   PR #36497 was recorded while this resolver was SM100-only and is not
+   attributed to Penny's SM120 results.
 
 4. **Incompatible gates deliberately retained.** Forced TRTLLM-Gen fails with
    `Unsupported architecture`. Bypassing the guard and loading the exact
@@ -385,16 +387,20 @@ OpenAI-compatible smoke requests, and cold/radix/NIXL cache distinctions.
 
 The cumulative history starts with the 2026-08-24 27B release, then layers the
 unified runtime and Flash-Next work on the same source line. The current active
-stack contains 19 commits above its integration base. Major groups are:
+stack contains 22 commits above its integration base. Major groups are:
 
 - Qwen3.8-27B/DFlash2: independent target/draft overrides, fixed-width XQA mask,
   NVCC host-compiler identity, request-span observability, and NIXL correctness.
 - Flash-Next: Qwen4 model support, QSA/HC/PLE/native-MTP integration, SM120 QSA
   decode, FP8 QSA prefill, RecoverSSM, complete hybrid persistence, and mRoPE.
+- v2.1 upstream sync: exact-SM120 QSA routing from #36806 and the Mamba radix
+  ghost-node/speculative tracking correction from #35821, adapted to Penny's
+  fused CUDA and KDA accepted-state paths.
 - Open project PRs: #36520, #36524, and #35584.
 - Closed project submissions retained in runtime history: #35583; transient
   ragged/DSpARK PR #35586 is documented but not in the active source.
-- Related upstream work: #30967, #35371, #35496, #35744, #36497, and #36644.
+- Related upstream work: #30967, #35371, #35496, #35744, #35821, #36497,
+  #36644, and #36806.
 
 [CHANGES.md](CHANGES.md) lists every material current commit, the earlier dated
 release hashes, exact PR links/status/heads, affected execution paths, and test
@@ -409,9 +415,11 @@ coverage.
 - Benchmark observations are not guarantees for another system.
 - Flash-Next and 27B results remain separate; neither model's features or
   numbers are silently attributed to the other.
-- Current Flash-Next qualification ran at `64ecd64924`. The later Flash-Next-
-  specific commits were not all re-benchmarked on the 27B campaign, so the
-  dated/current 27B evidence is labeled by its actual runtime line.
+- The full published Flash-Next reasoning/tool/vision campaign ran at
+  `64ecd64924`. The v2.1 correctness sync at `1ba0b2a1b5` received focused
+  CPU/CUDA tests, Flash-Next 1x/3x/73K-prefix tests plus restart restoration,
+  and a separate 27B DFlash2 1x/3x/73K compatibility run; the full reasoning
+  and tool suites were not rerun for this narrow update.
 - NIXL cleaner thresholds are whole-filesystem occupancy percentages, not an
   absolute directory byte quota.
 

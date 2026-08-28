@@ -6,10 +6,11 @@
 |---|---|
 | Upstream | `https://github.com/sgl-project/sglang.git` |
 | Canonical branch | `pennyroyal-main-sm120-final` |
-| Executable source HEAD | `64ecd64924fee338e3bf846a32167cd604186827` |
+| Executable source HEAD | `1ba0b2a1b51f7cb04d0e5a7ce4623d5c9c2cab6b` |
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Local runtime commits | 19 |
-| Installed package | `sglang==0.5.19.dev485+g64ecd6492` |
+| Local runtime commits | 22 |
+| Installed package | `sglang==0.5.19.dev488+g1ba0b2a1b` |
+| Current release tag | `pennyroyal-v2.1.0` |
 
 Documentation commits add the public explanation, sanitized launch recipes,
 and small evidence summaries on top of the executable source. They must not
@@ -18,9 +19,10 @@ remains reachable through `qwen38-dflash2-pro6000-20260824`; its useful results
 and source lineage are also retained cumulatively in the current documentation.
 
 Current upstream `main` was inspected at
-`20a491d1d311553bbab3f22e19bbafb86ef3c0cc` on 2026-08-27. `git cherry`
-reported no patch-equivalent for the 19 local commits. That is a source-state
-observation, not a claim that upstream lacks related implementations.
+`803b4fb31c30229ebde1ea3b95aa087e10b0cfd0` on 2026-08-28. Core Flash-Next
+PR #36497 remained unmerged, so the runtime was not rebased. Version 2.1 adopts
+the merged #35821 Mamba correction and the exact-SM120 QSA gate from #36806,
+which had merged into the Qwen4 integration branch rather than `main`.
 
 ## Checkpoints
 

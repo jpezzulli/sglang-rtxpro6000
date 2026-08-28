@@ -20,8 +20,8 @@ assumed equivalent.
 | `sglang-kernel` | `0.4.6.post1` |
 | Triton / XGrammar | `3.7.1` / `0.2.1` |
 
-The installed SGLang wheel built from source commit `64ecd64924` had SHA-256
-`67aed4edcda3cba59903790cf8e4d3834064d46a7f19276affb1a1d42d9e293c`.
+The installed SGLang wheel built from source commit `1ba0b2a1b5` had SHA-256
+`7b3d669837b2a3254c28166da401402a85d92610157c4ffa5abf17d3397ac98f`.
 
 ## Native build
 
@@ -44,12 +44,18 @@ export CMAKE_BUILD_PARALLEL_LEVEL=24
 export FLASHINFER_NINJA_JOBS=24
 export FLASHINFER_NVCC_THREADS=4
 export TORCHINDUCTOR_COMPILE_THREADS=24
+export CARGO_BUILD_JOBS=24
 
 uv pip install --prerelease=allow \
   --index-strategy unsafe-best-match \
   --extra-index-url https://docs.sglang.ai/whl/cu130/ \
   --no-build-isolation \
   -e python
+
+cd python
+python -m build --wheel --no-isolation
+python -m pip install --force-reinstall --no-deps \
+  dist/sglang-0.5.19.dev488+g1ba0b2a1b-cp312-cp312-linux_x86_64.whl
 ```
 
 The NVCC compiler-pin change makes `CXX` part of compilation as well as the JIT

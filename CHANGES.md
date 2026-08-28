@@ -1,14 +1,32 @@
 # Cumulative changes and upstream status
 
 The current runtime is the ordered range
-`e7e78940168f..64ecd64924fe`. All 19 commits remain in source history. Current
-upstream `main` was fetched at `20a491d1d311553bbab3f22e19bbafb86ef3c0cc`;
-none of the commits was patch-equivalent there on 2026-08-27.
+`e7e78940168f..1ba0b2a1b510`. All 22 commits remain in source history. Current
+upstream `main` was fetched at `803b4fb31c30229ebde1ea3b95aa087e10b0cfd0`
+on 2026-08-28. Core Flash-Next PR #36497 remained unmerged, so this release
+integrates two bounded upstream corrections without rebasing the runtime.
 
 “Local” does not mean a permanent fork requirement. It means the exact active
 commit has not merged upstream. Where a PR has a later refined head, that is
 shown separately rather than pretending the local commit and PR head are
 identical.
+
+## Version 2.1.0: bounded upstream correctness sync
+
+Version 2.1 retains the qualified launch shapes and adds three source commits:
+
+| Commit | Upstream relationship | Function and evidence |
+|---|---|---|
+| `8de07a058f` | Adapted from merged PR [#36806](https://github.com/sgl-project/sglang/pull/36806) | Replaces the family-wide SM12x QSA gate with exact SM120 detection, excluding SM121/GB10 while leaving RTX PRO 6000 behavior unchanged. Exact-capability and resolver tests cover SM100, SM120, and other SM12x. |
+| `23e51dddcb` | Adapts merged PR [#35821](https://github.com/sgl-project/sglang/pull/35821) | Skips empty Mamba radix checkpoints instead of inserting a stale ghost node, and bounds interval-track selection to accepted speculative tokens. Penny's fused CUDA kernel and KDA path receive the same correction. |
+| `1ba0b2a1b5` | Local test maintenance | Updates QSA hybrid test doubles for the existing RecoverSSM constructor contract; no runtime behavior change. |
+
+Focused validation: 72 QSA/Mamba/CUDA tests passed. Flash-Next retained its
+824,384-token FP8 target/native-MTP pools, 24 Mamba slots, recovery graphs,
+1x/3x decode, 73,664-token reuse, and post-restart NIXL restoration. The 27B
+DFlash2 launcher retained 1,118,784-token FP8 target/draft pools, fused KV
+materialization, graph capture, 1x/3x decode, and 73,664-token reuse. No CUDA
+errors or retractions were observed. Full reasoning/tool suites were not rerun.
 
 ## 2026-08-24: Qwen3.8-27B/DFlash2 dated release
 
@@ -52,6 +70,7 @@ RecoverSSM, complete hybrid-state persistence, and three-axis fused mRoPE.
 |---|---|---|---|
 | `7e4c212f7d` | Adapted import from open PR [#36497](https://github.com/sgl-project/sglang/pull/36497) | Flash-Next/Qwen4, QSA, PLE, native MTP, HC | Day-zero model implementation. Imported QSA, HC, PLE, MTP, memory-pool and model tests; full Flash-Next qualification. |
 | `c1da0eef56` | Local bounded SM120 wrapper enablement | Flash-Next QSA decode | Routes SM120 into FlashInfer's page-aligned QSA wrapper, which resolves to XQA on SM12x; focused dispatch tests plus live decode. This does not enable TRTLLM-Gen. |
+| `8de07a058f` | Adapted from merged Qwen4 integration PR [#36806](https://github.com/sgl-project/sglang/pull/36806) | Flash-Next QSA decode architecture gate | Narrows the wrapper route to exact SM120 and excludes SM121/GB10; focused capability/resolver matrix and unchanged RTX PRO 6000 runtime. |
 | `a8c4404ef8` | Local runtime version; related project PR [#35583](https://github.com/sgl-project/sglang/pull/35583) closed unmerged | All speculative draft config loading; needed by 27B DFlash2 | Target and draft need independent Hugging Face overrides. `test_draft_model_override_args.py`. |
 | `94f362d1f2` | Local follow-up | Draftless custom speculation hooks | Preserves algorithm hooks when no draft checkpoint exists; covered by Flash-Next NEXTN startup/smoke, with no dedicated commit-local test. |
 | `512a95e329` | Local runtime version; open project PR [#35584](https://github.com/sgl-project/sglang/pull/35584) | Native JIT build | Passes fingerprinted `CXX` to NVCC `-ccbin`; JIT cache/toolchain regression. |
@@ -69,6 +88,8 @@ RecoverSSM, complete hybrid-state persistence, and three-axis fused mRoPE.
 | `1787f88569` | Local ordering correction | Deferred Mamba copy-on-write after HiCache load | Prevents COW from observing pre-load state; unit regression and long prefix-reuse continuation. |
 | `7b5cfb728d` | Local persistence integration | Flash-Next compressed QSA index keys | Adds QSA side pool to hybrid persistence; focused pool-host unit tests and 490K restart/needle evidence. |
 | `64ecd64924` | Integrated open PR [#35744](https://github.com/sgl-project/sglang/pull/35744) | Qwen3.5/3.8 multimodal fused QK RMSNorm+RoPE | Applies all three mRoPE axes instead of silently using temporal only. Extensive fused-kernel numerical/contract tests and real Flash-Next/27B vision validation. |
+| `23e51dddcb` | Adapted from merged PR [#35821](https://github.com/sgl-project/sglang/pull/35821) | Mamba radix finish and speculative accepted-state tracking | Prevents zero-length ghost nodes and carries the accepted-step clamp into Penny's eager, fused CUDA, and KDA paths; CPU ghost-node and CUDA boundary parity tests. |
+| `1ba0b2a1b5` | Local test maintenance | QSA hybrid test fixtures | Models the existing RecoverSSM constructor field in test doubles; completes the 72-test focused suite with no runtime change. |
 
 ## PRs opened by this project
 
@@ -90,6 +111,8 @@ Status and head commits were queried directly from GitHub on 2026-08-27.
 | [#35744](https://github.com/sgl-project/sglang/pull/35744) fused mRoPE | Open; `9b2e053ce0d203b368e68e915667295aea24df32` | Integrated by `64ecd64924` |
 | [#36497](https://github.com/sgl-project/sglang/pull/36497) Flash-Next | Open; `7c66045d71f067c1c5da2b85baad3c47d9a19cb7` | Day-zero import and local reconciliation; its approximately 35% QSA decode statement was SM100-only and is not attributed to SM120 |
 | [#36644](https://github.com/sgl-project/sglang/pull/36644) FP8 QSA scales | Open; `67f705c55e30324f047decf773b0b82d04e1ecb0` | Broader than active unit-scale correction; not integrated |
+| [#35821](https://github.com/sgl-project/sglang/pull/35821) Mamba radix ghost node / track bound | Merged to Qwen optimization lineage; `b81d082abb5caec5d43a731a19b2bb898e93e3b0` | Adapted by `23e51dddcb` across Penny's additional fused/KDA paths |
+| [#36806](https://github.com/sgl-project/sglang/pull/36806) exact SM120 QSA route | Merged to `qwen4-main-squashed`; `99c9362e6685db579c469f6e0e566b08827b3477` | Adapted by `8de07a058f` |
 | [#35371](https://github.com/sgl-project/sglang/pull/35371) DFlash2 local convolution/selector | Merged 2026-08-19; `e5a3e4d30fa7abda95bafd2d697f9f9c48566114` | Already in integration base; core 27B DFlash2 path |
 | [#35496](https://github.com/sgl-project/sglang/pull/35496) quantized DFlash2 target head | Merged 2026-08-20; `1bb02535dcb0ab03d399fd25e1595076b1db409d` | Present in base; inactive for the BF16 target `lm_head` |
 | [#35663](https://github.com/sgl-project/sglang/pull/35663) Qwen3.8-27B DFlash2 recipe | Merged 2026-08-20; `34f4be339b122bac9783ea44a23097eab31ea064` | Upstream recipe lineage |
