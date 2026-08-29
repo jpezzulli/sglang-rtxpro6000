@@ -20,15 +20,15 @@ assumed equivalent.
 | `sglang-kernel` | `0.4.6.post1` |
 | Triton / XGrammar | `3.7.1` / `0.2.1` |
 
-The installed SGLang wheel built from source commit `1ba0b2a1b5` had SHA-256
-`7b3d669837b2a3254c28166da401402a85d92610157c4ffa5abf17d3397ac98f`.
+The installed SGLang wheel built from source commit `fb1216c6c4` had SHA-256
+`276e320552389a1d867033ca54a256382fb85945b15c746cdaecbc946e137f3a`.
 
 ## Native build
 
 The release tag includes documentation commits above the executable source.
 For an exact rebuild of the installed wheel and version string, check out
-`1ba0b2a1b51f7cb04d0e5a7ce4623d5c9c2cab6b`; use
-`pennyroyal-v2.1.0` when browsing the complete release documentation. Then
+`fb1216c6c459cb024e709eba892d9e7ded103688`; use
+`pennyroyal-v2.1.1` when browsing the complete release documentation. Then
 create an isolated Python 3.12 environment:
 
 ```bash
@@ -59,7 +59,7 @@ uv pip install --prerelease=allow \
 cd python
 python -m build --wheel --no-isolation
 python -m pip install --force-reinstall --no-deps \
-  dist/sglang-0.5.19.dev488+g1ba0b2a1b-cp312-cp312-linux_x86_64.whl
+  dist/sglang-0.5.19.dev490+gfb1216c6c-cp312-cp312-linux_x86_64.whl
 ```
 
 The NVCC compiler-pin change makes `CXX` part of compilation as well as the JIT

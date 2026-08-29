@@ -6,11 +6,11 @@
 |---|---|
 | Upstream | `https://github.com/sgl-project/sglang.git` |
 | Canonical branch | `pennyroyal-main-sm120-final` |
-| Executable source HEAD | `1ba0b2a1b51f7cb04d0e5a7ce4623d5c9c2cab6b` |
+| Executable source HEAD | `fb1216c6c459cb024e709eba892d9e7ded103688` |
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Local runtime commits | 22 |
-| Installed package | `sglang==0.5.19.dev488+g1ba0b2a1b` |
-| Current release tag | `pennyroyal-v2.1.0` |
+| Local runtime commits | 24 |
+| Installed package | `sglang==0.5.19.dev490+gfb1216c6c` |
+| Current release tag | `pennyroyal-v2.1.1` |
 
 Documentation commits add the public explanation, sanitized launch recipes,
 and small evidence summaries on top of the executable source. They must not
@@ -19,10 +19,12 @@ remains reachable through `qwen38-dflash2-pro6000-20260824`; its useful results
 and source lineage are also retained cumulatively in the current documentation.
 
 Current upstream `main` was inspected at
-`803b4fb31c30229ebde1ea3b95aa087e10b0cfd0` on 2026-08-28. Core Flash-Next
+`cdbfe90b4a31079859817c148ef4498240ec2580` on 2026-08-29. Core Flash-Next
 PR #36497 remained unmerged, so the runtime was not rebased. Version 2.1 adopts
-the merged #35821 Mamba correction and the exact-SM120 QSA gate from #36806,
-which had merged into the Qwen4 integration branch rather than `main`.
+the merged #35821 Mamba correction and the exact-SM120 QSA gate from #36806.
+Version 2.1.1 adds the DFlash additive-penalty correction related to open PR
+#33869 and completes merged HiCache load fencing from #36738 for Penny's active
+TVM-FFI JIT transfer paths.
 
 ## Checkpoints
 

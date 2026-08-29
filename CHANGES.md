@@ -1,15 +1,34 @@
 # Cumulative changes and upstream status
 
 The current runtime is the ordered range
-`e7e78940168f..1ba0b2a1b510`. All 22 commits remain in source history. Current
-upstream `main` was fetched at `803b4fb31c30229ebde1ea3b95aa087e10b0cfd0`
-on 2026-08-28. Core Flash-Next PR #36497 remained unmerged, so this release
-integrates two bounded upstream corrections without rebasing the runtime.
+`e7e78940168f..fb1216c6c459`. All 24 commits remain in source history. Current
+upstream `main` was fetched at `cdbfe90b4a31079859817c148ef4498240ec2580`
+on 2026-08-29. Core Flash-Next PR #36497 remained unmerged, so this release
+integrates bounded corrections without rebasing the runtime.
 
 “Local” does not mean a permanent fork requirement. It means the exact active
 commit has not merged upstream. Where a PR has a later refined head, that is
 shown separately rather than pretending the local commit and PR head are
 identical.
+
+## Version 2.1.1: sampling and cache-restore correctness
+
+Version 2.1.1 keeps both qualified launch shapes unchanged and adds two fixes.
+Their model impact is intentionally explicit:
+
+| Commit | Models affected | What was wrong in normal terms | What changed |
+|---|---|---|---|
+| `0e5d8e3793` | **Qwen3.8-27B with DFlash2 only.** Flash-Next does not use DFlash2. | DFlash2 verifies several proposed tokens at once. Accumulated additive sampling penalties—such as presence/frequency penalties and minimum-new-token EOS suppression—were read from an obsolete field, so the verify block could incorrectly skip them. | Verification now applies the real accumulated additive penalty to every token position in the proposed block and does not take the no-adjustment fast path while that penalty is active. This adapts open SGLang PR [#33869](https://github.com/sgl-project/sglang/pull/33869). |
+| `fb1216c6c4` | **Both Qwen3.8-27B/DFlash2 and Flash-Next.** They share HiCache kernel transfers, page-first pools, overlap scheduling, and NIXL persistence. | A cache page could be restored on the HiCache copy stream while an earlier model forward pass was still writing that same GPU page. In addition, TVM-FFI JIT copy kernels did not automatically follow the torch transfer stream, so adding only a torch-stream fence did not cover every selected Penny path. The rare result could be a silently damaged restored prefix. | H2D load-back now waits behind the model forward stream. Kernel-backend D2H and H2D JIT copies are explicitly bound to the intended torch transfer stream, and the previous TVM-FFI per-thread stream is restored afterward so unrelated JIT work does not inherit the HiCache stream. This completes merged SGLang PR [#36738](https://github.com/sgl-project/sglang/pull/36738) for Penny's active JIT paths while replacing the needed portion of closed PR [#36572](https://github.com/sgl-project/sglang/pull/36572). |
+
+Focused validation included 23 DFlash tests, 8 direct GPU HiCache stream/race
+tests, 73 broader hybrid/NIXL tests with 2 skips, and 94 unified-cache
+load-back tests. Three sequential adversarial reviews found no material issue.
+Both supported models then completed ordinary 64K prefill, one 490K
+three-needle prefill, one 1,024-token decode, four simultaneous 1,024-token
+decodes, and post-restart NIXL restoration. Each restart restored 489,856
+tokens and retained all three exact needles. The final Flash-Next canonical
+namespace was separately seeded and restart-verified after promotion.
 
 ## Version 2.1.0: bounded upstream correctness sync
 
@@ -89,6 +108,8 @@ RecoverSSM, complete hybrid-state persistence, and three-axis fused mRoPE.
 | `64ecd64924` | Integrated open PR [#35744](https://github.com/sgl-project/sglang/pull/35744) | Qwen3.5/3.8 multimodal fused QK RMSNorm+RoPE | Applies all three mRoPE axes instead of silently using temporal only. Extensive fused-kernel numerical/contract tests and real Flash-Next/27B vision validation. |
 | `23e51dddcb` | Adapted from merged PR [#35821](https://github.com/sgl-project/sglang/pull/35821) | Mamba radix finish and speculative accepted-state tracking | Prevents zero-length ghost nodes and carries the accepted-step clamp into Penny's eager, fused CUDA, and KDA paths; CPU ghost-node and CUDA boundary parity tests. |
 | `1ba0b2a1b5` | Local test maintenance | QSA hybrid test fixtures | Models the existing RecoverSSM constructor field in test doubles; completes the 72-test focused suite with no runtime change. |
+| `0e5d8e3793` | Adapts open PR [#33869](https://github.com/sgl-project/sglang/pull/33869) | 27B DFlash2 target verification and accumulated sampling penalties | Applies `acc_additive_penalties` across every flattened verify token and disables the no-adjustment predicate while the accumulated penalty is active; exact-base red/green tests plus ordinary penalized 27B generation. |
+| `fb1216c6c4` | Completes merged PR [#36738](https://github.com/sgl-project/sglang/pull/36738) for Penny's JIT paths; replaces the required scoped behavior from closed PR [#36572](https://github.com/sgl-project/sglang/pull/36572) | Shared HiCache D2H/H2D transfer streams and load-back ordering | Binds kernel-backend TVM-FFI transfers to the current torch stream with restoration on exit, then fences H2D load-back behind the forward stream. Direct GPU race tests and two-profile NIXL restart restoration cover the selected paths. |
 
 ## PRs opened by this project
 

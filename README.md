@@ -52,12 +52,12 @@ The important work is architectural, not merely a collection of launch flags:
 | Item | Value |
 |---|---|
 | Canonical branch | `pennyroyal-main-sm120-final` |
-| Current executable source | `1ba0b2a1b51f7cb04d0e5a7ce4623d5c9c2cab6b` |
-| Current release tag | `pennyroyal-v2.1.0` |
+| Current executable source | `fb1216c6c459cb024e709eba892d9e7ded103688` |
+| Current release tag | `pennyroyal-v2.1.1` |
 | Initial unified dated tag | `sglang-rtxpro6000-20260827` |
 | Earlier 27B dated tag | `qwen38-dflash2-pro6000-20260824` |
 | Upstream integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Installed SGLang | `0.5.19.dev488+g1ba0b2a1b` |
+| Installed SGLang | `0.5.19.dev490+gfb1216c6c` |
 | Python / PyTorch | `3.12.13` / `2.13.0+cu130` |
 | CUDA / compiler | CUDA `13.3` (NVCC `13.3.73`) / GCC `15.3.1` |
 | FlashInfer / NIXL | `0.6.17` / `1.4.0` |
@@ -368,7 +368,7 @@ OpenAI-compatible smoke requests, and cold/radix/NIXL cache distinctions.
 
 The cumulative history starts with the 2026-08-24 27B release, then layers the
 unified runtime and Flash-Next work on the same source line. The current active
-stack contains 22 commits above its integration base. Major groups are:
+stack contains 24 commits above its integration base. Major groups are:
 
 - Qwen3.8-27B/DFlash2: independent target/draft overrides, fixed-width XQA mask,
   NVCC host-compiler identity, request-span observability, and NIXL correctness.
@@ -377,6 +377,10 @@ stack contains 22 commits above its integration base. Major groups are:
 - v2.1 upstream sync: exact-SM120 QSA routing from #36806 and the Mamba radix
   ghost-node/speculative tracking correction from #35821, adapted to Penny's
   fused CUDA and KDA accepted-state paths.
+- v2.1.1 maintenance: accumulated additive sampling penalties are applied
+  correctly during 27B DFlash2 verification; shared HiCache JIT transfers are
+  bound to their torch copy streams and load-back waits for in-flight forward
+  writes for both supported models.
 - Open project PRs: #36520, #36524, and #35584.
 - Closed project submissions retained in runtime history: #35583; transient
   ragged/DSpARK PR #35586 is documented but not in the active source.
@@ -397,10 +401,10 @@ coverage.
 - Flash-Next and 27B results remain separate; neither model's features or
   numbers are silently attributed to the other.
 - The full published Flash-Next reasoning/tool/vision campaign ran at
-  `64ecd64924`. The v2.1 correctness sync at `1ba0b2a1b5` received focused
-  CPU/CUDA tests, Flash-Next prefix reuse plus restart restoration, and a
-  separate 27B DFlash2 compatibility check; the full reasoning and tool suites
-  were not rerun for this narrow update.
+  `64ecd64924`. The v2.1.1 source at `fb1216c6c4` received focused CPU/GPU
+  DFlash, HiCache, hybrid/NIXL, and unified-load-back tests plus ordinary
+  64K/490K/1K/C4 and post-restart NIXL restoration on both supported models.
+  The full reasoning and tool suites were not rerun for this narrow update.
 - NIXL cleaner thresholds are whole-filesystem occupancy percentages, not an
   absolute directory byte quota.
 
