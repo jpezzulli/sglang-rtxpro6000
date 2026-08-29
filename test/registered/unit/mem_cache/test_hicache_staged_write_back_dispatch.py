@@ -234,6 +234,7 @@ class TestHiCacheStagedWriteBackDispatch(CustomTestCase):
             start_event=object(), finish_event=object(), timing_enabled=False
         )
         controller.l2_transfer_engine.submit_host_to_device.return_value = completion
+        controller.load_fence_stream = None
         controller.layer_num = 2
         controller.ack_load_queue = []
 

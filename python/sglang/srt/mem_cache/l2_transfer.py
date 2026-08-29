@@ -1,15 +1,44 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 from functools import cache
 from typing import Any, Callable, NamedTuple, Optional
 
 import torch
 
-from sglang.srt.utils import get_device_module
+from sglang.srt.utils import get_device_module, is_cuda_alike, is_hip
 
 logger = logging.getLogger(__name__)
 device_module = get_device_module()
+
+
+@contextlib.contextmanager
+def _bind_tvm_ffi_to_current_torch_stream(enabled: bool):
+    """Make HiCache JIT launches obey the surrounding torch stream.
+
+    TVM-FFI keeps its own per-thread stream slot, so a torch stream context does
+    not move JIT kernels off the default stream by itself. HiCache completion
+    events are recorded on dedicated transfer streams; launching a JIT copy
+    elsewhere would let an ACK publish before the copy completes. Restore the
+    prior FFI stream after submission so unrelated JIT calls cannot inherit a
+    HiCache transfer stream.
+    """
+    if not enabled or not is_cuda_alike():
+        yield
+        return
+
+    from tvm_ffi.core import _env_get_current_stream, _env_set_current_stream
+
+    device_type = 10 if is_hip() else 2  # kDLROCM / kDLCUDA
+    device_index = torch.cuda.current_device()
+    previous_stream = _env_get_current_stream(device_type, device_index)
+    current_stream = torch._C._cuda_getCurrentRawStream(device_index)
+    _env_set_current_stream(device_type, device_index, current_stream)
+    try:
+        yield
+    finally:
+        _env_set_current_stream(device_type, device_index, previous_stream)
 
 
 @cache
@@ -60,13 +89,14 @@ class L2TransferEngine:
         with device_module.stream(self.device_to_host_stream):
             start_event.wait(self.device_to_host_stream)
             ack_start.record()
-            for transfer in transfers:
-                transfer.host_pool.backup_from_device_all_layer(
-                    transfer.device_pool,
-                    transfer.host_indices,
-                    transfer.device_indices,
-                    self.io_backend,
-                )
+            with _bind_tvm_ffi_to_current_torch_stream(self.io_backend == "kernel"):
+                for transfer in transfers:
+                    transfer.host_pool.backup_from_device_all_layer(
+                        transfer.device_pool,
+                        transfer.host_indices,
+                        transfer.device_indices,
+                        self.io_backend,
+                    )
             ack_finish.record()
             self._record_stream(transfers, self.device_to_host_stream)
         return TransferCompletion(ack_start, ack_finish, timing_enabled)
@@ -85,43 +115,44 @@ class L2TransferEngine:
         with device_module.stream(self.host_to_device_stream):
             start_event.wait(self.host_to_device_stream)
             ack_start.record()
-            # Slot-indexed side state (for example Qwen4 PLE short-conv and
-            # n-gram context) is consumed outside the layer-local attention
-            # load points. Restore it before releasing any per-layer event.
-            for transfer in transfers:
-                load_slot_siblings = getattr(
-                    transfer.host_pool, "load_slot_siblings_to_device", None
-                )
-                if load_slot_siblings is not None:
-                    load_slot_siblings(
-                        transfer.device_pool,
-                        transfer.host_indices,
-                        transfer.device_indices,
-                        self.io_backend,
-                    )
-            for layer_id in range(layer_num):
+            with _bind_tvm_ffi_to_current_torch_stream(self.io_backend == "kernel"):
+                # Slot-indexed side state (for example Qwen4 PLE short-conv and
+                # n-gram context) is consumed outside the layer-local attention
+                # load points. Restore it before releasing any per-layer event.
                 for transfer in transfers:
-                    local_layer_id = (
-                        transfer.layer_mapper(layer_id)
-                        if transfer.layer_mapper is not None
-                        else layer_id
+                    load_slot_siblings = getattr(
+                        transfer.host_pool, "load_slot_siblings_to_device", None
                     )
-                    if local_layer_id is None or (
-                        transfer is not primary
-                        and transfer.layer_mapper is None
-                        and layer_id >= transfer.host_pool.layer_num
-                    ):
-                        continue
-                    transfer.host_pool.load_to_device_per_layer(
-                        transfer.device_pool,
-                        transfer.host_indices,
-                        transfer.device_indices,
-                        local_layer_id,
-                        self.io_backend,
-                        is_draft=transfer.is_draft,
-                    )
-                if on_layer_done is not None:
-                    on_layer_done(layer_id)
+                    if load_slot_siblings is not None:
+                        load_slot_siblings(
+                            transfer.device_pool,
+                            transfer.host_indices,
+                            transfer.device_indices,
+                            self.io_backend,
+                        )
+                for layer_id in range(layer_num):
+                    for transfer in transfers:
+                        local_layer_id = (
+                            transfer.layer_mapper(layer_id)
+                            if transfer.layer_mapper is not None
+                            else layer_id
+                        )
+                        if local_layer_id is None or (
+                            transfer is not primary
+                            and transfer.layer_mapper is None
+                            and layer_id >= transfer.host_pool.layer_num
+                        ):
+                            continue
+                        transfer.host_pool.load_to_device_per_layer(
+                            transfer.device_pool,
+                            transfer.host_indices,
+                            transfer.device_indices,
+                            local_layer_id,
+                            self.io_backend,
+                            is_draft=transfer.is_draft,
+                        )
+                    if on_layer_done is not None:
+                        on_layer_done(layer_id)
             ack_finish.record()
             self._record_stream(transfers, self.host_to_device_stream)
         return TransferCompletion(ack_start, ack_finish, timing_enabled)

@@ -361,6 +361,9 @@ class HiCacheController:
         self.load_queue: List[CacheOperation] = []
         self.write_queue: List[CacheOperation] = []
         self.ack_load_queue: List[HiCacheAck] = []
+        # Reclaimed pages can still have writes queued by overlap scheduling.
+        # Gate H2D restore behind that forward stream before publishing load ACKs.
+        self.load_fence_stream = None
         self.ack_write_queue: List[HiCacheAck] = []
 
         self.l2_transfer_engine = L2TransferEngine(io_backend)
@@ -921,6 +924,11 @@ class HiCacheController:
         self.load_queue.clear()
         producer_event = self.layer_done_counter.events[producer_id]
         producer_event.start_event.record()
+
+        if self.load_fence_stream is not None:
+            self.l2_transfer_engine.host_to_device_stream.wait_stream(
+                self.load_fence_stream
+            )
 
         completion = self.l2_transfer_engine.submit_host_to_device(
             self._l2_load_transfers(host_indices, device_indices, pool_transfers),
