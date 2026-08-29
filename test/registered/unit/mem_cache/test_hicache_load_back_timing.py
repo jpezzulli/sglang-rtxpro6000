@@ -155,6 +155,129 @@ class TestLoadBackDurationMetric(CustomTestCase):
 
         self.assertEqual(calls, ["siblings", "layer-0", "layer-1"])
 
+    def test_kernel_h2d_binds_tvm_ffi_to_transfer_stream(self):
+        from tvm_ffi.core import _env_get_current_stream, _env_set_current_stream
+
+        device_index = torch.cuda.current_device()
+        default_stream = torch.cuda.default_stream()
+        observed_streams = []
+
+        class HostPool:
+            layer_num = 1
+
+            def load_to_device_per_layer(self, *args, **kwargs):
+                observed_streams.append(int(_env_get_current_stream(2, device_index)))
+
+        transfer = self.transfer.L2Transfer(
+            host_pool=HostPool(),
+            device_pool=object(),
+            host_indices=torch.tensor([0], dtype=torch.int64),
+            device_indices=torch.tensor([1], dtype=torch.int64),
+        )
+        engine = self.transfer.L2TransferEngine("kernel")
+        try:
+            _env_set_current_stream(2, device_index, default_stream.cuda_stream)
+            completion = engine.submit_host_to_device([transfer], layer_num=1)
+            completion.finish_event.synchronize()
+            self.assertEqual(
+                int(_env_get_current_stream(2, device_index)),
+                int(default_stream.cuda_stream),
+            )
+        finally:
+            _env_set_current_stream(2, device_index, default_stream.cuda_stream)
+
+        self.assertEqual(
+            observed_streams, [int(engine.host_to_device_stream.cuda_stream)]
+        )
+
+    def test_kernel_d2h_binds_tvm_ffi_to_transfer_stream(self):
+        from tvm_ffi.core import _env_get_current_stream, _env_set_current_stream
+
+        device_index = torch.cuda.current_device()
+        default_stream = torch.cuda.default_stream()
+        observed_streams = []
+
+        class HostPool:
+            def backup_from_device_all_layer(self, *args, **kwargs):
+                observed_streams.append(int(_env_get_current_stream(2, device_index)))
+
+        transfer = self.transfer.L2Transfer(
+            host_pool=HostPool(),
+            device_pool=object(),
+            host_indices=torch.tensor([0], dtype=torch.int64),
+            device_indices=torch.tensor([1], dtype=torch.int64),
+        )
+        engine = self.transfer.L2TransferEngine("kernel")
+        try:
+            _env_set_current_stream(2, device_index, default_stream.cuda_stream)
+            completion = engine.submit_device_to_host([transfer])
+            completion.finish_event.synchronize()
+            self.assertEqual(
+                int(_env_get_current_stream(2, device_index)),
+                int(default_stream.cuda_stream),
+            )
+        finally:
+            _env_set_current_stream(2, device_index, default_stream.cuda_stream)
+
+        self.assertEqual(
+            observed_streams, [int(engine.device_to_host_stream.cuda_stream)]
+        )
+
+    def test_load_fence_orders_restore_after_inflight_forward(self):
+        from sglang.srt.managers.cache_controller import (
+            CacheOperation,
+            HiCacheController,
+        )
+
+        restored_page = torch.zeros(1, device="cuda")
+        forward_stream = torch.cuda.Stream()
+        with torch.cuda.stream(forward_stream):
+            torch.cuda._sleep(50_000_000)
+            restored_page.fill_(1)
+
+        class HostPool:
+            layer_num = 1
+
+            def load_to_device_per_layer(self, *args, **kwargs):
+                restored_page.fill_(2)
+
+        op = CacheOperation(
+            host_indices=torch.tensor([0], dtype=torch.int64),
+            device_indices=torch.tensor([1], dtype=torch.int64),
+            node_id=11,
+        )
+        transfer = self.transfer.L2Transfer(
+            host_pool=HostPool(),
+            device_pool=object(),
+            host_indices=op.host_indices,
+            device_indices=op.device_indices,
+        )
+        controller = object.__new__(HiCacheController)
+        controller.load_queue = [op]
+        controller.ack_load_queue = []
+        controller.layer_num = 1
+        controller.layer_done_counter = SimpleNamespace(
+            update_producer=MagicMock(return_value=0),
+            events=[
+                SimpleNamespace(
+                    start_event=torch.cuda.Event(), complete=lambda layer_id: None
+                )
+            ],
+        )
+        controller._move_op_indices = MagicMock(
+            return_value=(op.host_indices, op.device_indices, None)
+        )
+        controller._l2_load_transfers = MagicMock(return_value=[transfer])
+        controller._num_tokens_by_pool = MagicMock(return_value={"kv": 1})
+        controller._transfer_num_bytes = MagicMock(return_value=restored_page.nbytes)
+        controller.l2_transfer_engine = self.transfer.L2TransferEngine("direct")
+        controller.load_fence_stream = forward_stream
+
+        controller.start_loading()
+        controller.ack_load_queue[0].finish_event.synchronize()
+
+        self.assertEqual(restored_page.item(), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
