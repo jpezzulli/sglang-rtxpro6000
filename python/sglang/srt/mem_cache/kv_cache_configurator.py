@@ -836,6 +836,7 @@ class KVCacheConfigurator:
             enable_overlap_schedule=not get_schedule().disable_overlap_schedule,
             mamba_size=get_schedule().max_mamba_cache_size,
             start_layer=self.layer_info.start_layer,
+            **ple_kwargs,
             linear_replayssm_cache_len=get_exec().mamba.linear_replayssm_cache_len,
             mamba_envelope_layout=get_memory().enable_page_major_kv_layout,
             # ReplaySSM spec-verify is for linear-attn models (GDN fold or KDA
