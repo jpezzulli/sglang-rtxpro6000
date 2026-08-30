@@ -101,6 +101,12 @@ class DecodeStagingHandler:
         # room -> chunk_idx -> [(page_start, num_pages, writer_id)] fan-in
         # arrivals; handler-owned so room teardown can purge them.
         self._writer_counts: dict = {}
+        # room -> [(ts, chunk_idx, page_start, num_pages, writer_id)]:
+        # CHUNK_READY can beat the room's register_decode_req (likely on the
+        # nvlink transport, where the RDMA completes in microseconds);
+        # dropping those arrivals starves the writer fan-in and the room dies
+        # at the 300 s transfer timeout. Stash and replay at registration.
+        self._pending_arrivals: dict = {}
 
     def register_wm_subscriber(self, receiver, session_id: str) -> None:
         """Register a prefill's bootstrap connection for watermark broadcasts."""
@@ -166,6 +172,13 @@ class DecodeStagingHandler:
         decode_req._chunk_events = []
         self._room_to_decode_req[room] = decode_req
         self._room_to_receiver[room] = decode_req.kv_receiver
+        # Replay arrivals that beat this registration (order: receiver stash
+        # is visible FIRST, so a concurrent arrival takes the normal path and
+        # the per-writer dedup absorbs any overlap with the replay).
+        for _ts, p_chunk, p_start, p_pages, p_writer in self._pending_arrivals.pop(
+            room, []
+        ):
+            self.handle_chunk_arrived(room, p_chunk, p_start, p_pages, p_writer)
         # Scatter offsets shift suffix-relative page_start by the decode prefix,
         # exact only when the prefix is page-aligned. Fail just this request on a
         # mismatch instead of raising, which would kill the prefill scheduler.
@@ -290,14 +303,33 @@ class DecodeStagingHandler:
         # nulls the latter before unregister removes the room.
         receiver = self._room_to_receiver.get(room)
         if receiver is None:
-            logger.warning(
-                "Staging chunk arrived for unregistered room=%s chunk=%d, " "skipping",
+            # Not (yet) registered: stash for replay instead of dropping --
+            # register_decode_req may simply not have run yet. Prune rooms
+            # whose arrivals went unclaimed for 120 s (aborted/failed).
+            now = time.monotonic()
+            for stale in [
+                r
+                for r, entries in self._pending_arrivals.items()
+                if entries and now - entries[0][0] > 120.0
+            ]:
+                del self._pending_arrivals[stale]
+            self._pending_arrivals.setdefault(room, []).append(
+                (now, chunk_idx, page_start, num_pages, writer_id)
+            )
+            logger.info(
+                "Staging chunk arrived before room registration, stashed: "
+                "room=%s chunk=%d writer=%s",
                 room,
                 chunk_idx,
+                writer_id,
             )
             return False
         room_counts = self._writer_counts.setdefault(room, {})
         arrivals = room_counts.setdefault(chunk_idx, [])
+        if any(w == writer_id for _, _, w in arrivals):
+            # Duplicate (keepalive resend or stash replay racing a live
+            # arrival) -- counting it twice would fire the scatter early.
+            return False
         arrivals.append((page_start, num_pages, writer_id))
         num_writers = self.num_writers_for(receiver)
         if len(arrivals) >= num_writers:
