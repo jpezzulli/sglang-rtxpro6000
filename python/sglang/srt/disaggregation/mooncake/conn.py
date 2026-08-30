@@ -2141,7 +2141,16 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                     chunk_idx = int(msg[2].decode("ascii"))
                     page_start = int(msg[3].decode("ascii"))
                     num_pages = int(msg[4].decode("ascii"))
-                    session_id = msg[5].decode("ascii")
+                    # msg[5] is the decode-session id -- IDENTICAL for every
+                    # prefill PP stage writing to this rank, so it cannot be
+                    # the fan-in writer identity. msg[6] carries the sender's
+                    # prefill_unique_rank (always sent, was never parsed);
+                    # the arrival dedup in handle_chunk_arrived needs it.
+                    writer_id = (
+                        msg[6].decode("ascii")
+                        if len(msg) > 6
+                        else msg[5].decode("ascii")
+                    )
                     handler = self._staging_handler
                     assert (
                         handler is not None
@@ -2151,7 +2160,7 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                         chunk_idx,
                         page_start,
                         num_pages,
-                        session_id,
+                        writer_id,
                     )
                     continue
 
