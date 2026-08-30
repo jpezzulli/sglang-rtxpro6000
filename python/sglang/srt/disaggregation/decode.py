@@ -575,8 +575,9 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 # addresses the main entries correctly by layer id. Blanking
                 # the ids here (old behavior) broke hybrid-model PP prefill
                 # + NEXTN decode: the global-index fallback mis-addresses
-                # the dense full-attention pointer lists.
-                kv_layer_ids += [-1000 - i for i in range(len(draft_kv_data_ptrs))]
+                # the dense full-attention pointer lists. Sentinels must be
+                # POSITIVE (ids pack as unsigned 32-bit in the bootstrap).
+                kv_layer_ids += [1_000_000 + i for i in range(len(draft_kv_data_ptrs))]
             kv_args.kv_layer_ids = kv_layer_ids
         else:
             kv_args.kv_layer_ids = []

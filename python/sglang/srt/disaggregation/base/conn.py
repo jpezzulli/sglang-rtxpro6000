@@ -32,7 +32,7 @@ class StateType(str, enum.Enum):
     # Qwen4-Exp QSA sparse-attention indexer. The compressed index-K cache is
     # token-page-indexed (compressed slot = full KV slot // ratio, so its
     # pages mirror full-KV pages 1:1); the pending-group ring + its mRoPE
-    # coordinate tensor are ring-slot-indexed like SWA_RING
+    # coordinate tensor (positive sentinel id) are ring-slot-indexed like SWA_RING
     # (req_pool_idx * ratio + pos % ratio). The indexer is MQA and therefore
     # TP-replicated: every decode rank receives the full bytes.
     QSA_COMPRESSED = "qsa_compressed"

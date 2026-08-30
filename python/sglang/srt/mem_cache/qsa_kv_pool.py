@@ -205,7 +205,8 @@ class QSATokenToKVPool(HybridLinearKVPool):
 
         Ring rows are addressed req_pool_idx * ratio + pos % ratio; item_len
         is one ring row. The layer-independent mRoPE tensor rides as the
-        last entry with sentinel layer id -1 (present on both peers).
+        last entry under a fixed sentinel layer id (present on both peers;
+        positive because the bootstrap packs layer ids as unsigned 32-bit).
         """
         ptrs, lens, item_lens = [], [], []
         for t in self.qsa_key_state_buffer_pool:
@@ -219,7 +220,7 @@ class QSATokenToKVPool(HybridLinearKVPool):
         ptrs.append(rope.data_ptr())
         lens.append(rope.numel() * rope.element_size())
         item_lens.append(rope.shape[1] * rope.element_size())
-        layer_ids.append(-1)
+        layer_ids.append(999_999)
         return ptrs, lens, item_lens, layer_ids
 
     def get_qsa_key_state_buffer(self, layer_id: int) -> torch.Tensor:

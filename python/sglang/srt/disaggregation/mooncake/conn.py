@@ -1392,7 +1392,7 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                 # and TP-replicated, so heterogeneous attn TP is fine: every
                 # decode rank receives the full bytes. Tensor lists are flat
                 # per-layer (plus a layer-independent mRoPE tensor in the ring
-                # component, sentinel id -1 on both peers) -> force_flat with
+                # component, fixed positive sentinel id on both peers) -> force_flat with
                 # layer-id pairing, which also addresses the decode's dense
                 # lists correctly from any PP stage.
                 src_indices = list(indices)
