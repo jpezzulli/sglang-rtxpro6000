@@ -1273,6 +1273,14 @@ def setup_state_kv_args(
                 slice_outer_counts,
             )
 
+    import logging
+
+    logging.getLogger(__name__).info(
+        f"[STATE-REG] pool={type(token_to_kv_pool).__name__} "
+        f"req_pool={type(req_to_token_pool).__name__} "
+        f"types={[t.value for t in kv_args.state_types]}"
+    )
+
 
 def prepare_abort(req: Req, error_message: str, status_code=None):
     from sglang.srt.managers.schedule_batch import FINISH_ABORT

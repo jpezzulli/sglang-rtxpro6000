@@ -1406,22 +1406,24 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                     )
                 if len(src_indices) == 0:
                     continue
-                rc = (
-                    self._send_kvcache_generic(
-                        mooncake_session_id=req.mooncake_session_id,
-                        src_data_ptrs=src_data_ptrs,
-                        dst_data_ptrs=dst_data_ptrs,
-                        item_lens=src_item_lens,
-                        prefill_data_indices=np.array(src_indices, dtype=np.int32),
-                        dst_data_indices=np.array(dst_indices_local, dtype=np.int32),
-                        executor=executor,
-                        force_flat=True,
-                        src_layer_ids=src_state_layer_ids,
-                        dst_layer_ids=dst_state_layer_ids,
-                        state_type=st,
-                    )
-                    or rc
+                qsa_rc = self._send_kvcache_generic(
+                    mooncake_session_id=req.mooncake_session_id,
+                    src_data_ptrs=src_data_ptrs,
+                    dst_data_ptrs=dst_data_ptrs,
+                    item_lens=src_item_lens,
+                    prefill_data_indices=np.array(src_indices, dtype=np.int32),
+                    dst_data_indices=np.array(dst_indices_local, dtype=np.int32),
+                    executor=executor,
+                    force_flat=True,
+                    src_layer_ids=src_state_layer_ids,
+                    dst_layer_ids=dst_state_layer_ids,
+                    state_type=st,
                 )
+                logger.debug(
+                    f"[QSA-XFER] {st.value} rc={qsa_rc} tensors={len(src_data_ptrs)}->"
+                    f"{len(dst_data_ptrs)} n_idx={len(src_indices)}"
+                )
+                rc = qsa_rc or rc
             elif st == StateType.MINIMAX_INDEX_K:
                 # Equal-TP / PP=1 only. Sub-pools are compacted sparse-layer
                 # lists, so PP>1 mis-slices and heterogeneous TP is unsupported.
