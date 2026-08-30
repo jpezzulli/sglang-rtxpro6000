@@ -151,8 +151,8 @@ class QSATokenToKVPool(HybridLinearKVPool):
         # the KV buffers, or cudaIpcGetMemHandle fails on expandable
         # segments and the whole registration batch aborts.
         with (
-            torch.cuda.use_mem_pool(self.custom_mem_pool)
-            if self.enable_custom_mem_pool
+            torch.cuda.use_mem_pool(self.full_kv_pool.custom_mem_pool)
+            if self.full_kv_pool.enable_custom_mem_pool
             else nullcontext()
         ):
             self.qsa_key_state_buffer_pool = [

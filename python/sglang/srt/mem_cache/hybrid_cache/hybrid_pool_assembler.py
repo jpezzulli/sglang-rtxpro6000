@@ -1368,8 +1368,31 @@ class _MambaStrategy(StackStrategy):
         model_name=None,
         enable_storage_metrics=False,
     ):
-        full_layer_mapping = dict(kvcache.full_attention_layer_id_mapping)
-        mamba_layer_mapping = dict(params.req_to_token_pool.mamba_map)
+        # Rebase mapping KEYS to dense stage-local ids: the pools key these by
+        # GLOBAL layer id, but the L2 engine's H->D loop iterates
+        # range(transfer_layer_num) (a COUNT) and looks up with dict.get() --
+        # at pp_rank>0 every global key sits above the range, so every
+        # per-layer host-to-device load was a silent no-op (KV, mamba AND the
+        # QSA entry, which reuses full_layer_mapping) while D->H backups and
+        # the slot-sibling PLE restore kept working. Identity at PP0. Same
+        # convention as the DeepSeek-V4 builder above; the consumers already
+        # wait on `layer_id - start_layer`.
+        start_layer = kvcache.start_layer
+        mamba_start = params.req_to_token_pool.start_layer
+        full_layer_mapping = {
+            gid - start_layer: local
+            for gid, local in kvcache.full_attention_layer_id_mapping.items()
+        }
+        mamba_layer_mapping = {
+            gid - mamba_start: local
+            for gid, local in params.req_to_token_pool.mamba_map.items()
+        }
+        keys = sorted(full_layer_mapping | mamba_layer_mapping)
+        if keys != list(range(len(keys))):
+            raise ValueError(
+                "HiCache hybrid layer mapping must be dense stage-local, got "
+                f"{keys} (start_layer={start_layer}, mamba_start={mamba_start})"
+            )
         host_pool_group, cache_controller = build_hybrid_mamba_stack(
             params=params,
             server_args=server_args,
