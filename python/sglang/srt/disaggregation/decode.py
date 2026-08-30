@@ -238,6 +238,10 @@ class HybridMambaDecodeReqToTokenPool(HybridReqToTokenPool):
         linear_replayssm_cache_len: int = 16,
         mamba_envelope_layout: bool = False,
         enable_linear_replayssm_spec: bool = False,
+        short_conv_layer_ids: Optional[List[int]] = None,
+        short_conv_state_shape=None,
+        ngram_context_len: int = 0,
+        ngram_eos_token_id: int = 0,
     ):
         DecodeReqToTokenPool.__init__(
             self,
@@ -285,6 +289,12 @@ class HybridMambaDecodeReqToTokenPool(HybridReqToTokenPool):
             linear_replayssm_cache_len=linear_replayssm_cache_len,
             mamba_envelope_layout=mamba_envelope_layout,
             enable_linear_replayssm_spec=enable_linear_replayssm_spec,
+            # Qwen4-Exp PLE slot pools: without these the first decode
+            # forward asserts on a disabled ShortConvPool/NGramPool.
+            short_conv_layer_ids=short_conv_layer_ids,
+            short_conv_state_shape=short_conv_state_shape,
+            ngram_context_len=ngram_context_len,
+            ngram_eos_token_id=ngram_eos_token_id,
         )
 
     def clear(self):
@@ -555,12 +565,21 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         kv_args.kv_data_ptrs = kv_data_ptrs
         kv_args.kv_data_lens = kv_data_lens
         kv_args.kv_item_lens = kv_item_lens
-        kv_args.kv_layer_ids = (
-            self.token_to_kv_pool.get_kv_layer_ids()
-            if self.draft_token_to_kv_pool is None
-            and hasattr(self.token_to_kv_pool, "get_kv_layer_ids")
-            else []
-        )
+        if hasattr(self.token_to_kv_pool, "get_kv_layer_ids"):
+            kv_layer_ids = list(self.token_to_kv_pool.get_kv_layer_ids())
+            if self.draft_token_to_kv_pool is not None:
+                # Keep layer-id pairing alive alongside a draft pool: the
+                # draft entries (appended after [K_main..., V_main...]) get
+                # unique sentinel ids no prefill publishes, so they are never
+                # paired -- a spec-less (e.g. PP>1) prefill then still
+                # addresses the main entries correctly by layer id. Blanking
+                # the ids here (old behavior) broke hybrid-model PP prefill
+                # + NEXTN decode: the global-index fallback mis-addresses
+                # the dense full-attention pointer lists.
+                kv_layer_ids += [-1000 - i for i in range(len(draft_kv_data_ptrs))]
+            kv_args.kv_layer_ids = kv_layer_ids
+        else:
+            kv_args.kv_layer_ids = []
         if self.transfer_backend == TransferBackend.NIXL:
             kv_args.kv_data_mem_kinds = kv_data_mem_kinds
         kv_args.page_size = self.token_to_kv_pool.page_size
@@ -1427,6 +1446,16 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                     ring_size=ring_size,
                 )
 
+            def _qsa_ring_payload():
+                # Mirror of prefill _qsa_ring_payload using this side's
+                # req_pool_idx; same positions and order -> positional match.
+                ratio = self.token_to_kv_pool.qsa_compress_ratio
+                window_start = max(0, seq_len - ratio)
+                positions = np.arange(window_start, seq_len, dtype=np.int64)
+                state_slot = int(decode_req.req.req_pool_idx)
+                ring_rows = state_slot * ratio + (positions % ratio)
+                return ring_rows.astype(np.int32)
+
             state_types = self.kv_manager.kv_args.state_types
             if StateType.C128_STATE in state_types:
                 clear_c128_state = getattr(
@@ -1443,7 +1472,39 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 StateType.C128_STATE: _c128_state_payload,
                 StateType.BLOCK_SCALE: _full_kv_pages_payload,
                 StateType.BLOCK_SCALE_SWA: _swa_payload,
+                StateType.QSA_COMPRESSED: _full_kv_pages_payload,
+                StateType.QSA_RING: _qsa_ring_payload,
             }
+
+            # Qwen4-Exp PLE: the n-gram context pool is a slot sibling that is
+            # not part of the transfer payloads, but its content is exactly
+            # the prompt tail -- reconstruct it locally so the first
+            # (ngram_size-1) decoded tokens hash real context instead of the
+            # EOS fill. (The PLE short-conv window is NOT reconstructible and
+            # currently starts zeroed after PD handoff -- affects only the
+            # first few tokens' PLE injection.)
+            ngram_pool = getattr(self.req_to_token_pool, "ngram_pool", None)
+            if ngram_pool is not None and getattr(ngram_pool, "enabled", False):
+                ctx_len = ngram_pool.context.shape[1]
+                tail = list(decode_req.req.origin_input_ids[-ctx_len:])
+                if len(tail) < ctx_len:
+                    tail = [
+                        int(ngram_pool.eos_token_id)
+                    ] * (ctx_len - len(tail)) + tail
+                req_idx_t = torch.tensor(
+                    [decode_req.req.req_pool_idx],
+                    dtype=torch.long,
+                    device=ngram_pool.context.device,
+                )
+                ngram_indices = self.req_to_token_pool.get_ngram_indices(req_idx_t)
+                self.req_to_token_pool.set_ngram_context(
+                    ngram_indices,
+                    torch.tensor(
+                        [tail],
+                        dtype=ngram_pool.context.dtype,
+                        device=ngram_pool.context.device,
+                    ),
+                )
             if _is_npu and isinstance(self.token_to_kv_pool, DeepSeekV4TokenToKVPool):
                 from sglang.srt.hardware_backend.npu.dsv4.dsv4_common_hooks import (
                     dsv4_state_payloads,

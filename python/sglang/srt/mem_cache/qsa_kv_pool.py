@@ -181,6 +181,47 @@ class QSATokenToKVPool(HybridLinearKVPool):
         k_size, v_size = self.get_kv_size_bytes()
         self.mem_usage = (k_size + v_size) / GB
 
+    def get_qsa_compressed_buf_infos(self):
+        """PD-transfer metadata for the compressed index-K cache.
+
+        Returns (data_ptrs, data_lens, item_lens, layer_ids): one entry per
+        local full-attention layer, item_len = bytes of one full-KV page's
+        worth of compressed rows (pages mirror full-KV pages 1:1), layer ids
+        in the global layer-id space for cross-PP pairing.
+        """
+        dtype_size = self.qsa_compressed_flat.element_size()
+        row_bytes = self.qsa_index_kv_heads * self.qsa_index_head_dim * dtype_size
+        page_bytes = self.qsa_compressed_page_size * row_bytes
+        ptrs, lens, item_lens = [], [], []
+        for t in self.qsa_compressed_k_buffer_pool:
+            ptrs.append(t.data_ptr())
+            lens.append(t.numel() * dtype_size)
+            item_lens.append(page_bytes)
+        layer_ids = list(self.full_attention_layer_id_mapping)
+        return ptrs, lens, item_lens, layer_ids
+
+    def get_qsa_ring_buf_infos(self):
+        """PD-transfer metadata for the pending-group ring + mRoPE coords.
+
+        Ring rows are addressed req_pool_idx * ratio + pos % ratio; item_len
+        is one ring row. The layer-independent mRoPE tensor rides as the
+        last entry with sentinel layer id -1 (present on both peers).
+        """
+        ptrs, lens, item_lens = [], [], []
+        for t in self.qsa_key_state_buffer_pool:
+            dtype_size = t.element_size()
+            row_bytes = self.qsa_index_kv_heads * self.qsa_index_head_dim * dtype_size
+            ptrs.append(t.data_ptr())
+            lens.append(t.numel() * dtype_size)
+            item_lens.append(row_bytes)
+        layer_ids = list(self.full_attention_layer_id_mapping)
+        rope = self.qsa_rope_position_buffer
+        ptrs.append(rope.data_ptr())
+        lens.append(rope.numel() * rope.element_size())
+        item_lens.append(rope.shape[1] * rope.element_size())
+        layer_ids.append(-1)
+        return ptrs, lens, item_lens, layer_ids
+
     def get_qsa_key_state_buffer(self, layer_id: int) -> torch.Tensor:
         return self.qsa_key_state_buffer_pool[
             self._transfer_full_attention_id(layer_id)

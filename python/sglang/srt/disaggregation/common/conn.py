@@ -889,7 +889,10 @@ class CommonKVManager(BaseKVManager):
             sock.send_multipart(parts)
 
     def get_mha_kv_ptrs_with_pp(
-        self, src_kv_ptrs: List[int], dst_kv_ptrs: List[int]
+        self,
+        src_kv_ptrs: List[int],
+        dst_kv_ptrs: List[int],
+        dst_layer_ids: Optional[List[int]] = None,
     ) -> Tuple[List[int], List[int], List[int], List[int], int]:
         start_layer = self.kv_args.prefill_start_layer
         num_kv_layers = len(src_kv_ptrs) // 2
@@ -897,6 +900,38 @@ class CommonKVManager(BaseKVManager):
         dst_num_total_layers = len(dst_kv_ptrs) // 2
         src_k_ptrs = src_kv_ptrs[:num_kv_layers]
         src_v_ptrs = src_kv_ptrs[num_kv_layers:]
+
+        # Hybrid-attention models (e.g. qwen4_exp: 36 GDN + 12 full-attn
+        # layers) expose KV pointer lists that are DENSE over the
+        # full-attention layers only, so indexing them with the global
+        # prefill_start_layer below mis-addresses every PP stage but the
+        # first. When both sides shipped kv_layer_ids ([k_ids..., v_ids...],
+        # global layer-id space; the dst list may carry a draft-pool
+        # sentinel tail), pair entries by layer id instead — for non-hybrid
+        # models this reduces to exactly the legacy arithmetic.
+        src_layer_ids = getattr(self.kv_args, "kv_layer_ids", None) or []
+        if (
+            dst_layer_ids
+            and len(src_layer_ids) == len(src_kv_ptrs)
+            and len(dst_layer_ids) == len(dst_kv_ptrs)
+        ):
+            from sglang.srt.disaggregation.utils import build_transfer_entry_pairs
+
+            pairs = build_transfer_entry_pairs(
+                src_layer_ids, dst_layer_ids, len(src_kv_ptrs), len(dst_kv_ptrs)
+            )
+            # src list is [K x n, V x n]; order-preserving pairing maps the K
+            # half onto dst K entries and the V half onto dst V entries even
+            # when the dst list carries a draft tail.
+            dst_k_ptrs = [dst_kv_ptrs[j] for _, j in pairs[:num_kv_layers]]
+            dst_v_ptrs = [dst_kv_ptrs[j] for _, j in pairs[num_kv_layers:]]
+            return (
+                src_k_ptrs,
+                src_v_ptrs,
+                dst_k_ptrs,
+                dst_v_ptrs,
+                num_kv_layers,
+            )
         if num_kv_layers == dst_num_total_layers:
             dst_k_ptrs = dst_kv_ptrs[:dst_num_total_layers]
             dst_v_ptrs = dst_kv_ptrs[dst_num_total_layers:]

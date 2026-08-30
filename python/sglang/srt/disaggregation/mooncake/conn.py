@@ -684,7 +684,9 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                 ]
         else:
             src_k_ptrs, src_v_ptrs, dst_k_ptrs, dst_v_ptrs, layers_current_pp_stage = (
-                self.get_mha_kv_ptrs_with_pp(src_data_ptrs, dst_data_ptrs)
+                self.get_mha_kv_ptrs_with_pp(
+                    src_data_ptrs, dst_data_ptrs, dst_layer_ids=dst_layer_ids
+                )
             )
             # item_lens structure: [k_layer0, k_layer1, ..., k_layerN, v_layer0, v_layer1, ..., v_layerN]
             # Use correct item lengths for K and V separately
@@ -970,6 +972,7 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
         dst_attn_tp_size: int,
         dst_kv_item_len: int,
         executor: concurrent.futures.ThreadPoolExecutor,
+        dst_layer_ids: Optional[list[int]] = None,
     ):
         """
         Sends KV cache slices from this Prefill rank to a target Decode rank,
@@ -1023,7 +1026,9 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
             dst_head_start_offset = 0
 
         src_k_ptrs, src_v_ptrs, dst_k_ptrs, dst_v_ptrs, layers_current_pp_stage = (
-            self.get_mha_kv_ptrs_with_pp(self.kv_args.kv_data_ptrs, dst_kv_ptrs)
+            self.get_mha_kv_ptrs_with_pp(
+                self.kv_args.kv_data_ptrs, dst_kv_ptrs, dst_layer_ids=dst_layer_ids
+            )
         )
 
         # Calculate precise byte offset and length for the sub-slice within the token
@@ -1378,6 +1383,41 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                         prefill_data_indices=np.array(src_indices, dtype=np.int32),
                         dst_data_indices=np.array(dst_indices_local, dtype=np.int32),
                         executor=executor,
+                        state_type=st,
+                    )
+                    or rc
+                )
+            elif st in (StateType.QSA_COMPRESSED, StateType.QSA_RING):
+                # Qwen4-Exp QSA indexer state. The indexer is MQA (1 KV head)
+                # and TP-replicated, so heterogeneous attn TP is fine: every
+                # decode rank receives the full bytes. Tensor lists are flat
+                # per-layer (plus a layer-independent mRoPE tensor in the ring
+                # component, sentinel id -1 on both peers) -> force_flat with
+                # layer-id pairing, which also addresses the decode's dense
+                # lists correctly from any PP stage.
+                src_indices = list(indices)
+                dst_indices_local = list(dst_indices)
+                if len(src_indices) != len(dst_indices_local):
+                    # Positionally matched rows/pages; truncation would
+                    # silently misalign and corrupt the indexer state.
+                    raise RuntimeError(
+                        f"{st.upper()} state index length mismatch: "
+                        f"prefill={len(src_indices)}, dst={len(dst_indices_local)}"
+                    )
+                if len(src_indices) == 0:
+                    continue
+                rc = (
+                    self._send_kvcache_generic(
+                        mooncake_session_id=req.mooncake_session_id,
+                        src_data_ptrs=src_data_ptrs,
+                        dst_data_ptrs=dst_data_ptrs,
+                        item_lens=src_item_lens,
+                        prefill_data_indices=np.array(src_indices, dtype=np.int32),
+                        dst_data_indices=np.array(dst_indices_local, dtype=np.int32),
+                        executor=executor,
+                        force_flat=True,
+                        src_layer_ids=src_state_layer_ids,
+                        dst_layer_ids=dst_state_layer_ids,
                         state_type=st,
                     )
                     or rc
@@ -1786,6 +1826,9 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                                 target_rank_registration_info.dst_attn_tp_size,
                                 target_rank_registration_info.dst_kv_item_len,
                                 executor,
+                                dst_layer_ids=(
+                                    target_rank_registration_info.dst_kv_layer_ids
+                                ),
                             )
                         if ret != 0:
                             with self.session_lock:

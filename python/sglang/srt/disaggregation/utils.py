@@ -1103,6 +1103,35 @@ def setup_state_kv_args(
                 slice_outer_counts,
                 layer_ids,
             )
+            # Qwen4-Exp QSA indexer state: without these components the
+            # decode's sparse top-k reads zeroed compressed keys for the
+            # whole transferred prefix -> silently wrong output past the
+            # indexer budget.
+            if hasattr(token_to_kv_pool, "get_qsa_compressed_buf_infos"):
+                qc_ptrs, qc_lens, qc_item_lens, qc_layer_ids = (
+                    token_to_kv_pool.get_qsa_compressed_buf_infos()
+                )
+                if qc_ptrs:
+                    append_state_component(
+                        kv_args,
+                        StateType.QSA_COMPRESSED,
+                        qc_ptrs,
+                        qc_lens,
+                        qc_item_lens,
+                        layer_ids=qc_layer_ids,
+                    )
+                qr_ptrs, qr_lens, qr_item_lens, qr_layer_ids = (
+                    token_to_kv_pool.get_qsa_ring_buf_infos()
+                )
+                if qr_ptrs:
+                    append_state_component(
+                        kv_args,
+                        StateType.QSA_RING,
+                        qr_ptrs,
+                        qr_lens,
+                        qr_item_lens,
+                        layer_ids=qr_layer_ids,
+                    )
         elif isinstance(token_to_kv_pool, (DSATokenToKVPool, NPUMLATokenToKVPool)):
             if draft_token_to_kv_pool is not None and isinstance(
                 draft_token_to_kv_pool, DSATokenToKVPool

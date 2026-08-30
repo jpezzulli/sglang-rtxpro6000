@@ -1239,6 +1239,20 @@ class SchedulerDisaggregationPrefillMixin:
                     ring_size=ring_size,
                 )
 
+            def _qsa_ring_payload():
+                # QSA pending-group ring rows (req_pool_idx*ratio + pos%ratio)
+                # for the last `ratio` positions, ascending position order so
+                # the decode peer (its own req_pool_idx) matches positionally.
+                # Rows of already-compressed positions transfer as harmless
+                # staleness -- they are never read again.
+                _pool = self.token_to_kv_pool_allocator.get_kvcache()
+                ratio = _pool.qsa_compress_ratio
+                window_start = max(0, seq_len - ratio)
+                positions = np.arange(window_start, seq_len, dtype=np.int64)
+                state_slot = int(req.req_pool_idx)
+                ring_rows = state_slot * ratio + (positions % ratio)
+                return ring_rows.astype(np.int32)
+
             state_types = (
                 self.disagg_prefill_bootstrap_queue.kv_manager.kv_args.state_types
             )
@@ -1251,6 +1265,8 @@ class SchedulerDisaggregationPrefillMixin:
                 StateType.C128_STATE: _c128_state_payload,
                 StateType.BLOCK_SCALE: _full_kv_pages_payload,
                 StateType.BLOCK_SCALE_SWA: _swa_payload,
+                StateType.QSA_COMPRESSED: _full_kv_pages_payload,
+                StateType.QSA_RING: _qsa_ring_payload,
             }
             if _is_npu and isinstance(
                 self.token_to_kv_pool_allocator.get_kvcache(),

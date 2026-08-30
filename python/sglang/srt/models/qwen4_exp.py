@@ -44,9 +44,13 @@ from sglang.srt.layers.moe import get_moe_a2a_backend, should_use_dp_reduce_scat
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.unquant import UnquantizedEmbeddingMethod
-from sglang.srt.layers.utils import get_layer_id
+from sglang.srt.layers.utils import PPMissingLayer, get_layer_id
 from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.model_executor.forward_batch_info import (
+    ForwardBatch,
+    ForwardMode,
+    PPProxyTensors,
+)
 from sglang.srt.model_executor.forward_context import (
     get_attn_backend,
     get_req_to_token_pool,
@@ -488,18 +492,30 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             and get_attention_dp_size() > 1
             and not self.use_attn_tp_ngram
         )
-        self.ngram_embedding = VocabParallelEmbedding(
-            padded_vocab_size,
-            self.head_dim_per_ngram,
-            params_dtype=(
-                torch.float8_e4m3fn
-                if (quant_config is not None and quant_config.get_name() == "fp8")
-                or getattr(config, "ple_embedding_dtype", None) == "float8_e4m3fn"
-                else torch.bfloat16
-            ),
-            output_dtype=torch.bfloat16,
-            use_attn_tp_group=self.use_attn_tp_ngram,
+        # With PLE offload the table only ever lives in pinned host memory,
+        # but the stock construction path first materializes the full shard
+        # under the ambient CUDA device (51.2 GB at TP=1) before the
+        # Qwen4ExpPinnedHostEmbedding swap frees it -- an instant OOM on
+        # 32 GB cards. Build the placeholder on CPU instead; the swap deletes
+        # it before any weight bytes are loaded.
+        ngram_construct_ctx = (
+            torch.device("cpu")
+            if getattr(config, "ple_offload_embedding", False)
+            else nullcontext()
         )
+        with ngram_construct_ctx:
+            self.ngram_embedding = VocabParallelEmbedding(
+                padded_vocab_size,
+                self.head_dim_per_ngram,
+                params_dtype=(
+                    torch.float8_e4m3fn
+                    if (quant_config is not None and quant_config.get_name() == "fp8")
+                    or getattr(config, "ple_embedding_dtype", None) == "float8_e4m3fn"
+                    else torch.bfloat16
+                ),
+                output_dtype=torch.bfloat16,
+                use_attn_tp_group=self.use_attn_tp_ngram,
+            )
         self.ngram_embedding.register_buffer(
             "weight_scale", torch.ones(1, dtype=torch.bfloat16), persistent=True
         )
@@ -1584,6 +1600,8 @@ class Qwen4ExpModel(Qwen3_5ForCausalLM):
     decoder_layer_types = ALL_DECODER_LAYER_TYPES
 
     def _build_embed_tokens(self, config: Qwen4ExpTextConfig) -> nn.Module:
+        if not self.pp_group.is_first_rank:
+            return PPMissingLayer()
         return VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
@@ -1608,6 +1626,12 @@ class Qwen4ExpModel(Qwen3_5ForCausalLM):
         )
         if hasattr(self, "norm"):
             delattr(self, "norm")
+        # PP: PLE prep/commit only concern the rank whose layer range holds
+        # the PLE module (layer_id 1 for ple_layer_ids=[2]).
+        self._owns_ple_layer = any(
+            getattr(self.layers[i], "ple", None) is not None
+            for i in range(self.start_layer, self.end_layer)
+        )
         hc_config = HyperConnectionConfig(
             hc_count=self.hc_count,
             hidden_size=self.hidden_size,
@@ -1624,11 +1648,19 @@ class Qwen4ExpModel(Qwen3_5ForCausalLM):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
         inputs_embeds: Optional[torch.Tensor] = None,
+        pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> torch.Tensor:
-        if inputs_embeds is not None:
-            hidden_states = inputs_embeds
+        if self.pp_group.is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.embed_tokens(input_ids)
         else:
-            hidden_states = self.embed_tokens(input_ids)
+            assert pp_proxy_tensors is not None
+            # Already hc-wide ([tokens, hc_count*hidden]); the first local
+            # layer detects the width and skips re-expansion. Matches the
+            # mHC static PP buffer layout (hidden-states only, no residual).
+            hidden_states = pp_proxy_tensors["hidden_states"]
 
         ple_batch = (
             _prepare_ple_batch(
@@ -1637,7 +1669,7 @@ class Qwen4ExpModel(Qwen3_5ForCausalLM):
                 ngram_size=self.ple_ngram_size,
                 ngram_eos_token_id=self.ple_ngram_eos_token_id,
             )
-            if self.has_ple
+            if (self.has_ple and self._owns_ple_layer)
             else None
         )
         residual = None
@@ -1663,6 +1695,9 @@ class Qwen4ExpModel(Qwen3_5ForCausalLM):
                 )
 
         _commit_ple_batch(ple_batch, forward_batch)
+
+        if not self.pp_group.is_last_rank:
+            return PPProxyTensors({"hidden_states": hidden_states})
 
         hc_hidden_states = hidden_states
         hidden_states, _ = self.hyper_connection_mixer.mix(hidden_states)
@@ -1706,6 +1741,7 @@ class Qwen4ExpVLModel(Qwen4ExpModel):
             positions=positions,
             forward_batch=forward_batch,
             inputs_embeds=input_embeds,
+            pp_proxy_tensors=pp_proxy_tensors,
         )
         if isinstance(model_output, tuple):
             hidden_states, self.last_hc_hidden_states = model_output
@@ -1736,8 +1772,25 @@ class Qwen4ExpForConditionalGeneration(Qwen3VLForConditionalGeneration):
         )
 
     @torch.no_grad()
-    def forward(self, *args, **kwargs):
-        output = super().forward(*args, **kwargs)
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        get_embedding: bool = False,
+        pp_proxy_tensors: Optional[PPProxyTensors] = None,
+        **kwargs,
+    ):
+        # The explicit pp_proxy_tensors kwarg (vs *args/**kwargs) is what the
+        # ModelRunner's support_pp signature probe keys on.
+        output = super().forward(
+            input_ids,
+            positions,
+            forward_batch,
+            get_embedding=get_embedding,
+            pp_proxy_tensors=pp_proxy_tensors,
+            **kwargs,
+        )
         hc_hidden_states = self.model.last_hc_hidden_states
         if hc_hidden_states is not None and isinstance(output, LogitsProcessorOutput):
             output.hidden_states = hc_hidden_states
@@ -1972,6 +2025,14 @@ class Qwen4ExpForConditionalGeneration(Qwen3VLForConditionalGeneration):
             if ".ple.ple_embedding.ngram_embedding." in name and name.endswith(
                 ".weight"
             ):
+                # PP: shards of a PLE layer outside this rank's range are
+                # legitimately unmatched -- skip, do not raise.
+                ple_layer_id = get_layer_id(name)
+                if ple_layer_id is not None and (
+                    ple_layer_id < self.start_layer
+                    or ple_layer_id >= self.end_layer
+                ):
+                    continue
                 raise ValueError(
                     f"unsupported PLE weight layout (expected shard_N shards): {name}"
                 )
