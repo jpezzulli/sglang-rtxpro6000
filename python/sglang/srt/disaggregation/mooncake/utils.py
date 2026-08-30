@@ -56,7 +56,23 @@ def init_mooncake_custom_mem_pool(
 
                 allocator = BarexAllocator.get_allocator(device)
             elif custom_mem_pool_type == "INTRA_NODE_NVLINK":
-                return False, None, None
+                # Plain-cudaMalloc pool (qwen-3.8-27b FINDINGS S17): keeps
+                # pool memory cudaIpcGetMemHandle-exportable for the
+                # intranode nvlink transport while the REST of the process
+                # keeps expandable segments (expandable_segments:False costs
+                # ~6x on concurrent cold chunked prefill). The .so forwards
+                # to cudaMalloc/cudaFree.
+                import os
+
+                from torch.cuda.memory import CUDAPluggableAllocator
+
+                so_path = os.environ.get(
+                    "SGLANG_PLAIN_CUDAMALLOC_ALLOCATOR_SO",
+                    "/opt/libplaincudamalloc.so",
+                )
+                allocator = CUDAPluggableAllocator(
+                    so_path, "plain_malloc", "plain_free"
+                )
             else:
                 # This should not happen due to the enable_custom_mem_pool check above
                 raise ValueError(

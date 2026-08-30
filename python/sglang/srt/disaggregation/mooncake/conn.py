@@ -235,7 +235,8 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
             )
             self.executors = [
                 concurrent.futures.ThreadPoolExecutor(
-                    transfer_thread_pool_size // transfer_queue_size
+                    transfer_thread_pool_size // transfer_queue_size,
+                    initializer=self._pin_transfer_device,
                 )
                 for _ in range(transfer_queue_size)
             ]
@@ -302,12 +303,30 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                     regions.append((ptr, length))
 
         add(self.kv_args.kv_data_ptrs, self.kv_args.kv_data_lens)
-        add(self.kv_args.aux_data_ptrs, self.kv_args.aux_data_lens)
+        # GPU-only transports (nvlink_intra) reject host memory and abort the
+        # whole registration batch on it, which would leave the state pools
+        # (added after aux) unregistered. With aux shipped via the TCP
+        # side-channel the aux buffers never touch the engine, so skip them.
+        if not envs.SGLANG_MOONCAKE_SEND_AUX_TCP.get():
+            add(self.kv_args.aux_data_ptrs, self.kv_args.aux_data_lens)
         for ptrs, lens in zip(
             self.kv_args.state_data_ptrs, self.kv_args.state_data_lens
         ):
             add(ptrs, lens)
         return regions
+
+    def _pin_transfer_device(self) -> None:
+        # Transfer threads never set a CUDA device, so lazy CUDA init lands on
+        # device 0. Harmless for the TCP transport, fatal for nvlink_intra:
+        # the transport's streams and cudaIpcOpenMemHandle then run in the
+        # wrong device context ("invalid device context" opens, segfaults
+        # under concurrency -- qwen-3.8-27b FINDINGS S17).
+        try:
+            import torch
+
+            torch.cuda.set_device(self.kv_args.gpu_id)
+        except Exception:
+            pass
 
     def register_buffer_to_engine(self):
         regions = self._registerable_regions()
@@ -747,7 +766,10 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                 transfer_blocks.extend(set_transfer_blocks(src_ptr, dst_ptr, item_len))
             return self._transfer_data(mooncake_session_id, transfer_blocks)
 
-        if self.enable_custom_mem_pool:
+        # Parallel per-layer submission stays off for nvlink_intra: a single
+        # batched submit at ~40 GB/s is plenty and the parallel path was the
+        # segfault context (qwen-3.8-27b FINDINGS S17).
+        if self.enable_custom_mem_pool and self.custom_mem_pool_type != "INTRA_NODE_NVLINK":
             futures = [
                 executor.submit(
                     process_layer,
@@ -948,7 +970,9 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                 set_transfer_blocks(src_ptr, dst_ptr, token_item_len),
             )
 
-        if self.enable_custom_mem_pool:
+        # See the matching guard above: no parallel per-layer path for
+        # nvlink_intra.
+        if self.enable_custom_mem_pool and self.custom_mem_pool_type != "INTRA_NODE_NVLINK":
             futures = [
                 executor.submit(process_layer, src_ptr, dst_ptr, token_item_len)
                 for src_ptr, dst_ptr, token_item_len in layers_params
@@ -1619,6 +1643,7 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
         staging_buffer=None,
         worker_index=0,
     ):
+        self._pin_transfer_device()
         staging_strategy = None
         if self.enable_trace:
             trace_set_thread_info(
@@ -2103,6 +2128,7 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
 
     def start_decode_thread(self):
         def decode_thread():
+            self._pin_transfer_device()
             while True:
                 msg = self.server_socket.recv_multipart()
                 if msg[0] == MooncakeKVManager.AUX_DATA_HEADER:

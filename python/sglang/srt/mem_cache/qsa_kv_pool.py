@@ -8,6 +8,7 @@ Qwen3Next-DSA) adds only the flat per-token index-K cache.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import List, Optional
 
 import torch
@@ -144,32 +145,42 @@ class QSATokenToKVPool(HybridLinearKVPool):
             )
         self.qsa_num_request_slots = int(num_request_slots)
         ring_slots = self.qsa_num_request_slots * self.qsa_compress_ratio
-        self.qsa_key_state_buffer_pool = [
-            torch.zeros(
-                (ring_slots, self.qsa_index_kv_heads, self.qsa_index_head_dim),
+        # These buffers are PD-transferred (QSA_COMPRESSED/QSA_RING state
+        # components), so GPU-only transports (nvlink_intra) register them
+        # with the engine: allocate from the IPC-exportable custom pool like
+        # the KV buffers, or cudaIpcGetMemHandle fails on expandable
+        # segments and the whole registration batch aborts.
+        with (
+            torch.cuda.use_mem_pool(self.custom_mem_pool)
+            if self.enable_custom_mem_pool
+            else nullcontext()
+        ):
+            self.qsa_key_state_buffer_pool = [
+                torch.zeros(
+                    (ring_slots, self.qsa_index_kv_heads, self.qsa_index_head_dim),
+                    dtype=self.index_state_dtype,
+                    device=device,
+                )
+                for _ in full_attention_layer_ids
+            ]
+            # RoPE coordinates are layer-independent.  Keep the exact Qwen4-Exp MRoPE
+            # position of every pending key so compression can rotate the pooled
+            # key with the group's real starting coordinate.
+            self.qsa_rope_position_buffer = torch.zeros(
+                (ring_slots, 3), dtype=torch.int64, device=device
+            )
+            # One contiguous allocation behind per-layer views: every layer's
+            # compressed pages are addressable from a single base pointer.
+            self.qsa_compressed_flat = torch.zeros(
+                (
+                    len(full_attention_layer_ids),
+                    self.qsa_compressed_capacity
+                    * self.qsa_index_kv_heads
+                    * self.qsa_index_head_dim,
+                ),
                 dtype=self.index_state_dtype,
                 device=device,
             )
-            for _ in full_attention_layer_ids
-        ]
-        # RoPE coordinates are layer-independent.  Keep the exact Qwen4-Exp MRoPE
-        # position of every pending key so compression can rotate the pooled
-        # key with the group's real starting coordinate.
-        self.qsa_rope_position_buffer = torch.zeros(
-            (ring_slots, 3), dtype=torch.int64, device=device
-        )
-        # One contiguous allocation behind per-layer views: every layer's
-        # compressed pages are addressable from a single base pointer.
-        self.qsa_compressed_flat = torch.zeros(
-            (
-                len(full_attention_layer_ids),
-                self.qsa_compressed_capacity
-                * self.qsa_index_kv_heads
-                * self.qsa_index_head_dim,
-            ),
-            dtype=self.index_state_dtype,
-            device=device,
-        )
         self.qsa_compressed_k_buffer_pool = [
             self.qsa_compressed_flat[layer_offset].view(
                 self.qsa_compressed_capacity,
