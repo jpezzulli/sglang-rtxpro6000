@@ -1,15 +1,61 @@
 # Cumulative changes and upstream status
 
 The current runtime is the ordered range
-`e7e78940168f..fb1216c6c459`. All 24 commits remain in source history. Current
-upstream `main` was fetched at `cdbfe90b4a31079859817c148ef4498240ec2580`
-on 2026-08-29. Core Flash-Next PR #36497 remained unmerged, so this release
-integrates bounded corrections without rebasing the runtime.
+`e7e78940168f..836206a0adc8`. All 26 runtime commits remain in source history,
+including the graph-lifetime trial and its full revert. The integration base
+is unchanged. The v2.1.1 upstream check fetched `main` at
+`cdbfe90b4a31079859817c148ef4498240ec2580` on 2026-08-29; older PR-status
+tables below retain their stated observation dates. Version 2.1.2 adds only
+the two bounded maintenance corrections described next, without a rebase.
 
 “Local” does not mean a permanent fork requirement. It means the exact active
 commit has not merged upstream. Where a PR has a later refined head, that is
 shown separately rather than pretending the local commit and PR head are
 identical.
+
+## Version 2.1.2: maintenance only
+
+Version 2.1.2 contains **two correctness fixes, no new features, and no new
+performance claims**. Launch settings, dependency versions, and existing
+performance tables are unchanged.
+
+| Upstream PR | Models affected | What was wrong in normal terms | What changed |
+|---|---|---|---|
+| [#37962](https://github.com/sgl-project/sglang/pull/37962) | **Both 27B FP8/DFlash2 and Flash-Next NVFP4/native MTP.** | Grammar-constrained sampling could run an unnecessary token-ID synchronization even with only one GPU in the selected group. Its first NCCL operation could allocate GPU memory late, after model/cache allocation had settled. | Skip synchronization for a one-rank group. Preserve the selected TP/attention-TP group and normal multi-rank MIN behavior. Construction reads coordinator metadata so mocked tests do not need an initialized distributed process group. |
+| [#37408](https://github.com/sgl-project/sglang/pull/37408) | **Both profiles when streaming with the Qwen3 Coder tool parser.** | Whitespace between tool calls could be emitted as ordinary content before pending JSON argument fragments, breaking tool-call framing in affected clients. | Hold post-tool separator whitespace until the next tag or genuine prose resolves it. Preserve real prose and word spaces instead of globally dropping whitespace. |
+
+These are adapted local corrections, not claims that the upstream PR heads
+were cherry-picked verbatim. Both PRs were open when checked on 2026-09-05:
+`#37962@a0c2ba07ef31`, `#37408@b4e45091db2c`.
+
+The source history adds `e2c6f4a4f8` and `836206a0ad`. The first also tried the
+separate #37448 graph-lifetime correction; the second fully reverted that
+trial after its memory cost was rejected. **#37448 is not included in the
+released runtime behavior.** The net source diff from v2.1.1 changes only
+the sampler, Qwen3 Coder parser, and their focused tests.
+
+Validation for this maintenance release:
+
+- Exact-base tests reproduced both defects before correction.
+- Sampler coverage: 117 CPU tests and 27 subtests passed; 16 ROCm-only tests
+  skipped. Parser coverage: 220 tests and 20 subtests passed; 15 unrelated
+  DeepSeek tokenizer cases excluded because their offline fixtures were
+  unavailable.
+- Two fresh sequential adversarial reviews completed. The final
+  sampler/parser subset had no material findings.
+- Both profiles passed streaming/non-streaming JSON-schema checks with greedy
+  and sampled output, ordinary warmups, and incremental two/four parallel-tool
+  checks for IDs, names, JSON arguments, and separator ordering.
+- Both profiles passed ordinary short/long prefill, one three-needle long
+  prompt, single-request and four-request decode, and actual NIXL restart
+  restoration. Original graph coverage and cache capacity were retained.
+
+The runtime checks used Orca 27B FP8 and a source-specific local ModelOpt NVFP4
+conversion of Orca Flash-Next, not a new Radix checkpoint campaign. Full
+reasoning, vision, the complete 30-case tool suite, external translators, and
+multi-GPU execution were not rerun. Arbitrary prose/tool coalescing in an
+external translator is not claimed fixed or qualified. This release does not
+replace or refresh the historical performance results.
 
 ## Version 2.1.1: sampling and cache-restore correctness
 
@@ -110,6 +156,8 @@ RecoverSSM, complete hybrid-state persistence, and three-axis fused mRoPE.
 | `1ba0b2a1b5` | Local test maintenance | QSA hybrid test fixtures | Models the existing RecoverSSM constructor field in test doubles; completes the 72-test focused suite with no runtime change. |
 | `0e5d8e3793` | Adapts open PR [#33869](https://github.com/sgl-project/sglang/pull/33869) | 27B DFlash2 target verification and accumulated sampling penalties | Applies `acc_additive_penalties` across every flattened verify token and disables the no-adjustment predicate while the accumulated penalty is active; exact-base red/green tests plus ordinary penalized 27B generation. |
 | `fb1216c6c4` | Completes merged PR [#36738](https://github.com/sgl-project/sglang/pull/36738) for Penny's JIT paths; replaces the required scoped behavior from closed PR [#36572](https://github.com/sgl-project/sglang/pull/36572) | Shared HiCache D2H/H2D transfer streams and load-back ordering | Binds kernel-backend TVM-FFI transfers to the current torch stream with restoration on exit, then fences H2D load-back behind the forward stream. Direct GPU race tests and two-profile NIXL restart restoration cover the selected paths. |
+| `e2c6f4a4f8` | Adapts PRs [#37962](https://github.com/sgl-project/sglang/pull/37962) and [#37408](https://github.com/sgl-project/sglang/pull/37408) | One-rank sampler synchronization and Qwen3 Coder streaming separators | Exact-base red/green tests, sequential review, and both-profile API/decode/prefill/restore regressions. This commit also contains a graph-lifetime trial, fully reverted by the next commit. |
+| `836206a0ad` | Local disposition of PR [#37448](https://github.com/sgl-project/sglang/pull/37448) | Restores pre-existing graph behavior and tests | Reverts the rejected graph-lifetime trial exactly to the v2.1.1 base, leaving only the two maintenance corrections above. Original launch shapes were requalified. |
 
 ## PRs opened by this project
 

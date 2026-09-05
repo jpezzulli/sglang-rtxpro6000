@@ -15,6 +15,24 @@ machine—including 524K context, multimodal input, reasoning, tools, agentic
 workloads, CUDA-graph recovery, and persistent prefix restoration—but it may
 still contain rough edges or hardware/model-specific assumptions.
 
+## v2.1.2 — maintenance release
+
+**This is a maintenance-only release with two correctness fixes adapted from
+upstream PRs. It adds no new features or performance claims.** Both supported
+profiles—27B FP8/DFlash2 and Flash-Next NVFP4/native MTP—benefit:
+
+- [#37962](https://github.com/sgl-project/sglang/pull/37962): skip token-ID
+  synchronization when the selected group has only one GPU. This avoids an
+  unnecessary NCCL operation and its possible late GPU-memory allocation,
+  including during grammar-constrained JSON output.
+- [#37408](https://github.com/sgl-project/sglang/pull/37408): keep separator
+  whitespace between streamed Qwen3 Coder tool calls from overtaking pending
+  JSON arguments. Genuine prose and its word spaces are preserved.
+
+Launch settings and dependency versions are unchanged. Focused regressions
+passed on both profiles; exact scope and exclusions are in
+[CHANGES.md](CHANGES.md#version-212-maintenance-only).
+
 ## Validation suite
 
 The canonical test suite used to qualify these runtimes—including reasoning,
@@ -52,12 +70,12 @@ The important work is architectural, not merely a collection of launch flags:
 | Item | Value |
 |---|---|
 | Canonical branch | `pennyroyal-main-sm120-final` |
-| Current executable source | `fb1216c6c459cb024e709eba892d9e7ded103688` |
-| Current release tag | `pennyroyal-v2.1.1` |
+| Current executable source | `836206a0adc8ef7aaa49f652230d5577a25014a5` |
+| Current release tag | `pennyroyal-v2.1.2` |
 | Initial unified dated tag | `sglang-rtxpro6000-20260827` |
 | Earlier 27B dated tag | `qwen38-dflash2-pro6000-20260824` |
 | Upstream integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Installed SGLang | `0.5.19.dev490+gfb1216c6c` |
+| Installed SGLang | `0.5.19.dev492+g836206a0a` |
 | Python / PyTorch | `3.12.13` / `2.13.0+cu130` |
 | CUDA / compiler | CUDA `13.3` (NVCC `13.3.73`) / GCC `15.3.1` |
 | FlashInfer / NIXL | `0.6.17` / `1.4.0` |
@@ -368,7 +386,7 @@ OpenAI-compatible smoke requests, and cold/radix/NIXL cache distinctions.
 
 The cumulative history starts with the 2026-08-24 27B release, then layers the
 unified runtime and Flash-Next work on the same source line. The current active
-stack contains 24 commits above its integration base. Major groups are:
+stack contains 26 commits above its integration base. Major groups are:
 
 - Qwen3.8-27B/DFlash2: independent target/draft overrides, fixed-width XQA mask,
   NVCC host-compiler identity, request-span observability, and NIXL correctness.
@@ -381,6 +399,10 @@ stack contains 24 commits above its integration base. Major groups are:
   correctly during 27B DFlash2 verification; shared HiCache JIT transfers are
   bound to their torch copy streams and load-back waits for in-flight forward
   writes for both supported models.
+- v2.1.2 maintenance: skip one-rank sampler synchronization (#37962) and
+  preserve streamed tool-call framing around separator whitespace (#37408).
+  The graph-lifetime trial is reverted and is not part of this release's
+  runtime behavior.
 - Open project PRs: #36520, #36524, and #35584.
 - Closed project submissions retained in runtime history: #35583; transient
   ragged/DSpARK PR #35586 is documented but not in the active source.
@@ -405,6 +427,11 @@ coverage.
   DFlash, HiCache, hybrid/NIXL, and unified-load-back tests plus ordinary
   64K/490K/1K/C4 and post-restart NIXL restoration on both supported models.
   The full reasoning and tool suites were not rerun for this narrow update.
+- v2.1.2 received focused sampler/parser tests and both-profile JSON,
+  incremental parallel-tool, prefill, C1/C4 decode, and NIXL restart-restore
+  regressions. These used the Orca 27B FP8 checkpoint and a local Orca
+  Flash-Next ModelOpt NVFP4 conversion; they are not a new full qualification
+  of the Radix checkpoint. Existing performance tables are unchanged.
 - NIXL cleaner thresholds are whole-filesystem occupancy percentages, not an
   absolute directory byte quota.
 
