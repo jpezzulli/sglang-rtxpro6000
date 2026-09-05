@@ -54,6 +54,11 @@ class Qwen3CoderDetector(BaseFormatDetector):
         # [FIX] New state flag: mark whether inside tool_call structure block
         self.is_inside_tool_call: bool = False
 
+        # After a tool closes, whitespace is ambiguous until the next tag or
+        # genuine text arrives. Keep it out of SSE content while arguments
+        # from the same increment may still be waiting to be emitted (#37408).
+        self._pending_tool_separator: Optional[str] = None
+
         # Initialize attributes that were missing in the original PR
         self.current_func_name: Optional[str] = None
 
@@ -268,6 +273,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             # 1. Priority detection: check if it's the start of Tool Call
             # -------------------------------------------------------
             if current_slice.startswith(self.tool_call_start_token):
+                self._pending_tool_separator = None
                 self.parsed_pos += len(self.tool_call_start_token)
                 self.is_inside_tool_call = True
                 continue
@@ -407,6 +413,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             if current_slice.startswith(self.tool_call_end_token):
                 self.parsed_pos += len(self.tool_call_end_token)
                 self.is_inside_tool_call = False  # [FIX] Exit tool call region
+                self._pending_tool_separator = ""
                 continue
 
             # -------------------------------------------------------
@@ -421,7 +428,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             if next_open_angle == -1:
                 # This entire segment is plain text
                 if not self.is_inside_tool_call:
-                    normal_text_chunks.append(current_slice)
+                    self._append_normal_text(current_slice, normal_text_chunks)
                 # [FIX] If inside tool call, discard this text (usually \n), don't append
                 self.parsed_pos += len(current_slice)
                 continue
@@ -449,7 +456,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 else:
                     # Just a plain '<' symbol
                     if not self.is_inside_tool_call:
-                        normal_text_chunks.append("<")
+                        self._append_normal_text("<", normal_text_chunks)
                     self.parsed_pos += 1
                     continue
 
@@ -457,7 +464,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 # '<' is in the middle
                 text_segment = current_slice[:next_open_angle]
                 if not self.is_inside_tool_call:
-                    normal_text_chunks.append(text_segment)
+                    self._append_normal_text(text_segment, normal_text_chunks)
                 # [FIX] If inside tool call, discard whitespace/text before Tag
                 self.parsed_pos += next_open_angle
                 continue
@@ -470,6 +477,17 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
         normal_text = "".join(normal_text_chunks) if normal_text_chunks else ""
         return StreamingParseResult(calls=calls, normal_text=normal_text)
+
+    def _append_normal_text(self, text: str, chunks: List[str]) -> None:
+        if self._pending_tool_separator is not None:
+            self._pending_tool_separator += text
+            if not self._pending_tool_separator.strip():
+                return
+            # Preserve genuine prose, including spaces split into their own
+            # increments. Filtering every whitespace-only result loses them.
+            text = self._pending_tool_separator
+            self._pending_tool_separator = None
+        chunks.append(text)
 
     def supports_structural_tag(self) -> bool:
         return True

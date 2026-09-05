@@ -71,9 +71,13 @@ _BUILT_IN_SAMPLING_BACKENDS = {"flashinfer", "pytorch", "ascend"}
 class Sampler(nn.Module):
     def __init__(self):
         super().__init__()
-        self.tp_sync_group = get_tp_group().device_group
-        if is_dp_attention_enabled():
-            self.tp_sync_group = get_parallel().attn_tp_group.device_group
+        sync_group = (
+            get_parallel().attn_tp_group
+            if is_dp_attention_enabled()
+            else get_tp_group()
+        )
+        self.tp_sync_group = sync_group.device_group
+        self.tp_sync_world_size = sync_group.world_size
 
         self.rl_on_policy_target = get_exec().deterministic.rl_on_policy_target
         # In RL on-policy mode, deterministic inference is automatically enabled.
@@ -497,6 +501,11 @@ class Sampler(nn.Module):
     def _sync_token_ids_across_tp(
         self, batch_next_token_ids: torch.Tensor, sampling_info: SamplingBatchInfo
     ):
+        # A one-rank reduction is the identity, but its first collective can
+        # lazily allocate NCCL buffers after inference has filled GPU memory.
+        # Use the selected group's size: DP attention can be one-rank at TP > 1.
+        if self.tp_sync_world_size == 1:
+            return
         if SYNC_TOKEN_IDS_ACROSS_TP or sampling_info.grammars:
             # For performance reasons, SGLang does not sync the final token IDs across TP ranks by default.
             # This saves one all-reduce, but the correctness of this approach depends on the determinism of several operators:

@@ -36,6 +36,7 @@ def _mock_global_server_args(backend="pytorch"):
 
     class _DummyTPGroup:
         device_group = None
+        world_size = 1
 
     sampler_mod.get_tp_group = lambda: _DummyTPGroup()
     from sglang.srt.runtime_context import get_flags
