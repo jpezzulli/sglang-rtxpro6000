@@ -14,6 +14,7 @@ from sglang.srt.function_call.core_types import StreamingParseResult
 from sglang.srt.function_call.deepseekv3_detector import DeepSeekV3Detector
 from sglang.srt.function_call.deepseekv4_detector import DeepSeekV4Detector
 from sglang.srt.function_call.deepseekv32_detector import DeepSeekV32Detector
+from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.gemma4_detector import (
     Gemma4Detector,
     _parse_gemma4_args,
@@ -2282,6 +2283,175 @@ class TestDeepSeekV4Detector(unittest.TestCase):
         self.assertEqual(len(tool_calls_by_index), 1)
         self.assertEqual(tool_calls_by_index[0]["name"], "submit")
         self.assertEqual(json.loads(tool_calls_by_index[0]["parameters"]), {})
+
+
+class TestQwen3CoderStreamingFraming(unittest.TestCase):
+    """Keep parallel-call framing safe for incremental content-block consumers."""
+
+    def setUp(self):
+        self.names = ["Glob", "Grep", "Read", "Bash"]
+        self.arguments = [
+            {"value": "*.md"},
+            {"value": 'a "quoted" pattern'},
+            {"value": "/tmp/example.txt"},
+            {"value": "printf 'hello\\n'"},
+        ]
+        self.tools = [
+            Tool(
+                type="function",
+                function=Function(
+                    name=name,
+                    parameters={
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                    },
+                ),
+            )
+            for name in self.names
+        ]
+        self.bodies = [
+            f"<tool_call><function={name}>"
+            f"<parameter=value>{args['value']}</parameter>"
+            for name, args in zip(self.names, self.arguments)
+        ]
+        self.end = "</function></tool_call>"
+
+    def _collect(self, chunks, *, check_content_order=False):
+        detector = Qwen3CoderDetector()
+        text = ""
+        names = {}
+        arguments = {}
+        for chunk in chunks:
+            result = detector.parse_streaming_increment(chunk, self.tools)
+            # Match serving_chat: normal text is emitted BEFORE calls from
+            # the same result. A block-switching consumer must not receive
+            # content while a previous tool's JSON is still incomplete.
+            if result.normal_text:
+                if check_content_order:
+                    for args in arguments.values():
+                        json.loads(args)
+                text += result.normal_text
+            for call in result.calls:
+                if call.name:
+                    self.assertNotIn(call.tool_index, names)
+                    names[call.tool_index] = call.name
+                    arguments[call.tool_index] = ""
+                self.assertIn(call.tool_index, names)
+                arguments[call.tool_index] += call.parameters
+
+        self.assertEqual(sorted(names), list(range(len(names))))
+        return (
+            text,
+            list(names.values()),
+            [json.loads(args) for args in arguments.values()],
+        )
+
+    def test_streaming_parallel_calls_do_not_interrupt_argument_fragments(self):
+        for count in (2, 4):
+            for separator in ("\n", " \r\n\t"):
+                with self.subTest(count=count, separator=repr(separator)):
+                    # The first result has incomplete JSON. The next delta
+                    # closes it AND carries the inter-call separator.
+                    chunks = [self.bodies[0]]
+                    chunks.extend(
+                        self.end + separator + body for body in self.bodies[1:count]
+                    )
+                    chunks.append(self.end + separator)
+                    text, names, args = self._collect(chunks, check_content_order=True)
+                    self.assertEqual(text, "")
+                    self.assertEqual(names, self.names[:count])
+                    self.assertEqual(args, self.arguments[:count])
+
+    def test_streaming_fragmented_parallel_call_boundaries(self):
+        for count in (2, 4):
+            source = " \n\t".join(body + self.end for body in self.bodies[:count])
+            for width in (1, 2, 7, 13, len(source)):
+                with self.subTest(count=count, width=width):
+                    chunks = [
+                        source[i : i + width] for i in range(0, len(source), width)
+                    ]
+                    text, names, args = self._collect(chunks, check_content_order=True)
+                    self.assertEqual(text, "")
+                    self.assertEqual(names, self.names[:count])
+                    self.assertEqual(args, self.arguments[:count])
+
+    def test_streaming_genuine_text_and_whitespace_survive_fragmentation(self):
+        prefix = " \nChecking two files.\n"
+        between = "\nFirst call done; now the next.\n"
+        suffix = "\nBoth calls are ready. \n"
+        source = (
+            prefix
+            + self.bodies[0]
+            + self.end
+            + between
+            + self.bodies[1]
+            + self.end
+            + suffix
+        )
+        for width in (1, 2, 7, len(source)):
+            with self.subTest(width=width):
+                text, names, args = self._collect(
+                    [source[i : i + width] for i in range(0, len(source), width)]
+                )
+                self.assertEqual(text, prefix + between + suffix)
+                self.assertEqual(names, self.names[:2])
+                self.assertEqual(args, self.arguments[:2])
+
+    def test_streaming_leading_whitespace_is_not_a_tool_separator(self):
+        prefix = " \n\t"
+        source = prefix + self.bodies[0] + self.end
+        for chunks in ([source], [prefix, self.bodies[0], self.end]):
+            with self.subTest(chunks=chunks):
+                text, names, args = self._collect(chunks)
+                self.assertEqual(text, prefix)
+                self.assertEqual(names, self.names[:1])
+                self.assertEqual(args, self.arguments[:1])
+
+    def test_streaming_prefix_does_not_make_tool_separator_visible(self):
+        prefix = "Checking files.\n"
+        source = prefix + "\n".join(body + self.end for body in self.bodies)
+        text, names, args = self._collect([source])
+        self.assertEqual(text, prefix)
+        self.assertEqual(names, self.names)
+        self.assertEqual(args, self.arguments)
+
+    def test_streaming_literal_angle_bracket_after_tool_is_preserved(self):
+        suffix = " \n<not_a_tool> is plain text."
+        text, names, args = self._collect([self.bodies[0], self.end] + list(suffix))
+        self.assertEqual(text, suffix)
+        self.assertEqual(names, self.names[:1])
+        self.assertEqual(args, self.arguments[:1])
+
+    def test_public_parser_stream_end_does_not_flush_tool_separator(self):
+        parser = FunctionCallParser(self.tools, "qwen3_coder")
+        calls = []
+        for chunk in [self.bodies[0], self.end + "\n", " \t"]:
+            text, increment = parser.parse_stream_chunk(chunk)
+            self.assertEqual(text, "")
+            calls.extend(increment)
+        self.assertEqual(parser.parse_stream_end(), ("", []))
+        self.assertEqual([call.name for call in calls if call.name], self.names[:1])
+        self.assertEqual({call.tool_index for call in calls}, {0})
+        self.assertEqual(
+            json.loads("".join(call.parameters for call in calls)), self.arguments[0]
+        )
+
+    def test_streaming_plain_text_is_unchanged(self):
+        text, names, args = self._collect(list(" \nNo tools here. \n"))
+        self.assertEqual(text, " \nNo tools here. \n")
+        self.assertEqual(names, [])
+        self.assertEqual(args, [])
+
+    def test_nonstreaming_parallel_calls_are_unchanged(self):
+        prefix = "Checking files.\n"
+        source = prefix + "\n".join(body + self.end for body in self.bodies)
+        result = Qwen3CoderDetector().detect_and_parse(source, self.tools)
+        self.assertEqual(result.normal_text, prefix)
+        self.assertEqual([call.tool_index for call in result.calls], [0, 1, 2, 3])
+        self.assertEqual([call.name for call in result.calls], self.names)
+        self.assertEqual(
+            [json.loads(call.parameters) for call in result.calls], self.arguments
+        )
 
 
 class TestQwen3CoderDetector(unittest.TestCase):
