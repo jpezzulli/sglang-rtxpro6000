@@ -7,27 +7,9 @@ This repository contains the complete SGLang-derived source used on one
 NVIDIA RTX PRO 6000 Blackwell Workstation Edition (96 GB, SM120, TP=1). It is
 not two builds: both model configurations run from the same patched source.
 
-**v2.3.1.1:** Both launch profiles now use [Froggeric v22.5](https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates)
-and CPU image preprocessing to address a heavy-vision agentic edge case when
-GPU memory is nearly full. No need to upgrade if your setup is working.
+**v2.3 is the main performance release—no need to upgrade if it’s working for you.**
 
-## v2.3.1 — Maintenance release
-
-v2.3.1 adds one correctness fix adapted from SGLang
-[#36014](https://github.com/sgl-project/sglang/pull/36014): make GDN speculative
-verification and state recovery use the same gate rounding as ordinary
-decoding on the paired Triton path used by **27B FP8/DFlash2**. Flash-Next's
-FlashInfer/WY path is unchanged.
-
-We could not reproduce the reported failure on the live runtime, but focused
-GPU tests reproduced the underlying rounding defect. The fix passed focused
-tests, review, and both-profile regressions, including 64K/490K prefill,
-1,024-token single/concurrent decode, and NIXL restart restoration.
-
-**If v2.3 is working well for you, there is no urgent need to update.** This
-is a small maintenance correction, not a performance update. Launch settings,
-context, cache capacities, dependencies, and the v2.3 performance tables are
-unchanged. See the [changelog](CHANGES.md#v231--gdn-rounding-maintenance).
+**Optional v2.3.1.1:** Both profiles use [Froggeric v22.5](https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates) and CPU image preprocessing for a heavy-vision agentic edge case when GPU memory is nearly full.
 
 ## Verified models
 
@@ -43,8 +25,7 @@ single RTX PRO 6000. The links point directly to the model downloads:
 
 Measured September 5–6, 2026, with **v2.3 FR-Spec on one RTX PRO 6000, TP1**,
 keeping 524,288-token context, 824,384 KV tokens, and HiCache/NIXL enabled.
-These are dated measurements, not guaranteed speeds. v2.3.1 is a maintenance
-release; its fix does not change the Flash-Next execution path.
+These are dated measurements, not guaranteed speeds.
 
 | Workload | Speed | Timing / result |
 |---|---:|---|
@@ -530,10 +511,6 @@ coverage.
   No 27B speed improvement is claimed.
 - NIXL cleaner thresholds are whole-filesystem occupancy percentages, not an
   absolute directory byte quota.
-- v2.3.1 received focused GPU/CPU tests and both-profile prefill, decode,
-  structured/tool, and NIXL restart regressions. The reported live failure
-  was not reproduced here; full reasoning, tool, and vision suites were not
-  repeated for this maintenance update.
 
 See [LIMITATIONS.md](LIMITATIONS.md) for measurement and reproducibility detail.
 
