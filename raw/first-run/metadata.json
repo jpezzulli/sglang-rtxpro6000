@@ -1,0 +1,37 @@
+{
+  "api_version": "2022-11-28",
+  "collected_at": "2026-09-06T01:14:03Z",
+  "coverage": {
+    "complete_through_latest_exposed": true,
+    "first_date": "2026-08-24",
+    "missing_dates_through_latest_exposed": [],
+    "not_yet_exposed_dates": [
+      "2026-09-05",
+      "2026-09-06"
+    ],
+    "through_date": "2026-09-04"
+  },
+  "endpoints": {
+    "clones": "clones?per=day",
+    "paths": "popular/paths?per=day",
+    "referrers": "popular/referrers?per=day",
+    "views": "views?per=day"
+  },
+  "launch_date": "2026-08-24",
+  "original_capture_metadata": {
+    "api_version": "2022-11-28",
+    "collected_at": "20260906T011403Z",
+    "errors": [],
+    "launch_date": "2026-08-24",
+    "repository": "jpezzulli/sglang-rtxpro6000",
+    "schema_version": 1
+  },
+  "repository": "jpezzulli/sglang-rtxpro6000",
+  "schema_version": 1,
+  "sha256": {
+    "clones.json": "6070dfa291adf6f03fdfbcc772bddd8db0f80ba63929375a7b4152399cedfa44",
+    "paths.json": "cab4ca3eb1b60d15f8d50d8c23394cef32831b01280aa93da0fd1cad5b82f192",
+    "referrers.json": "61aaec7b5c7e2b6ae40fe771a40a165d11594f163de95d15ece283038035b80e",
+    "views.json": "47be02447fd049b439c59a0520cdd50b4b975c8cc814a489cb98aff6f3f9e5fd"
+  }
+}

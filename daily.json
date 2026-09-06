@@ -1,0 +1,151 @@
+{
+  "api_version": "2022-11-28",
+  "collected_at": "2026-09-06T01:14:03Z",
+  "coverage": {
+    "complete_through_latest_exposed": true,
+    "first_date": "2026-08-24",
+    "missing_dates_through_latest_exposed": [],
+    "not_yet_exposed_dates": [
+      "2026-09-05",
+      "2026-09-06"
+    ],
+    "through_date": "2026-09-04"
+  },
+  "days": {
+    "2026-08-24": {
+      "clones": {
+        "count": 0,
+        "uniques": 0
+      },
+      "last_collected_at": "2026-09-06T01:14:03Z",
+      "views": {
+        "count": 0,
+        "uniques": 0
+      }
+    },
+    "2026-08-25": {
+      "clones": {
+        "count": 49,
+        "uniques": 22
+      },
+      "last_collected_at": "2026-09-06T01:14:03Z",
+      "views": {
+        "count": 141,
+        "uniques": 81
+      }
+    },
+    "2026-08-26": {
+      "clones": {
+        "count": 38,
+        "uniques": 10
+      },
+      "last_collected_at": "2026-09-06T01:14:03Z",
+      "views": {
+        "count": 60,
+        "uniques": 31
+      }
+    },
+    "2026-08-27": {
+      "clones": {
+        "count": 270,
+        "uniques": 30
+      },
+      "last_collected_at": "2026-09-06T01:14:03Z",
+      "views": {
+        "count": 132,
+        "uniques": 63
+      }
+    },
+    "2026-08-28": {
+      "clones": {
+        "count": 203,
+        "uniques": 75
+      },
+      "last_collected_at": "2026-09-06T01:14:03Z",
+      "views": {
+        "count": 264,
+        "uniques": 124
+      }
+    },
+    "2026-08-29": {
+      "clones": {
+        "count": 403,
+        "uniques": 98
+      },
+      "last_collected_at": "2026-09-06T01:14:03Z",
+      "views": {
+        "count": 348,
+        "uniques": 152
+      }
+    },
+    "2026-08-30": {
+      "clones": {
+        "count": 237,
+        "uniques": 82
+      },
+      "last_collected_at": "2026-09-06T01:14:03Z",
+      "views": {
+        "count": 294,
+        "uniques": 100
+      }
+    },
+    "2026-08-31": {
+      "clones": {
+        "count": 207,
+        "uniques": 111
+      },
+      "last_collected_at": "2026-09-06T01:14:03Z",
+      "views": {
+        "count": 248,
+        "uniques": 118
+      }
+    },
+    "2026-09-01": {
+      "clones": {
+        "count": 621,
+        "uniques": 69
+      },
+      "last_collected_at": "2026-09-06T01:14:03Z",
+      "views": {
+        "count": 241,
+        "uniques": 131
+      }
+    },
+    "2026-09-02": {
+      "clones": {
+        "count": 77,
+        "uniques": 47
+      },
+      "last_collected_at": "2026-09-06T01:14:03Z",
+      "views": {
+        "count": 268,
+        "uniques": 127
+      }
+    },
+    "2026-09-03": {
+      "clones": {
+        "count": 585,
+        "uniques": 57
+      },
+      "last_collected_at": "2026-09-06T01:14:03Z",
+      "views": {
+        "count": 246,
+        "uniques": 106
+      }
+    },
+    "2026-09-04": {
+      "clones": {
+        "count": 65,
+        "uniques": 45
+      },
+      "last_collected_at": "2026-09-06T01:14:03Z",
+      "views": {
+        "count": 222,
+        "uniques": 87
+      }
+    }
+  },
+  "launch_date": "2026-08-24",
+  "repository": "jpezzulli/sglang-rtxpro6000",
+  "schema_version": 1
+}
