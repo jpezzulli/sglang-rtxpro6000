@@ -7,6 +7,10 @@ This repository contains the complete SGLang-derived source used on one
 NVIDIA RTX PRO 6000 Blackwell Workstation Edition (96 GB, SM120, TP=1). It is
 not two builds: both model configurations run from the same patched source.
 
+**v2.3.1.1:** Both launch profiles now use [Froggeric v22.5](https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates)
+and CPU image preprocessing to address a heavy-vision agentic edge case when
+GPU memory is nearly full. No need to upgrade if your setup is working.
+
 ## v2.3.1 — Maintenance release
 
 v2.3.1 adds one correctness fix adapted from SGLang
@@ -34,6 +38,32 @@ single RTX PRO 6000. The links point directly to the model downloads:
 |---|---|---|
 | **Flash-Next NVFP4** | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) | Native NEXTN MTP included in the target checkpoint; v2.3 adds FR-Spec. No separate draft model download. |
 | **27B FP8** | [orcarouter/Qwen3.8-27B-Uncensored-FP8](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8) | Separate [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2) draft checkpoint. |
+
+### Flash-Next performance at a glance
+
+Measured September 5–6, 2026, with **v2.3 FR-Spec on one RTX PRO 6000, TP1**,
+keeping 524,288-token context, 824,384 KV tokens, and HiCache/NIXL enabled.
+These are dated measurements, not guaranteed speeds. v2.3.1 is a maintenance
+release; its fix does not change the Flash-Next execution path.
+
+| Workload | Speed | Timing / result |
+|---|---:|---|
+| 64K cold prefill — 63,864 input tokens | **13,070 tok/s** | 4.886 s to first token; exact READY |
+| 490K cold prefill — 489,879 input tokens | **7,989 tok/s** | 61.319 s to first token; all three needles found |
+| Single-request decode — 1,024 output tokens | **171.93 tok/s** | Median of six runs; excludes time to first token |
+| Four simultaneous requests — 1,024 output tokens each | **447.04 tok/s aggregate** | Median of six runs; includes time to first token and the slowest response |
+
+Cold prefill counts input tokens processed without a matching cached prefix.
+The four-request figure is the combined output rate, not the speed of each
+response. See [RESULTS.md](RESULTS.md#pennyroyal-v23--flash-next-fr-spec) for
+the baseline comparison and full measurement details.
+
+**In real agentic use:** a session on September 6 sustained
+**155 tok/s** across nine responses of at least 1,024 output tokens, with
+roughly **203K–280K input context**. Those responses generated 22,535 tokens;
+the rate excludes prefill and time between requests. Short replies are excluded
+from this sustained-generation figure. This is an observed session, not a
+controlled benchmark. [Session details](RESULTS.md#flash-next-agentic-session--september-6-2026).
 
 ### Expected compatibility with HiCache/NIXL
 
@@ -82,22 +112,17 @@ SGLang's FR-Spec support with a 65,536-token draft map generated for this
 release. The draft model scores fewer tokens; the target model keeps its
 full vocabulary, verification, and acceptance policy.
 
-Measured on one RTX PRO 6000 at TP1, with the same Flash-Next checkpoint and
-1,024 output tokens per request:
+Against two v2.1.2 baseline runs on the same Flash-Next checkpoint, v2.3
+measured **9.7–16.8% faster single-request decode** and **4.5–7.0% higher
+four-request aggregate throughput**. Each request generated 1,024 tokens;
+the comparison uses medians from six v2.3 samples and three samples per
+baseline run. The baselines were on separate boots, so the range reflects
+observed variation, not a guaranteed speedup. Cold 64K/490K prefill was
+essentially unchanged by FR-Spec.
 
-| Configuration | Samples per metric | Single-request decode | Four-request aggregate |
-|---|---:|---:|---:|
-| v2.1.2 baseline, run 1 | 3 | 156.79 tok/s | 417.92 tok/s |
-| v2.1.2 baseline, run 2 | 3 | 147.15 tok/s | 427.91 tok/s |
-| **v2.3 FR-Spec** | **6** | **171.93 tok/s** | **447.04 tok/s** |
-| **Measured increase** | — | **+9.7–16.8%** | **+4.5–7.0%** |
-
-Values are medians. Single-request decode excludes time to first token;
-four-request aggregate includes it and uses the total batch duration.
-The two baseline runs were on separate boots, so the range reflects observed
-run-to-run variation rather than a guaranteed speedup. Cold 64K/490K prefill
-was essentially unchanged. See [RESULTS.md](RESULTS.md#pennyroyal-v23--flash-next-fr-spec)
-for the complete comparison and measurement definitions.
+The [performance table above](#flash-next-performance-at-a-glance) gives the
+v2.3 speeds directly. [RESULTS.md](RESULTS.md#pennyroyal-v23--flash-next-fr-spec)
+preserves the complete baseline comparison and measurement definitions.
 
 Reasoning, tools, vision, agent workflows, long-context continuation, and
 NIXL restart restoration were tested. Detailed scores and evaluator
@@ -334,42 +359,11 @@ real and documented.
 
 ## Performance and qualification
 
-These rows are observations from different model configurations and are not a
-single A/B benchmark.
-
-### Earlier Flash-Next campaign — source `64ecd64924`
-
-The published campaign below used `lactd` with the workstation card's fan
-curve active and this relevant power/clock profile:
-
-```yaml
-power_cap: 450.0
-min_core_clock: 210
-max_core_clock: 2750
-gpu_clock_offsets:
-  0: 1000
-mem_clock_offsets:
-  0: 2000
-```
-
-| Test | Result |
-|---|---:|
-| 64K cold prefill | 10,103.70 tok/s |
-| ~490K cold prefill | 7,872.15 tok/s; 3/3 exact needles |
-| 1x 1,024-token decode | 171.09 tok/s |
-| 4x 1,024-token synchronized batch | 427.54 tok/s aggregate |
-| MTP mean accepted length / rate | 2.58 / 52.74% |
-| Reasoning | 97.49/100 across 139,863 completion tokens |
-| Tools | 30/30 exact calls and semantically correct after review |
-| Vision | complete 1,024-token validation passed |
-| Sealed agentic control | 148.80 tok/s |
-| Natural 3,072-token decode | 162.05 tok/s |
-
-Per-stream post-first-token rates do **not** sum to the synchronized aggregate
-because each stream uses its own interval. The aggregate includes TTFT and the
-batch tail. These results were measured with QSA sparse decode resolving to
-XQA. No matched SM120 end-to-end A/B supports a percentage claim against
-another QSA backend.
+The [Flash-Next table above](#flash-next-performance-at-a-glance) shows the
+v2.3 measurements. The [earlier Flash-Next campaign](RESULTS.md#earlier-flash-next-campaign),
+including its source, clock settings, and quality results, remains in
+RESULTS.md as historical evidence. The separate 27B and third-party results
+below are not a matched A/B comparison with Flash-Next.
 
 ### Independent TP=2 FP8 validation
 
@@ -378,7 +372,10 @@ deployment with native MTP after removing the optional overlap-plan-stream
 setting. The raw third-party table, corpus description, capacity result, and
 scope limits are preserved in [RESULTS.md](RESULTS.md#independent-tp2-fp8-validation).
 
-### Qwen3.8-27B/DFlash2 dated performance campaign
+### Qwen3.8-27B FP8/DFlash2 — August 24, 2026 campaign
+
+Measured for the `qwen38-dflash2-pro6000-20260824` release on one RTX PRO
+6000 at TP1. These are retained 27B measurements, not a new v2.3.1 benchmark.
 
 | Test | Result |
 |---|---:|
@@ -393,9 +390,9 @@ The cited public TP1 official-FP8/MTP3 community capture is directional rather
 than a strict A/B because checkpoint, runtime, speculation, power, harness,
 output duration, and cache configuration differ.
 
-The current 24-slot/five-state confirmation retained exact long-context
-needles, reached a 96.92 reasoning score across 50,986 completion tokens, and
-used at most 10 of 24 Mamba entries.
+The August 26 confirmation of the 24-slot/five-state configuration retained
+exact long-context needles, reached a 96.92 reasoning score across 50,986
+completion tokens, and used at most 10 of 24 Mamba entries.
 
 ### 27B real agentic context behavior
 
@@ -403,13 +400,6 @@ The dated 124-request sample covered 85,156 output tokens and inputs from 183
 to 350,195 tokens. [RESULTS.md](RESULTS.md) preserves the context-band tables,
 overlap treatment, and distinction between completed-request and instantaneous
 telemetry measurements.
-
-### Flash-Next real agentic context behavior
-
-A separate decontaminated 96-request window covered 100,666 output tokens.
-[RESULTS.md](RESULTS.md) preserves its context-band and aggregate tables. The
-first sample after a large prefill was excluded because its telemetry interval
-mixed prefill or idle time with decode.
 
 Detailed definitions, complete 27B context bands, both 27B campaigns, and
 persistence evidence are in [RESULTS.md](RESULTS.md).

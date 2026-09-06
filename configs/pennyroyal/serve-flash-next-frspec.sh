@@ -12,6 +12,7 @@ CACHE_BASE="${CACHE_BASE:?Set CACHE_BASE to the durable compiler-cache root}"
 NIXL_STORAGE_BASE="${NIXL_STORAGE_BASE:?Set NIXL_STORAGE_BASE to the FILE cache root}"
 NIXL_CONFIG="${NIXL_CONFIG:-$SCRIPT_DIR/nixl-posix-frspec.toml}"
 NAMESPACE_HELPER="$REPO_ROOT/scripts/pennyroyal/derive_namespace.py"
+source "$SCRIPT_DIR/chat-template.sh"
 
 # Pin the qualified map and tokenizer: a different ID mapping changes draft
 # proposals and must never silently reuse this representation's cache namespace.
@@ -74,6 +75,8 @@ NIXL_STORAGE="$($NAMESPACE_HELPER \
   --slug "qwen3_8_flash_next_frspec_524k_nextn_${SGLANG_REV}" \
   --git-repo "$REPO_ROOT" \
   --model "target=$TARGET_MODEL" \
+  --field "chat_template_sha256=$CHAT_TEMPLATE_SHA" \
+  --field "image_processor_backend=pil" \
   --field "draft_token_map_sha256=$TOKEN_MAP_SHA" \
   --field "context_length=$CONTEXT_LENGTH" \
   --field "tp_size=$TP_SIZE" \
@@ -124,7 +127,7 @@ exec "$SGLANG_EXE" serve \
   --hicache-storage-prefetch-policy timeout \
   --hicache-storage-backend-extra-config "@$NIXL_CONFIG" \
   --ple-offload-embedding --trust-remote-code \
-  --chat-template "$TARGET_MODEL/chat_template.jinja" \
+  --chat-template "$CHAT_TEMPLATE" --image-processor-backend pil \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \
   --default-chat-template-kwargs '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}' \

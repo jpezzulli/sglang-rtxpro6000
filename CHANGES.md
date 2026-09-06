@@ -10,6 +10,10 @@ two maintenance corrections below, without a rebase. v2.3 adds the
 FR-Spec launch configuration using the same executable. v2.3.1 adds only the
 GDN rounding correction described below.
 
+**v2.3.1.1:** Both launch profiles now use [Froggeric v22.5](https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates)
+and CPU image preprocessing to address a heavy-vision agentic edge case when
+GPU memory is nearly full. No need to upgrade if your setup is working.
+
 “Local” does not mean a permanent fork requirement. It means the exact active
 commit has not merged upstream. Where a PR has a later refined head, that is
 shown separately rather than pretending the local commit and PR head are

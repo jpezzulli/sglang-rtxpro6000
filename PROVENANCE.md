@@ -10,12 +10,14 @@
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
 | Local runtime commits | 27, including the fully reverted graph trial; excludes docs/recipe-only commits |
 | Maintenance test base package | `sglang==0.5.19.dev492+g836206a0a` plus the v2.3.1 source correction |
-| Release | v2.3.1 |
-| Git tag | `pennyroyal-v2.3.1` |
+| Release | v2.3.1.1 |
+| Git tag | `pennyroyal-v2.3.1.1` |
 
 The release includes launch recipes, documentation, and measurement summaries.
-v2.3.1 adds the GDN rounding correction to v2.3; dependencies and launch
-settings are unchanged. The earlier 27B dated release
+v2.3.1.1 keeps the v2.3.1 executable source and dependencies unchanged; it
+updates the launch recipes to CPU image preprocessing and the pinned
+[Froggeric v22.5 template](configs/pennyroyal/templates/README.md).
+The earlier 27B dated release
 remains reachable through `qwen38-dflash2-pro6000-20260824`; its useful results
 and source lineage are also retained cumulatively in the current documentation.
 

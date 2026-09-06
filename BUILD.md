@@ -30,8 +30,10 @@ distributed.
 
 To use the v2.3.1 correction, install the updated source; keeping the older
 v2.3 wheel alone does not apply it. Use a clean checkout of
-`pennyroyal-v2.3.1`, which includes the launchers and FR-Spec map. The executable
-change is commit `739aff3dc59958101882c75c2e4fb2e6d69d99bd`.
+`pennyroyal-v2.3.1.1`, which includes the launchers, chat template, and FR-Spec
+map. The executable change is commit `739aff3dc59958101882c75c2e4fb2e6d69d99bd`.
+An existing v2.3.1 installation needs no runtime rebuild for the v2.3.1.1
+launcher/template update.
 Create an isolated Python 3.12 environment:
 
 ```bash

@@ -11,6 +11,7 @@ CACHE_BASE="${CACHE_BASE:?Set CACHE_BASE to the durable compiler-cache root}"
 NIXL_STORAGE_BASE="${NIXL_STORAGE_BASE:?Set NIXL_STORAGE_BASE to the FILE cache root}"
 NIXL_CONFIG="${NIXL_CONFIG:-$SCRIPT_DIR/nixl-posix.toml}"
 NAMESPACE_HELPER="$REPO_ROOT/scripts/pennyroyal/derive_namespace.py"
+source "$SCRIPT_DIR/chat-template.sh"
 
 CONTEXT_LENGTH=524288
 PAGE_SIZE=64
@@ -68,6 +69,8 @@ NIXL_STORAGE="$($NAMESPACE_HELPER \
   --slug "qwen3_8_27b_524k_dflash2_${SGLANG_REV}" \
   --git-repo "$REPO_ROOT" \
   --model "target=$TARGET_MODEL" --model "draft=$DRAFT_MODEL" \
+  --field "chat_template_sha256=$CHAT_TEMPLATE_SHA" \
+  --field "image_processor_backend=pil" \
   --field "context_length=$CONTEXT_LENGTH" --field "tp_size=$TP_SIZE" \
   --field "page_size=$PAGE_SIZE" --field "compute_dtype=$COMPUTE_DTYPE" \
   --field "target_kv_dtype=$TARGET_KV_DTYPE" --field "draft_kv_dtype=$DRAFT_KV_DTYPE" \
@@ -98,7 +101,8 @@ exec "$SGLANG_EXE" serve \
   --mamba-track-interval "$MAMBA_TRACK_INTERVAL" \
   --chunked-prefill-size 2048 --max-prefill-tokens 2048 \
   --attention-backend flashinfer --decode-attention-backend trtllm_mha \
-  --trust-remote-code --chat-template "$TARGET_MODEL/chat_template.jinja" \
+  --trust-remote-code --chat-template "$CHAT_TEMPLATE" \
+  --image-processor-backend pil \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \
   --default-chat-template-kwargs '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}' \

@@ -64,12 +64,15 @@ and memory observations are in the
 
 ### Cold prefill
 
-| Prompt | v2.1.2 TTFT | v2.3 FR-Spec TTFT | Result |
-|---|---:|---:|---|
-| 63,864 tokens | 4.969 s | 4.886 s | Exact READY |
-| One 489,879-token prompt | 61.070 s | 61.319 s | All three separated needles exact |
+| Prompt | v2.1.2 speed | v2.3 FR-Spec speed | v2.1.2 time to first token | v2.3 time to first token | Result |
+|---|---:|---:|---:|---:|---|
+| 63,864 tokens | 12,853 tok/s | **13,070 tok/s** | 4.969 s | 4.886 s | Exact READY |
+| One 489,879-token prompt | 8,022 tok/s | **7,989 tok/s** | 61.070 s | 61.319 s | All three separated needles exact |
 
-Both tests used fresh cache namespaces. Cold prefill was essentially unchanged.
+Both tests used fresh cache namespaces. Speeds use server-reported input token
+counts divided by unrounded client time to first token; displayed values are
+rounded. Cold prefill was essentially unchanged by FR-Spec. These are the v2.3
+qualification measurements, not a speed increase attributed to v2.3.1 maintenance.
 
 ### Functional validation
 
@@ -100,9 +103,49 @@ four independent full transfers from storage.
 Both the Flash-Next and 27B/DFlash2 profiles retained their existing context,
 graph settings, and KV capacities. No 27B throughput improvement is claimed.
 
+## Flash-Next agentic session — September 6, 2026
+
+An agentic-use log covered 12:04:59–12:11:32 EDT. It contains 41
+completed requests, with one request running at a time in the decode samples.
+For sustained-generation reporting, only responses with **at least 1,024
+output tokens** are included; short replies and periodic throughput readings
+that span idle or prefill time are not used in the calculation.
+
+| Measurement | Result |
+|---|---:|
+| Included completed requests | 9 |
+| Input context for included requests | 202,815–279,824 tokens |
+| Generated output | 22,535 tokens |
+| Summed server post-prefill time | 145.00612 s |
+| Sustained generation rate | **155.4 tok/s** |
+| Per-request median | 159.9 tok/s |
+
+The sustained rate is total output divided by summed server post-prefill time.
+It excludes initial prefill and time between requests; it is not whole-session
+throughput or a controlled release comparison. This observation does not
+establish a speedup from the maintenance fix.
+
+One request separately processed **119,382 uncached input tokens in 10.38742 s**,
+or **11,493 tok/s**, while reusing an 83,456-token prefix. This is additional
+prefill on an existing prefix, not the cold 64K benchmark or proof of a fresh
+NIXL disk restore.
+
 ## Earlier Flash-Next campaign
 
 Source: `64ecd64924fee338e3bf846a32167cd604186827`.
+
+This campaign used `lactd` with the workstation card's fan curve active and
+the following power/clock profile:
+
+```yaml
+power_cap: 450.0
+min_core_clock: 210
+max_core_clock: 2750
+gpu_clock_offsets:
+  0: 1000
+mem_clock_offsets:
+  0: 2000
+```
 
 | Workload | Context / concurrency | Result | Correctness / note |
 |---|---|---:|---|

@@ -33,6 +33,11 @@ The scripts expect the SGLang executable at `$REPO_ROOT/.venv/bin/sglang`.
 Override `SGLANG_EXE` and `PYTHON` if the environment lives elsewhere. Review
 the sample NIXL watermarks before first use.
 
+Both profiles use the bundled [Froggeric v22.5 template](configs/pennyroyal/templates/README.md)
+and CPU image preprocessing; model inference stays on GPU. The template hash
+and preprocessing backend are included in the NIXL namespace, so these
+launchers start a separate cache identity without deleting older caches.
+
 ## Launch Flash-Next
 
 ```bash
