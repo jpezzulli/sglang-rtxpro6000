@@ -45,9 +45,9 @@ tokens per stream. C1 is **post-first-token** throughput; C4 is aggregate
 | Initial v2.1.2 baseline | 3/3 | 156.79 | 151.17 | 417.92 |
 | Initial FR-Spec | 3/3 | 165.33 | 157.16 | 447.83 |
 | v2.1.2 baseline after reboot | 3/3 | 147.15 | 140.88 | 427.91 |
-| Frozen FR-Spec release candidate | 6/6 | **171.93** | **164.40** | **447.04** |
+| v2.3 FR-Spec | 6/6 | **171.93** | **164.40** | **447.04** |
 
-The frozen candidate improved C1 by **9.7–16.8%** and C4 by **4.5–7.0%**
+The v2.3 configuration improved C1 by **9.7–16.8%** and C4 by **4.5–7.0%**
 against the two baseline medians. The initial FR trial measured +5.4%/+7.2%
 against the initial baseline. These are sequential session comparisons with
 material baseline variance and an intervening reboot, not randomized paired

@@ -17,7 +17,7 @@ still contain rough edges or hardware/model-specific assumptions.
 
 ## v2.3 — FR-Spec for Flash-Next
 
-**Pennyroyal 2.3 promotes the qualified FR-Spec release candidate: faster
+**Pennyroyal 2.3 includes FR-Spec: faster
 Flash-Next decode with the same 524,288-token context and 824,384-token KV
 pool.** The 27B FP8/DFlash2 profile remains supported and unchanged.
 
@@ -37,7 +37,7 @@ arm, TP1, ordinary warmups, and 1,024 output tokens per stream:
 |---|---:|---:|---:|
 | v2.1.2 baseline, initial boot | 3 | 156.79 tok/s | 417.92 tok/s |
 | v2.1.2 baseline, return after reboot | 3 | 147.15 tok/s | 427.91 tok/s |
-| **v2.3 frozen FR-Spec candidate** | **6** | **171.93 tok/s** | **447.04 tok/s** |
+| **v2.3 FR-Spec** | **6** | **171.93 tok/s** | **447.04 tok/s** |
 | **Increase over the two baseline medians** | — | **+9.7–16.8%** | **+4.5–7.0%** |
 
 These are observed session comparisons, not randomized confidence bounds or
