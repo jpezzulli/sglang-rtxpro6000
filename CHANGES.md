@@ -1,18 +1,56 @@
 # Cumulative changes and upstream status
 
 The current runtime is the ordered range
-`e7e78940168f..836206a0adc8`. All 26 runtime commits remain in source history,
+`e7e78940168f..739aff3dc599`. All 27 runtime commits remain in source history,
 including the graph-lifetime trial and its full revert. The integration base
 is unchanged. The v2.1.1 upstream check fetched `main` at
 `cdbfe90b4a31079859817c148ef4498240ec2580` on 2026-08-29; older PR-status
 tables below retain their stated observation dates. Version 2.1.2 added the
 two maintenance corrections below, without a rebase. v2.3 adds the
-FR-Spec launch configuration using the same executable.
+FR-Spec launch configuration using the same executable. v2.3.1 adds only the
+GDN rounding correction described below.
 
 “Local” does not mean a permanent fork requirement. It means the exact active
 commit has not merged upstream. Where a PR has a later refined head, that is
 shown separately rather than pretending the local commit and PR head are
 identical.
+
+## v2.3.1 — GDN rounding maintenance
+
+Released September 6, 2026. If v2.3 is working well for you, there is no urgent
+need to update. This is a small correctness fix, not a performance release.
+
+Commit `739aff3dc5` adapts SGLang
+[#36014](https://github.com/sgl-project/sglang/pull/36014) by
+[V-aerus](https://github.com/V-aerus) (Hangshuai He), from head
+`bf5d4227dde4e532b4668327a8d6dcc4d79d9c2b`.
+
+**27B FP8/DFlash2:** speculative verification could round a GDN gate
+differently from ordinary decoding, causing their recurrent states to differ.
+The correction aligns verification and accepted-state/radix-boundary recovery
+when packed decode and verification both use Triton. It preserves the
+existing behavior of mixed backends, KDA, and alternate-device paths.
+**Flash-Next NVFP4/native MTP:** its FlashInfer/WY path is unchanged and passed
+the same runtime regressions.
+
+We could not reproduce the reported failure on the live runtime. Four focused
+SM120 GPU tests did reproduce the underlying numerical mismatch before the
+correction. The final fix passed:
+
+- 25 GDN GPU tests and 14 dispatcher/policy CPU tests with 32 subtests;
+  adjacent KDA/stride coverage also passed during development.
+- Three sequential reviews, with review findings addressed and no remaining
+  correctness findings in the final review.
+- Both profiles' structured-output and parallel-tool smoke checks, exact
+  READY from approximately 64K prefill, all three needles in one approximately
+  490K prompt, and 1,024-token C1/C4 decode.
+- Identical restart restoration of 489,856 NIXL tokens with all three needles
+  correct on both profiles. Context, full KV pools, and CUDA graphs were retained.
+
+Launch settings and dependencies are unchanged. Full reasoning, the complete
+tool suite, and vision were not repeated; existing performance tables retain
+their original versions and measurements. These results establish the narrow
+rounding correction, not every failure reported for speculative decoding.
 
 ## v2.3 — Flash-Next FR-Spec
 
@@ -189,6 +227,7 @@ RecoverSSM, complete hybrid-state persistence, and three-axis fused mRoPE.
 | `fb1216c6c4` | Completes merged PR [#36738](https://github.com/sgl-project/sglang/pull/36738) for Penny's JIT paths; replaces the required scoped behavior from closed PR [#36572](https://github.com/sgl-project/sglang/pull/36572) | Shared HiCache D2H/H2D transfer streams and load-back ordering | Binds kernel-backend TVM-FFI transfers to the current torch stream with restoration on exit, then fences H2D load-back behind the forward stream. Direct GPU race tests and two-profile NIXL restart restoration cover the selected paths. |
 | `e2c6f4a4f8` | Adapts PRs [#37962](https://github.com/sgl-project/sglang/pull/37962) and [#37408](https://github.com/sgl-project/sglang/pull/37408) | One-rank sampler synchronization and Qwen3 Coder streaming separators | Exact-base red/green tests, sequential review, and both-profile API/decode/prefill/restore regressions. This commit also contains a graph-lifetime trial, fully reverted by the next commit. |
 | `836206a0ad` | Local disposition of PR [#37448](https://github.com/sgl-project/sglang/pull/37448) | Restores pre-existing graph behavior and tests | Reverts the rejected graph-lifetime trial exactly to the v2.1.1 base, leaving only the two maintenance corrections above. Original launch shapes were requalified. |
+| `739aff3dc5` | Adapts PR [#36014](https://github.com/sgl-project/sglang/pull/36014) | Paired Triton GDN verification and accepted-state recovery | Aligns beta rounding with packed decode, including recovery and ReplaySSM propagation, while preserving mixed-backend contracts. Focused GPU reproduction, final review, and both-profile runtime/NIXL regressions passed. |
 
 ## PRs opened by this project
 

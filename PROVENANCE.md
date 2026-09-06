@@ -6,15 +6,16 @@
 |---|---|
 | Upstream | `https://github.com/sgl-project/sglang.git` |
 | Canonical branch | `pennyroyal-main-sm120-final` |
-| Executable source HEAD | `836206a0adc8ef7aaa49f652230d5577a25014a5` |
+| Executable source HEAD | `739aff3dc59958101882c75c2e4fb2e6d69d99bd` |
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Local runtime commits | 26, including the fully reverted graph trial |
-| Installed package | `sglang==0.5.19.dev492+g836206a0a` |
-| Release | v2.3 |
-| Git tag | `pennyroyal-v2.3.0` |
+| Local runtime commits | 27, including the fully reverted graph trial; excludes docs/recipe-only commits |
+| Maintenance test base package | `sglang==0.5.19.dev492+g836206a0a` plus the v2.3.1 source correction |
+| Release | v2.3.1 |
+| Git tag | `pennyroyal-v2.3.1` |
 
 The release includes launch recipes, documentation, and measurement summaries.
-The executable source is unchanged from v2.1.2. The earlier 27B dated release
+v2.3.1 adds the GDN rounding correction to v2.3; dependencies and launch
+settings are unchanged. The earlier 27B dated release
 remains reachable through `qwen38-dflash2-pro6000-20260824`; its useful results
 and source lineage are also retained cumulatively in the current documentation.
 
@@ -32,6 +33,25 @@ graph-lifetime trial remains in history with its complete revert; it contributes
 no change to the released graph implementation. Dependencies and launch
 settings are unchanged. [CHANGES.md](CHANGES.md) records the focused
 two-profile regression scope; existing performance results are not refreshed.
+
+## v2.3.1 maintenance provenance
+
+The only runtime change is `739aff3dc5`, adapted from SGLang
+[#36014](https://github.com/sgl-project/sglang/pull/36014) by V-aerus
+(Hangshuai He), head `bf5d4227dde4e532b4668327a8d6dcc4d79d9c2b`.
+It aligns paired Triton GDN verification and recovery with packed decode's
+beta rounding. Flash-Next's selected FlashInfer/WY path is unchanged.
+
+The published six-file source/test change is byte-identical to the reviewed
+and tested change. Tests loaded these updated Python/Triton sources on the
+existing v2.3 environment; no new prebuilt wheel is distributed. Build/install
+the release source using [BUILD.md](BUILD.md). The base package version above
+describes that test environment, not a wheel containing the new correction.
+
+The reported failure was not reproduced live, but focused SM120 GPU tests
+reproduced the underlying mismatch. Focused tests and both-profile runtime/
+NIXL regressions passed; [CHANGES.md](CHANGES.md#v231--gdn-rounding-maintenance)
+records the scope. No new performance claim or model qualification is added.
 
 ## v2.3 FR-Spec provenance
 

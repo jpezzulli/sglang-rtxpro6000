@@ -7,6 +7,24 @@ This repository contains the complete SGLang-derived source used on one
 NVIDIA RTX PRO 6000 Blackwell Workstation Edition (96 GB, SM120, TP=1). It is
 not two builds: both model configurations run from the same patched source.
 
+## v2.3.1 — Maintenance release
+
+v2.3.1 adds one correctness fix adapted from SGLang
+[#36014](https://github.com/sgl-project/sglang/pull/36014): make GDN speculative
+verification and state recovery use the same gate rounding as ordinary
+decoding on the paired Triton path used by **27B FP8/DFlash2**. Flash-Next's
+FlashInfer/WY path is unchanged.
+
+We could not reproduce the reported failure on the live runtime, but focused
+GPU tests reproduced the underlying rounding defect. The fix passed focused
+tests, review, and both-profile regressions, including 64K/490K prefill,
+1,024-token single/concurrent decode, and NIXL restart restoration.
+
+**If v2.3 is working well for you, there is no urgent need to update.** This
+is a small maintenance correction, not a performance update. Launch settings,
+context, cache capacities, dependencies, and the v2.3 performance tables are
+unchanged. See the [changelog](CHANGES.md#v231--gdn-rounding-maintenance).
+
 ## Verified models
 
 These model configurations have been verified with **HiCache and NIXL** on a
@@ -21,9 +39,9 @@ single RTX PRO 6000. The links point directly to the model downloads:
 
 The standard [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8)
 target is **expected to work with the existing 27B DFlash2 + HiCache/NIXL
-recipe**, but has not been actively verified on v2.3. Its architecture,
-quantization configuration, tokenizer, and chat template match the verified
-27B FP8 configuration.
+recipe**, but has not been actively verified on the v2.3 release line. Its
+architecture, quantization configuration, tokenizer, and chat template match
+the verified 27B FP8 configuration.
 
 ### Broader model support without HiCache/NIXL
 
@@ -143,21 +161,22 @@ The important work is architectural, not merely a collection of launch flags:
 | Item | Value |
 |---|---|
 | Canonical branch | `pennyroyal-main-sm120-final` |
-| Current executable source | `836206a0adc8ef7aaa49f652230d5577a25014a5` |
-| Current release | **v2.3** |
-| Git tag | `pennyroyal-v2.3.0` |
+| Current executable source | `739aff3dc59958101882c75c2e4fb2e6d69d99bd` |
+| Current release | **v2.3.1** |
+| Git tag | `pennyroyal-v2.3.1` |
 | Initial unified dated tag | `sglang-rtxpro6000-20260827` |
 | Earlier 27B dated tag | `qwen38-dflash2-pro6000-20260824` |
 | Upstream integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Installed SGLang | `0.5.19.dev492+g836206a0a` |
+| Maintenance test base package | `0.5.19.dev492+g836206a0a` plus the v2.3.1 source correction |
 | Python / PyTorch | `3.12.13` / `2.13.0+cu130` |
 | CUDA / compiler | CUDA `13.3` (NVCC `13.3.73`) / GCC `15.3.1` |
 | FlashInfer / NIXL | `0.6.17` / `1.4.0` |
 | GPU / driver | RTX PRO 6000 96 GB, SM120 / `610.57.04` |
 
-v2.3 adds the FR-Spec launcher and token map without changing SGLang runtime
-or kernel code. Source lineage and upstream relationships are in [CHANGES.md](CHANGES.md) and
-[PROVENANCE.md](PROVENANCE.md).
+v2.3.1 adds the GDN rounding correction to v2.3's FR-Spec release. Install
+from the updated source using [BUILD.md](BUILD.md); the older v2.3 wheel does
+not contain this correction. Source lineage and upstream relationships are in
+[CHANGES.md](CHANGES.md) and [PROVENANCE.md](PROVENANCE.md).
 
 ## Qualified configuration matrix
 
@@ -463,7 +482,8 @@ OpenAI-compatible smoke requests, and cold/radix/NIXL cache distinctions.
 
 The cumulative history starts with the 2026-08-24 27B release, then layers the
 unified runtime and Flash-Next work on the same source line. The current active
-stack contains 26 commits above its integration base. Major groups are:
+stack contains 27 runtime commits above its integration base, excluding
+documentation and recipe-only commits. Major groups are:
 
 - Qwen3.8-27B/DFlash2: independent target/draft overrides, fixed-width XQA mask,
   NVCC host-compiler identity, request-span observability, and NIXL correctness.
@@ -482,6 +502,8 @@ stack contains 26 commits above its integration base. Major groups are:
   runtime behavior.
 - v2.3: FR-Spec reduces draft-vocabulary work for Flash-Next. The token map
   and launcher use the same runtime and kernels as v2.1.2.
+- v2.3.1 maintenance: align paired Triton GDN verification and accepted-state
+  recovery with ordinary decode's gate rounding, adapted from #36014.
 - Open project PRs: #36520, #36524, and #35584.
 - Closed project submissions retained in runtime history: #35583; transient
   ragged/DSpARK PR #35586 is documented but not in the active source.
@@ -518,6 +540,10 @@ coverage.
   No 27B speed improvement is claimed.
 - NIXL cleaner thresholds are whole-filesystem occupancy percentages, not an
   absolute directory byte quota.
+- v2.3.1 received focused GPU/CPU tests and both-profile prefill, decode,
+  structured/tool, and NIXL restart regressions. The reported live failure
+  was not reproduced here; full reasoning, tool, and vision suites were not
+  repeated for this maintenance update.
 
 See [LIMITATIONS.md](LIMITATIONS.md) for measurement and reproducibility detail.
 

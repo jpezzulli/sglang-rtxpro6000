@@ -20,18 +20,19 @@ assumed equivalent.
 | `sglang-kernel` | `0.4.6.post1` |
 | Triton / XGrammar | `3.7.1` / `0.2.1` |
 
-The installed SGLang wheel from source commit `836206a0ad` has SHA-256
+The earlier v2.1.2/v2.3 SGLang wheel from source commit `836206a0ad` has SHA-256
 `96cb28701ac6f2ad1523e5607218f4fa68d9f9bb26041d6f36f36e2a39362542`.
+It does not contain the v2.3.1 GDN correction. v2.3.1 was tested with updated
+Python/Triton sources on this same dependency stack; no new prebuilt wheel is
+distributed.
 
 ## Native build
 
-v2.3 uses the same executable and wheel as v2.1.2. If that package is already
-installed, no rebuild is required; use the new FR-Spec launcher and token map.
-
-For an exact rebuild of the wheel and version string, check out
-`836206a0adc8ef7aaa49f652230d5577a25014a5` in a separate source directory.
-The release checkout contains the launchers and map; its Git tag is
-`pennyroyal-v2.3.0`. Create an isolated Python 3.12 environment:
+To use the v2.3.1 correction, install the updated source; keeping the older
+v2.3 wheel alone does not apply it. Use a clean checkout of
+`pennyroyal-v2.3.1`, which includes the launchers and FR-Spec map. The executable
+change is commit `739aff3dc59958101882c75c2e4fb2e6d69d99bd`.
+Create an isolated Python 3.12 environment:
 
 ```bash
 uv python install 3.12.13
@@ -61,8 +62,11 @@ uv pip install --prerelease=allow \
 cd python
 python -m build --wheel --no-isolation
 python -m pip install --force-reinstall --no-deps \
-  dist/sglang-0.5.19.dev492+g836206a0a-cp312-cp312-linux_x86_64.whl
+  dist/sglang-*.whl
 ```
+
+The clean checkout should contain only the wheel just built in `python/dist`;
+its generated version string depends on the checked-out Git revision.
 
 The NVCC compiler-pin change makes `CXX` part of compilation as well as the JIT
 fingerprint and host link. Do not omit the GCC 15 variables while expecting the

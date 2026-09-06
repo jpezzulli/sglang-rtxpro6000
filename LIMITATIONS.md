@@ -13,6 +13,15 @@
   approximately 490K. This is not proof for every possible 524K prompt,
   modality, sampling configuration, or concurrent schedule.
 
+## v2.3.1 maintenance scope
+
+The reported live failure was not reproduced here. Focused GPU tests reproduced
+the GDN rounding defect, and both profiles passed the maintenance regressions
+listed in [CHANGES.md](CHANGES.md#v231--gdn-rounding-maintenance). This is not a
+claim that every speculative-decoding failure is resolved. Full reasoning,
+tool, and vision suites were not repeated, and no new performance claim is made.
+If v2.3 is working well for you, there is no urgent need to update.
+
 ## v2.3 validation scope
 
 - Performance tests used one RTX PRO 6000 at TP1 and the same Flash-Next
