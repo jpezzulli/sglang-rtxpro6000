@@ -5,15 +5,15 @@ confirmed in this source. “Explicit” means the launcher selected a narrow
 phase-specific backend; “source” means local dispatch enabled an already
 available path. Requested flags alone were not treated as resolution evidence.
 
-## Version 2.3: existing FR-Spec path
+## v2.3 FR-Spec
 
-The additional Flash-Next recipe selects SGLang's existing native-MTP token-map
-path: a 65,536-row BF16 draft head proposes tokens, remapped to full target IDs.
-Target vocabulary, target verification and acceptance policy stay unchanged.
-No attention/GDN/MoE backend switch or BF16 low-M kernel is included; the
-resolved backends below remain in use. This is isolated from the unchanged
-27B/DFlash2 recipe. See [PROVENANCE.md](PROVENANCE.md#version-23-fr-spec-provenance)
-for source credit and map identity.
+A 65,536-row BF16 draft head proposes tokens through SGLang's native-MTP
+FR-Spec path. Draft IDs are mapped back to full target IDs before
+verification. Target vocabulary and acceptance policy are unchanged.
+
+The attention, GDN, MoE, and verification backends below remain in use.
+The 27B/DFlash2 launcher is unchanged. Source credit and map identity are
+listed in [PROVENANCE.md](PROVENANCE.md#v23-fr-spec-provenance).
 
 ## Qwen3.8 Flash-Next
 

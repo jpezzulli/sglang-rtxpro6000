@@ -1758,5 +1758,5 @@
   ],
   "evaluation_cases_used": false,
   "corpus_source_revision": "836206a0adc8ef7aaa49f652230d5577a25014a5",
-  "corpus_path_note": "Paths made repository-relative and checkpoint display name generalized for publication; hashes and selected map bytes unchanged."
+  "corpus_path_note": "Corpus paths are relative to the repository at corpus_source_revision."
 }

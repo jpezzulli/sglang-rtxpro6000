@@ -22,76 +22,83 @@ interchangeable throughput number.
 - **Restored-prefix effective prefill:** input tokens divided by TTFT after
   NIXL restoration. It is not cold model prefill.
 
-## Pennyroyal 2.3 — Flash-Next FR-Spec
+## Pennyroyal v2.3 — Flash-Next FR-Spec
 
-September 5–6, 2026. Same Flash-Next ModelOpt NVFP4 checkpoint across arms,
-one RTX PRO 6000, TP1; executable `836206a0ad`, unchanged v2.1.2 wheel.
-Native NEXTN 3/1/4, 65,536-ID FR map, full target vocabulary and unchanged
-acceptance policy. Context 524,288, KV 824,384, page 64, C4, 24 Mamba slots,
-BF16 GDN, graphs and 32 GiB HiCache/NIXL remain enabled.
+Measured September 5–6, 2026, on one RTX PRO 6000 at TP1. The tests used the
+same Flash-Next ModelOpt NVFP4 checkpoint, SGLang executable `836206a0ad`,
+and dependencies for the baseline and FR-Spec configurations.
 
-Adoption credit: [gabrielolympie/sglang-flashnext-sm120](https://github.com/gabrielolympie/sglang-flashnext-sm120).
-The token map was independently generated; no external throughput headline
-or complete external patch stack is presented as a Penny measurement.
+FR-Spec uses a 65,536-token draft vocabulary while keeping full target
+verification and the existing acceptance policy. The configuration retains
+524,288-token context, 824,384 KV tokens, page size 64, four concurrent
+requests, 24 BF16 Mamba slots, CUDA graphs, and 32 GiB HiCache/NIXL.
 
-### Controlled decode and prefill
+Source credit: [gabrielolympie/sglang-flashnext-sm120](https://github.com/gabrielolympie/sglang-flashnext-sm120).
+Pennyroyal uses a separately generated token map; the numbers below are
+measurements from this workstation.
 
-Ordinary Chat Completions, ordinary warmups, 1,024 server-reported completion
-tokens per stream. C1 is **post-first-token** throughput; C4 is aggregate
-**synchronized whole-request makespan**, including first-token delay.
+### Decode throughput
 
-| Arm | Samples C1/C4 | C1 median, tok/s | C1 whole-request median, tok/s | C4 aggregate median, tok/s |
+Tests used the ordinary Chat Completions API after warmups, with 1,024
+server-reported completion tokens per stream. Single-request decode excludes
+time to first token. Four-request aggregate divides all output tokens by the
+total synchronized batch duration, including time to first token.
+
+| Configuration | Samples per metric | Single-request decode, median | Single-request whole-request rate, median | Four-request aggregate, median |
 |---|---:|---:|---:|---:|
-| Initial v2.1.2 baseline | 3/3 | 156.79 | 151.17 | 417.92 |
-| Initial FR-Spec | 3/3 | 165.33 | 157.16 | 447.83 |
-| v2.1.2 baseline after reboot | 3/3 | 147.15 | 140.88 | 427.91 |
-| v2.3 FR-Spec | 6/6 | **171.93** | **164.40** | **447.04** |
+| v2.1.2 baseline, run 1 | 3 | 156.79 tok/s | 151.17 tok/s | 417.92 tok/s |
+| v2.3 FR-Spec, initial measurements | 3 | 165.33 tok/s | 157.16 tok/s | 447.83 tok/s |
+| v2.1.2 baseline, run 2 | 3 | 147.15 tok/s | 140.88 tok/s | 427.91 tok/s |
+| **v2.3 FR-Spec** | **6** | **171.93 tok/s** | **164.40 tok/s** | **447.04 tok/s** |
 
-The v2.3 configuration improved C1 by **9.7–16.8%** and C4 by **4.5–7.0%**
-against the two baseline medians. The initial FR trial measured +5.4%/+7.2%
-against the initial baseline. These are sequential session comparisons with
-material baseline variance and an intervening reboot, not randomized paired
-confidence intervals. All sample-level rates and per-stream/acceptance/memory
-observations are in the [numeric record](https://github.com/jpezzulli/pennyroyal-validation/blob/main/results/qwen38-flash-next-frspec-20260905.json).
+The six-sample v2.3 medians are **9.7–16.8% higher for single-request decode**
+and **4.5–7.0% higher for four-request aggregate** than the two baseline
+medians. Initial FR-Spec measurements showed +5.4% and +7.2%, respectively,
+against baseline run 1.
 
-| Fresh-namespace prefill | Baseline TTFT | FR-Spec TTFT | Correctness |
+Tests ran sequentially, and the baseline runs were on separate boots.
+The range reflects measured variation, not a randomized confidence interval
+or a guaranteed speedup. Sample-level timings, per-stream rates, acceptance,
+and memory observations are in the
+[numeric results](https://github.com/jpezzulli/pennyroyal-validation/blob/main/results/qwen38-flash-next-frspec-20260905.json).
+
+### Cold prefill
+
+| Prompt | v2.1.2 TTFT | v2.3 FR-Spec TTFT | Result |
 |---|---:|---:|---|
-| 63,864 prompt tokens | 4.969 s | 4.886 s | Exact READY |
+| 63,864 tokens | 4.969 s | 4.886 s | Exact READY |
 | One 489,879-token prompt | 61.070 s | 61.319 s | All three separated needles exact |
 
-Cold prefill is essentially unchanged. It is not mixed with decode. A later
-clean six-sample confirmation measured FR-only C1 **173.05** and C4 **450.94**;
-adding the held BF16 low-M kernel measured **172.13**/**451.55** (−0.53%/+0.13%).
-That kernel is excluded from 2.3. Those follow-up arms are not replacements
-for the frozen baseline/FR measurements or a new cold-prefill A/B.
+Both tests used fresh cache namespaces. Cold prefill was essentially unchanged.
 
-### Qualification and persistence
+### Functional validation
 
-- Full current reasoning: two warmups, nine measured requests in the
-  `three-user-1-3-3-1` schedule; **98.52/100**, 131,770 completion tokens,
-  all natural stops and no fatal/loop caps. Full case/dimension breakdown
-  and grading limitations are in the detailed report.
-- Tools: 27/30 literal, 29/30 exact calls/arguments, 30/30 parseable, zero
-  runtime errors. Actual workflows: **29 clean plus one redundant read-only
-  call**, no consequential execution failure. Two answer-discipline caveats
-  are separately disclosed; no invented 30/30 automatic result.
-- Vision and sealed agentic passed. The natural 3,072-token response contained
-  all direct IDs; the original automatic failure is retained because the
-  collector expected the wrong field. Collector fixes were not bundled.
-- Both supported profiles passed smoke, 64K/490K prefill, C1/C4 decode, and
-  actual NIXL restart restoration, with their original graph/pool capacities.
-- FR restart restored **489,856 tokens** with three exact needles. Concurrent
-  paired 64K/490K restoration completed correctly in **9.396 s**, with 553,664
-  NIXL-hit tokens plus 553,664 device-hit tokens and four Mamba states restored.
-  Duplicate prefixes reused admitted state; this is not four independent
-  full disk transfers. Two dependent 490K conversation turns also passed.
-- Final recovery after the excluded-kernel A/B again passed 9/9 smoke and
-  489,856-token NIXL restoration. Full capacity and idle state were verified.
+| Test | Result |
+|---|---|
+| Reasoning | 98.52/100; nine measured requests, all natural stops |
+| Tools | 29 clean workflows and one redundant read-only call; zero runtime errors |
+| Vision | Passed the spatial and claim-separation checks |
+| Agent workflow | Passed the six-turn, five-tool release-note task |
+| Natural decode | 3,072 tokens and token IDs returned; automatic check affected by a collector field-name mismatch |
+| Long-context continuation | Two dependent turns on a restored 490K conversation passed |
+| Both supported profiles | Startup, prefill, single/concurrent decode, and NIXL restart restoration passed |
 
-Detailed model results and interpretation belong in the
-[validation report](https://github.com/jpezzulli/pennyroyal-validation/blob/main/results/qwen38-flash-next-frspec-20260905.md).
-The raw local evidence and first attempts remain preserved separately.
-No new 27B speed gain, shared-kernel promotion, or transactional-cache claim.
+Tool scoring was 27/30 literal, 29/30 exact calls/arguments, and 30/30
+parseable responses. Two response-quality issues are documented separately.
+The [detailed validation report](https://github.com/jpezzulli/pennyroyal-validation/blob/main/results/qwen38-flash-next-frspec-20260905.md)
+contains the reasoning breakdown, tool review, and evaluator limitations.
+
+### NIXL restoration
+
+Restart testing restored **489,856 tokens** and recovered all three needles.
+A group of four requests, comprising two copies each of the 64K and 490K
+prompts, completed correctly in **9.396 seconds**. Counters showed 553,664
+NIXL-hit tokens, 553,664 device-hit tokens, and four restored Mamba states.
+Duplicate requests reused restored prefixes; the result does not represent
+four independent full transfers from storage.
+
+Both the Flash-Next and 27B/DFlash2 profiles retained their existing context,
+graph settings, and KV capacities. No 27B throughput improvement is claimed.
 
 ## Earlier Flash-Next campaign
 

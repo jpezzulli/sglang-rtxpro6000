@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Pennyroyal 2.3: existing native-MTP FR-Spec, qualified with the full Penny context/cache envelope.
-# Adoption credit: https://github.com/gabrielolympie/sglang-flashnext-sm120
+# Pennyroyal v2.3: Flash-Next FR-Spec with 524K context and HiCache/NIXL.
+# Source credit: https://github.com/gabrielolympie/sglang-flashnext-sm120
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,7 +18,7 @@ NAMESPACE_HELPER="$REPO_ROOT/scripts/pennyroyal/derive_namespace.py"
 TOKEN_MAP="$SCRIPT_DIR/frspec/flash-next-64k.pt"
 read -r TOKEN_MAP_SHA _ < <(sha256sum "$TOKEN_MAP")
 [[ "$TOKEN_MAP_SHA" == becfa41d394b86c26c632bea8f3c6ea64bbb76d7b238d8673c06afae21269f25 ]] || {
-  echo "FR-Spec map differs from the qualified 2.3 artifact" >&2; exit 1;
+  echo "FR-Spec map does not match the v2.3 checksum" >&2; exit 1;
 }
 read -r TOKENIZER_SHA _ < <(sha256sum "$TARGET_MODEL/tokenizer.json")
 [[ "$TOKENIZER_SHA" == 0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3 ]] || {

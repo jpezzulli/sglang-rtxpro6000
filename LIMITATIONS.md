@@ -13,30 +13,28 @@
   approximately 490K. This is not proof for every possible 524K prompt,
   modality, sampling configuration, or concurrent schedule.
 
-## Version 2.3 qualification boundary
+## v2.3 validation scope
 
-- FR-Spec was fully exercised on Flash-Next ModelOpt NVFP4 with executable
-  `836206a0ad`, keeping the checkpoint fixed across the baseline/FR arms. The
-  target vocabulary, acceptance policy and target weights were unchanged;
-  bit-for-bit sampled-output parity is not claimed.
-- Reported improvements compare two baseline boots and the frozen candidate
-  in one session campaign, not a randomized paired benchmark. Baseline C1
-  varied materially; both baselines and the initial FR trial are disclosed.
-- The extra BF16 low-M kernel is excluded after a flat incremental A/B. An
-  earlier combined-arm hang was not reproduced or causally explained; this
-  release does not claim to fix it.
-- FR tools: 27/30 literal, 29/30 exact calls/arguments, 30/30 parseable; actual
-  workflows were 29 clean plus one redundant read-only call. Two answer-
-  discipline issues remain disclosed, separate from tool-execution failures.
-- The natural-decode collector read the wrong token-ID response field;
-  all 3,072 IDs were present in the raw response. The original failed automatic
-  gate is retained. Saved mutable message-list snapshots also have a collector
-  limitation; no evaluation source or first attempt was rewritten for release.
-- 27B smoke, prefill, decode/concurrency and NIXL restart restore passed with
-  its unchanged recipe/build. A new full 27B reasoning/tool campaign was not
-  needed to qualify a Flash-Next-only recipe/map and is not claimed.
-- Checkpoint weights, private logs and raw conversations remain outside this
-  runtime repository; compact evidence and detailed validation are linked.
+- Performance tests used one RTX PRO 6000 at TP1 and the same Flash-Next
+  checkpoint across baseline and FR-Spec runs. The comparison includes two
+  baseline boots and repeated FR-Spec measurements; it is not a randomized
+  benchmark. Workload and run-to-run variation affect the speedup.
+- FR-Spec leaves target weights, vocabulary, and acceptance policy unchanged.
+  Bit-for-bit sampled-output parity was not tested.
+- Tool results were 27/30 literal checks, 29/30 exact calls/arguments, and
+  30/30 parseable responses. The workflows completed with one redundant
+  read-only call. Two response-quality issues are documented separately in
+  the [validation report](https://github.com/jpezzulli/pennyroyal-validation/blob/main/results/qwen38-flash-next-frspec-20260905.md).
+- The natural-decode test returned all 3,072 token IDs, but its automatic check
+  failed because the collector expected a different field name. The collector
+  also saves mutable message-list references, which limits analysis of saved
+  request snapshots. These are evaluator limitations, not additional passing
+  automatic tests.
+- Both profiles passed startup, prefill, single/concurrent decode, and NIXL
+  restart restoration. Full 27B reasoning/tool tests were not repeated;
+  its runtime and launcher are unchanged.
+- Missing-sidecar and corrupt-manifest fault injection were not repeated for
+  v2.3. NIXL cache storage remains disposable, not transactional.
 
 ## Early Flash-Next integration
 

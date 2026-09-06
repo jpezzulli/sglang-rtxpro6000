@@ -1,22 +1,20 @@
 # Memory Recovery and Automatic Capacity Calculation
 
-## Version 2.3 FR-Spec allocation and identity
+## v2.3 FR-Spec allocation and cache identity
 
-The 65,536-row BF16 draft head adds 320 MiB relative to the shared full target
-head; startup can also have a larger clone-then-index transient. This is not a
-memory-free optimization. The measured Flash-Next FR-Spec configuration retained
-824,384 target/native-MTP KV tokens, 524,288 context, C4, 24 Mamba slots,
-graphs and 32 GiB HiCache without lowering capacity settings.
+The 65,536-row BF16 draft head adds 320 MiB; startup also has a larger
+temporary allocation while selecting its rows. The measured configuration
+retains 824,384 target/native-MTP KV tokens, 524,288-token context, four
+concurrent requests, 24 Mamba slots, CUDA graphs, and 32 GiB HiCache.
 
-The token-map content hash belongs to the persistence identity. The new public
-recipe incorporates it before selecting a NIXL root; removing/changing the map
-must not silently reuse an incompatible root. Fresh FR writes, identical
-restart reuse, released-to-FR-to-released/FR revisits, concurrent restored
-requests and two dependent 490K continuation turns were exercised. Complete
-hybrid restore boundaries are unchanged; no transaction guarantee is added.
+The token-map content hash is part of the NIXL namespace. Changing or removing
+the map selects a separate cache representation. Tests covered new cache
+writes, restart reuse, switching between FR-Spec and non-FR configurations,
+concurrent restoration, and two dependent turns on a restored 490K conversation.
 
-The FR recipe supplies dedicated-filesystem 85%/80% cleaner thresholds.
-Existing non-FR/27B sample configs are retained, not globally rewritten.
+The FR-Spec recipe uses 85%/80% filesystem-usage thresholds for the NIXL
+cleaner. Review these thresholds for your storage. The existing non-FR and
+27B sample configurations are unchanged.
 
 ## Flash-Next GPU allocation
 
