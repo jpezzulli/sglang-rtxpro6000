@@ -9,7 +9,7 @@ not two builds: both model configurations run from the same patched source.
 
 ## Verified models
 
-These are the verified model configurations documented for Pennyroyal on a
+These model configurations have been verified with **HiCache and NIXL** on a
 single RTX PRO 6000. The links point directly to the model downloads:
 
 | Profile | Target model | Speculative decoding |
@@ -17,11 +17,29 @@ single RTX PRO 6000. The links point directly to the model downloads:
 | **Flash-Next NVFP4** | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) | Native NEXTN MTP included in the target checkpoint; v2.3 adds FR-Spec. No separate draft model download. |
 | **27B FP8** | [orcarouter/Qwen3.8-27B-Uncensored-FP8](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8) | Separate [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2) draft checkpoint. |
 
-**Other SGLang-compatible models and derivatives may also work.** This is a
-verified list, not an exhaustive support list; unverified does not mean
-unsupported. Use settings appropriate to the checkpoint's weight format and
-compatible speculative model or token map—different quantizations are not
-necessarily interchangeable with the same launcher settings.
+### Expected compatibility with HiCache/NIXL
+
+The standard [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8)
+target is **expected to work with the existing 27B DFlash2 + HiCache/NIXL
+recipe**, but has not been actively verified on v2.3. Its architecture,
+quantization configuration, tokenizer, and chat template match the verified
+27B FP8 configuration.
+
+### Broader model support without HiCache/NIXL
+
+**Without HiCache and NIXL, many more SGLang-supported models and speculative
+configurations can run and may benefit from applicable performance
+optimizations.** Potential speed improvements come from those optimizations,
+not automatically from disabling HiCache/NIXL.
+
+HiCache/NIXL requires model- and speculative-method-specific cache layouts
+and complete state-restoration support. Different MTP or draft designs can
+require additional integration to save and restore target KV, draft KV, and
+recurrent or other model-specific state together.
+
+The verified configurations above are therefore not an exhaustive model
+support list. Other models still need compatible target/draft configurations,
+supported kernels, sufficient memory, and appropriate launch settings.
 
 See [RUN.md](RUN.md) for the launchers and the
 [configuration matrix](#qualified-configuration-matrix) for dtypes, context,
