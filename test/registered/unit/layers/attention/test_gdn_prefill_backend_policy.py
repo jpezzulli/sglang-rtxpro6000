@@ -15,6 +15,8 @@ from sglang.srt.layers.attention.linear.gdn_backend import (
     flashinfer_gdn_prefill_default,
 )
 from sglang.srt.layers.attention.linear.kernels.gdn_flashinfer import (
+    FlashInferGDNKernel,
+    fi_recovery_kernel,
     maybe_build_flashinfer_checkpoint_plan,
 )
 from sglang.srt.layers.attention.linear.kernels.gdn_triton import TritonGDNKernel
@@ -288,6 +290,81 @@ class TestFlashInferGDNPrefillBackendPolicy(CustomTestCase):
             ):
                 with self.assertRaisesRegex(ValueError, "supports KDA only"):
                     GDNKernelDispatcher(decode_backend, prefill_backend)
+
+    def test_beta_rounding_matches_selected_decode_verify_pair(self):
+        def init_flashinfer(kernel):
+            # Exercise the real dispatcher and recovery selector without CUDA
+            # initialization; these fields describe SM120's none-mode support.
+            kernel.supports_target_verify = False
+            kernel.supports_none_mode_target_verify = True
+            kernel.use_state_pool = True
+
+        triton = LinearAttnKernelBackend.TRITON
+        flashinfer = LinearAttnKernelBackend.FLASHINFER
+        cases = (
+            (triton, triton, None, True),
+            (triton, flashinfer, triton, True),
+            (flashinfer, triton, triton, False),
+            (flashinfer, flashinfer, triton, False),
+            (flashinfer, flashinfer, None, False),
+            (triton, flashinfer, None, False),
+        )
+        for decode, prefill, verify, expected in cases:
+            with self.subTest(decode=decode, prefill=prefill, verify=verify):
+                with (
+                    patch.object(gdn_backend, "is_cuda", return_value=True),
+                    patch.object(gdn_backend, "is_xpu", return_value=False),
+                    patch.object(TritonGDNKernel, "supports_packed_decode", True),
+                    patch.object(FlashInferGDNKernel, "__init__", init_flashinfer),
+                ):
+                    dispatcher = GDNKernelDispatcher(
+                        decode, prefill, verify, gdn_mtp_cache_mode="none"
+                    )
+                self.assertIs(dispatcher.verify_beta_in_activation_dtype, expected)
+                recovery = fi_recovery_kernel(
+                    SimpleNamespace(kernel_dispatcher=dispatcher)
+                )
+                self.assertIs(
+                    recovery, dispatcher.decode_kernel if decode == flashinfer else None
+                )
+                with patch.object(dispatcher.verify_kernel, "target_verify") as target:
+                    dispatcher.target_verify(
+                        *([sentinel.tensor] * 7),
+                        ssm_states=sentinel.tensor,
+                        cache_indices=sentinel.tensor,
+                        query_start_loc=sentinel.tensor,
+                    )
+                self.assertIs(
+                    target.call_args.kwargs["beta_in_activation_dtype"], expected
+                )
+
+    def test_triton_verify_forwards_only_enabled_beta_contract(self):
+        kernel = TritonGDNKernel()
+        for enabled in (False, True):
+            with (
+                self.subTest(enabled=enabled),
+                patch(
+                    "sglang.srt.layers.attention.linear.kernels.gdn_triton."
+                    "fused_sigmoid_gating_delta_rule_update"
+                ) as fused,
+            ):
+                kernel.target_verify(
+                    *([sentinel.tensor] * 7),
+                    ssm_states=sentinel.tensor,
+                    cache_indices=sentinel.tensor,
+                    query_start_loc=sentinel.tensor,
+                    intermediate_states_buffer=None,
+                    intermediate_state_indices=None,
+                    cache_steps=4,
+                    retrieve_parent_token=None,
+                    beta_in_activation_dtype=enabled,
+                )
+                self.assertEqual(
+                    fused.call_args.kwargs.get("beta_in_activation_dtype", False),
+                    enabled,
+                )
+                if not enabled:
+                    self.assertNotIn("beta_in_activation_dtype", fused.call_args.kwargs)
 
 
 if __name__ == "__main__":

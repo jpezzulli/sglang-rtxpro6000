@@ -217,6 +217,12 @@ class TritonGDNKernel(LinearAttnKernelBase):
         retrieve_parent_token: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
+        # Alternate CPU/NPU/XPU implementations retain their existing API.
+        beta_kwargs = (
+            {"beta_in_activation_dtype": True}
+            if kwargs.get("beta_in_activation_dtype", False)
+            else {}
+        )
         return fused_sigmoid_gating_delta_rule_update(
             A_log=A_log,
             dt_bias=dt_bias,
@@ -238,4 +244,5 @@ class TritonGDNKernel(LinearAttnKernelBase):
             intermediate_state_indices=intermediate_state_indices,
             cache_steps=cache_steps,
             retrieve_parent_token=retrieve_parent_token,
+            **beta_kwargs,
         )

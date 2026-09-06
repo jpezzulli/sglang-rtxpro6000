@@ -239,6 +239,15 @@ class GDNKernelDispatcher:
         self.supports_packed_decode = getattr(
             self.decode_kernel, "supports_packed_decode", False
         )
+        # Packed Triton decode rounds beta to the activation dtype (#36014).
+        # Match only a paired Triton verifier/recovery: FlashInfer and mixed
+        # backend configurations still use an FP32-beta numerical contract.
+        self.verify_beta_in_activation_dtype = (
+            self.decode_kernel is triton_kernel
+            and self.verify_kernel is triton_kernel
+            and self.supports_packed_decode
+            and not is_xpu()
+        )
 
         verify_suffix = (
             " (none-mode WY output-only)"
@@ -378,6 +387,7 @@ class GDNKernelDispatcher:
             ssm_states=ssm_states,
             cache_indices=cache_indices,
             query_start_loc=query_start_loc,
+            beta_in_activation_dtype=self.verify_beta_in_activation_dtype,
             **kwargs,
         )
 
@@ -1023,6 +1033,7 @@ class GDNAttnBackend(MambaAttnBackendBase):
             replayssm_rawk=layer_cache.replayssm_rawk,
             replayssm_g=layer_cache.replayssm_g,
             replayssm_beta=layer_cache.replayssm_beta,
+            beta_in_activation_dtype=self.kernel_dispatcher.verify_beta_in_activation_dtype,
         )
 
     def _replayssm_target_verify(

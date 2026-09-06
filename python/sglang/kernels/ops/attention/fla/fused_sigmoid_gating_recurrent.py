@@ -52,6 +52,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     USE_LOWER_BOUND: tl.constexpr,
     # Optional flags for target_verify support (default False for decode)
     DISABLE_STATE_UPDATE: tl.constexpr = False,
+    BETA_IN_ACTIVATION_DTYPE: tl.constexpr = False,
     CACHE_INTERMEDIATE_STATES: tl.constexpr = False,
     HAS_EAGLE_TREE_CUSTOM_ATTN_MASK: tl.constexpr = False,
     # ReplaySSM fused ring-write. Pointers stay None and CACHE_RING False for
@@ -197,7 +198,14 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
             b_g = -tl.exp(b_A_log) * softplus_x
 
         # Compute beta = sigmoid(b)
-        b_beta = 1.0 / (1.0 + tl.exp(-b_b))
+        if IS_KDA or not DISABLE_STATE_UPDATE or not BETA_IN_ACTIVATION_DTYPE:
+            b_beta = 1.0 / (1.0 + tl.exp(-b_b))
+        else:
+            # GDN packed decode materializes beta in the activation dtype.
+            # Verify must match that rounding before evolving persistent state
+            # (upstream #36014). The dispatcher opts in only for paired Triton
+            # packed decode/verify; mixed backends retain their FP32 contract.
+            b_beta = tl.sigmoid(b_b).to(b.dtype.element_ty).to(tl.float32)
 
         # fused ring-write: stash this step's raw inputs + in-kernel gate/beta
         # into the per-slot ring for the commit fold to replay. Must sit here --
@@ -360,6 +368,7 @@ def fused_sigmoid_gating_delta_rule_update(
     replayssm_rawk: Optional[torch.Tensor] = None,
     replayssm_g: Optional[torch.Tensor] = None,
     replayssm_beta: Optional[torch.Tensor] = None,
+    beta_in_activation_dtype: bool = False,
 ):
     """
     Fused triton implementation of sigmoid gating delta rule update.
@@ -487,6 +496,7 @@ def fused_sigmoid_gating_delta_rule_update(
         IS_KDA=is_kda,
         USE_LOWER_BOUND=lower_bound is not None,
         DISABLE_STATE_UPDATE=disable_state_update,
+        BETA_IN_ACTIVATION_DTYPE=beta_in_activation_dtype,
         CACHE_INTERMEDIATE_STATES=intermediate_states_buffer is not None,
         HAS_EAGLE_TREE_CUSTOM_ATTN_MASK=retrieve_parent_token is not None,
         replayssm_rawv=replayssm_rawv,
@@ -533,6 +543,7 @@ def fused_sigmoid_gating_delta_rule_recover_final_state_kernel(
     BV: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_KDA: tl.constexpr,
+    BETA_IN_ACTIVATION_DTYPE: tl.constexpr,
 ):
     """Recover h_K directly without writing intermediate states or outputs."""
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -605,7 +616,12 @@ def fused_sigmoid_gating_delta_rule_recover_final_state_kernel(
             x,
         )
         b_g = b_A_coeff * softplus_x
-        b_beta = 1.0 / (1.0 + tl.exp(-b_b))
+        if BETA_IN_ACTIVATION_DTYPE and not IS_KDA:
+            # Commit the same GDN recurrence that target verify evaluated,
+            # including when recovering into a separate radix checkpoint slot.
+            b_beta = tl.sigmoid(b_b).to(b.dtype.element_ty).to(tl.float32)
+        else:
+            b_beta = 1.0 / (1.0 + tl.exp(-b_b))
 
         if USE_QK_L2NORM_IN_KERNEL:
             b_k = b_k / (tl.sqrt(tl.sum(b_k * b_k) + 1e-6))
@@ -644,6 +660,7 @@ def fused_sigmoid_gating_delta_rule_recover_final_state(
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
     output_state_indices: Optional[torch.Tensor] = None,
+    beta_in_activation_dtype: bool = False,
 ):
     """Recovery-only GDN recurrence for gdn_mtp_cache_mode=none.
 
@@ -703,6 +720,7 @@ def fused_sigmoid_gating_delta_rule_recover_final_state(
         BV=BV,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         IS_KDA=is_kda,
+        BETA_IN_ACTIVATION_DTYPE=beta_in_activation_dtype,
         num_warps=num_warps,
         num_stages=num_stages,
     )

@@ -1851,6 +1851,7 @@ class HybridLinearAttnBackend(AttentionBackend):
                     use_qk_l2norm_in_kernel=True,
                     is_kda=False,
                     output_state_indices=out_indices,
+                    beta_in_activation_dtype=self.linear_attn_backend.kernel_dispatcher.verify_beta_in_activation_dtype,
                 )
 
         def _run_boundary():
