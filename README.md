@@ -7,8 +7,25 @@ This repository contains the complete SGLang-derived source used on one
 NVIDIA RTX PRO 6000 Blackwell Workstation Edition (96 GB, SM120, TP=1). It is
 not two builds: both model configurations run from the same patched source.
 
-- **Qwen3.8-27B** pairs an FP8 target with `incoai/Qwen3.8-27B-DFlash2`.
-- **Qwen3.8 Flash-Next** pairs an NVFP4 target with its native NEXTN MTP layer.
+## Verified models
+
+These are the verified model configurations documented for Pennyroyal on a
+single RTX PRO 6000. The links point directly to the model downloads:
+
+| Profile | Target model | Speculative decoding |
+|---|---|---|
+| **Flash-Next NVFP4** | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) | Native NEXTN MTP included in the target checkpoint; v2.3 adds FR-Spec. No separate draft model download. |
+| **27B FP8** | [orcarouter/Qwen3.8-27B-Uncensored-FP8](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8) | Separate [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2) draft checkpoint. |
+
+**Other SGLang-compatible models and derivatives may also work.** This is a
+verified list, not an exhaustive support list; unverified does not mean
+unsupported. Use settings appropriate to the checkpoint's weight format and
+compatible speculative model or token map—different quantizations are not
+necessarily interchangeable with the same launcher settings.
+
+See [RUN.md](RUN.md) for the launchers and the
+[configuration matrix](#qualified-configuration-matrix) for dtypes, context,
+cache capacity, and backends.
 
 Flash-Next is day-one engineering. It has extensive qualification on this exact
 machine—including 524K context, multimodal input, reasoning, tools, agentic
@@ -132,7 +149,7 @@ executes or accumulates entirely in BF16.
 
 | Property | Qwen3.8-27B + DFlash2 | Qwen3.8 Flash-Next |
 |---|---|---|
-| Target checkpoint | `orcarouter/Qwen3.8-27B-Uncensored-FP8` family | `RadixArk/Qwen3.8-Flash-Next-NVFP4` |
+| Target checkpoint | [orcarouter/Qwen3.8-27B-Uncensored-FP8](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8) | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) |
 | Target weight format | block FP8 E4M3, 128x128 blocks | ModelOpt NVFP4, group size 16 on selected Linear modules |
 | Quantized-path activations | dynamic FP8 E4M3 | NVFP4 input activations on selected Linear modules |
 | Runtime dtype for unquantized tensors | BF16; includes excluded layers and BF16 `lm_head` | BF16; includes ignored layers, native MTP, PLE, QSA/GDN state-facing tensors, and vision |
