@@ -15,9 +15,49 @@ machine—including 524K context, multimodal input, reasoning, tools, agentic
 workloads, CUDA-graph recovery, and persistent prefix restoration—but it may
 still contain rough edges or hardware/model-specific assumptions.
 
-## v2.1.2 — maintenance release
+## v2.3 — FR-Spec for Flash-Next
 
-**This is a maintenance-only release with two correctness fixes adapted from
+**Pennyroyal 2.3 promotes the qualified FR-Spec release candidate: faster
+Flash-Next decode with the same 524,288-token context and 824,384-token KV
+pool.** The 27B FP8/DFlash2 profile remains supported and unchanged.
+
+**Credit to Gabriel's
+[`gabrielolympie/sglang-flashnext-sm120`](https://github.com/gabrielolympie/sglang-flashnext-sm120)**
+for the Flash-Next SM120 optimization work that prompted this adoption,
+specifically its reduced draft-vocabulary approach. Penny uses SGLang's
+existing FR-Spec machinery with a separately generated, qualified 65,536-ID
+map. The target still scores its full vocabulary; target verification and
+acceptance policy are unchanged. This release does not import Gabriel's full
+patch stack, FP8 dense-weight copies, or relaxed-acceptance settings.
+
+Measured on this workstation, with the same Flash-Next checkpoint in each
+arm, TP1, ordinary warmups, and 1,024 output tokens per stream:
+
+| Configuration | Samples per metric | C1 post-first-token median | C4 aggregate request-makespan median |
+|---|---:|---:|---:|
+| v2.1.2 baseline, initial boot | 3 | 156.79 tok/s | 417.92 tok/s |
+| v2.1.2 baseline, return after reboot | 3 | 147.15 tok/s | 427.91 tok/s |
+| **v2.3 frozen FR-Spec candidate** | **6** | **171.93 tok/s** | **447.04 tok/s** |
+| **Increase over the two baseline medians** | — | **+9.7–16.8%** | **+4.5–7.0%** |
+
+These are observed session comparisons, not randomized confidence bounds or
+guarantees across workloads. The initial FR trial separately measured +5.4%
+C1 / +7.2% C4; cold 64K/490K prefill was essentially unchanged. C4 includes
+first-token delay and the slowest stream, not pure decode or summed stream
+rates. Earlier campaigns below remain separate measurement records.
+
+The executable and package remain the qualified v2.1.2 build. The additional
+BF16 low-M kernel experiment is **not included**: its later FR-relative A/B
+was effectively flat. Full reasoning, tools, vision, agentic, long-context
+continuation and NIXL checks are documented with their actual caveats in
+[RESULTS.md](RESULTS.md#pennyroyal-23--flash-next-fr-spec) and the
+[detailed validation report](https://github.com/jpezzulli/pennyroyal-validation/blob/main/results/qwen38-flash-next-frspec-20260905.md).
+Use the [FR-Spec recipe](RUN.md#launch-flash-next-with-fr-spec-23) to reproduce
+the published configuration. The original non-FR recipe remains available.
+
+## Previous v2.1.2 — maintenance release
+
+**Version 2.1.2 was a maintenance-only release with two correctness fixes adapted from
 upstream PRs. It adds no new features or performance claims.** Both supported
 profiles—27B FP8/DFlash2 and Flash-Next NVFP4/native MTP—benefit:
 
@@ -71,7 +111,7 @@ The important work is architectural, not merely a collection of launch flags:
 |---|---|
 | Canonical branch | `pennyroyal-main-sm120-final` |
 | Current executable source | `836206a0adc8ef7aaa49f652230d5577a25014a5` |
-| Current release tag | `pennyroyal-v2.1.2` |
+| Current release tag | `pennyroyal-v2.3.0` |
 | Initial unified dated tag | `sglang-rtxpro6000-20260827` |
 | Earlier 27B dated tag | `qwen38-dflash2-pro6000-20260824` |
 | Upstream integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
@@ -81,7 +121,8 @@ The important work is architectural, not merely a collection of launch flags:
 | FlashInfer / NIXL | `0.6.17` / `1.4.0` |
 | GPU / driver | RTX PRO 6000 96 GB, SM120 / `610.57.04` |
 
-The current documentation commit sits above the executable source. It does not
+The current release adds recipes, map artifacts and documentation above the
+unchanged executable source. It does not
 change `python/`, `rust/`, or the kernel trees. Exact source lineage and current
 upstream status are in [CHANGES.md](CHANGES.md) and
 [PROVENANCE.md](PROVENANCE.md).
@@ -106,6 +147,7 @@ executes or accumulates entirely in BF16.
 | Target attention | FlashInfer prefill; TRTLLM-MHA/XQA decode and fixed-width verify | QSA Triton sparse prefill; FlashInfer QSA wrapper resolving to XQA for sparse decode; general attention FlashInfer |
 | Linear/GDN attention | Triton decode, prefill, and state-writing verify | FlashInfer decode/prefill; WY output-only verify/recovery in `none` mode |
 | Speculative backend | DFlash2, 8 draft tokens, 2,048-token window | native NEXTN, 3 steps, top-k 1, 4 draft tokens |
+| Draft vocabulary | unchanged DFlash2 | v2.3: 65,536-ID FR-Spec map; full target vocabulary unchanged |
 | Served context | 524,288, factor-2 YaRN target and draft | 524,288, factor-2 YaRN |
 | KV page size | 64 | 64 |
 | Current GPU KV capacity | 1,118,784 target and draft tokens | 824,384 target and native-MTP tokens |
@@ -244,7 +286,7 @@ real and documented.
 These rows are observations from different model configurations and are not a
 single A/B benchmark.
 
-### Flash-Next final campaign — source `64ecd64924`
+### Earlier Flash-Next campaign — source `64ecd64924`
 
 The published campaign below used `lactd` with the workstation card's fan
 curve active and this relevant power/clock profile:
@@ -352,7 +394,8 @@ documents the representation namespace and actual failure boundaries.
 
 ## Build and launch
 
-There is one native build procedure and exactly two canonical launch recipes:
+There is one native build procedure and two supported model profiles. Flash-Next
+has the new FR-Spec recipe plus its retained non-FR recipe:
 
 ```bash
 uv python install 3.12.13
@@ -375,6 +418,8 @@ then choose one recipe:
 
 ```bash
 configs/pennyroyal/serve-qwen38-27b-dflash2.sh
+configs/pennyroyal/serve-flash-next-frspec.sh
+# Retained Flash-Next non-FR configuration:
 configs/pennyroyal/serve-flash-next.sh
 ```
 
@@ -403,6 +448,8 @@ stack contains 26 commits above its integration base. Major groups are:
   preserve streamed tool-call framing around separator whitespace (#37408).
   The graph-lifetime trial is reverted and is not part of this release's
   runtime behavior.
+- v2.3: enable the existing native-MTP FR-Spec path through a qualified token
+  map and separate launch recipe; no new shared runtime or kernel patch.
 - Open project PRs: #36520, #36524, and #35584.
 - Closed project submissions retained in runtime history: #35583; transient
   ragged/DSpARK PR #35586 is documented but not in the active source.
@@ -422,7 +469,7 @@ coverage.
 - Benchmark observations are not guarantees for another system.
 - Flash-Next and 27B results remain separate; neither model's features or
   numbers are silently attributed to the other.
-- The full published Flash-Next reasoning/tool/vision campaign ran at
+- The earlier Radix Flash-Next reasoning/tool/vision campaign ran at
   `64ecd64924`. The v2.1.1 source at `fb1216c6c4` received focused CPU/GPU
   DFlash, HiCache, hybrid/NIXL, and unified-load-back tests plus ordinary
   64K/490K/1K/C4 and post-restart NIXL restoration on both supported models.
@@ -432,6 +479,11 @@ coverage.
   regressions. These used the Orca 27B FP8 checkpoint and a local Orca
   Flash-Next ModelOpt NVFP4 conversion; they are not a new full qualification
   of the Radix checkpoint. Existing performance tables are unchanged.
+- v2.3 ran the full current Flash-Next suite with FR-Spec, plus both-profile
+  smoke/prefill/decode/NIXL checks. Reasoning scored
+  98.52; tools had 29 clean workflows and one redundant read-only call, with
+  answer-quality and collector caveats retained separately. No 27B speed gain
+  is claimed. Exact test provenance is retained in the supporting report.
 - NIXL cleaner thresholds are whole-filesystem occupancy percentages, not an
   absolute directory byte quota.
 

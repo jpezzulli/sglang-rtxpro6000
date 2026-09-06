@@ -1,6 +1,6 @@
 # Run
 
-Both launch recipes use the same built source and expose the model as
+Both model profiles use the same built source and expose the model as
 `pennyroyal` on an OpenAI-compatible endpoint. They are sanitized reproductions
 of the qualified launch shape, not drop-in system service files.
 
@@ -44,6 +44,39 @@ Linear modules, BF16 for excluded/unquantized tensors and recurrent state, FP8
 E4M3 target/native-MTP KV, native NEXTN, 524K YaRN, 24 Mamba slots,
 RecoverSSM `none`, explicit FlashInfer GDN decode/prefill, 32 GB HiCache, and
 NIXL POSIX persistence. This is not a claim that every kernel computes in BF16.
+
+## Launch Flash-Next with FR-Spec (2.3)
+
+Use the same setup and full Flash-Next shape above, then select:
+
+```bash
+configs/pennyroyal/serve-flash-next-frspec.sh
+```
+
+This recipe adds only `--speculative-token-map` to the serving arguments,
+using the bundled 65,536-ID map. It checks the map and tokenizer hashes before
+startup and includes the map hash in the NIXL representation identity. It does
+not enable a new BF16 kernel, FP8 weight copies or relaxed acceptance.
+`nixl-posix-frspec.toml` records the qualified dedicated-filesystem 85%/80%
+cleaner watermarks; review them for your filesystem. The original non-FR and
+27B recipes/config remain unchanged.
+
+The public target model reference remains
+`RadixArk/Qwen3.8-Flash-Next-NVFP4`. Model weights are not included. Tokenizer
+hash compatibility protects token-ID meaning; it does not itself establish
+quality or throughput for every checkpoint or host. Configuration and map
+provenance are recorded in [PROVENANCE.md](PROVENANCE.md).
+
+Confirm `speculative_token_map` in resolved server arguments, the reduced
+65,536-row draft head, and the original full target vocabulary. Retain all
+normal graph, state-pool and NIXL startup checks below. The extra BF16 draft
+head uses 320 MiB; it fit the measured 824,384-token pool without changing the
+context, static fraction, request limit or Mamba slots.
+
+The deterministic map builder and focused tests are under
+`scripts/pennyroyal/frspec/`. Rebuilding with a different corpus or tokenizer
+creates a different experiment; it is not necessary to regenerate the bundled
+qualified artifact. Changing a map must change the persistent namespace.
 
 ## Launch 27B with DFlash2
 

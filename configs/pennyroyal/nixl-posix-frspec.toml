@@ -1,0 +1,11 @@
+# FR-Spec qualification: dedicated 1 TB NIXL filesystem, POSIX/io_uring/O_DIRECT.
+# Whole-filesystem occupancy thresholds, not a cache-directory byte quota.
+# Review for your filesystem; inactive namespaces need separate lifecycle handling.
+use_direct_io = true
+l3_cleaner_enabled = true
+l3_cleaner_high_watermark = 85.0
+l3_cleaner_low_watermark = 80.0
+
+[plugin.posix]
+active = true
+use_uring = "true"

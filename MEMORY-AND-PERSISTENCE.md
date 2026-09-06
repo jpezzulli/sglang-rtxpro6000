@@ -1,5 +1,23 @@
 # Memory Recovery and Automatic Capacity Calculation
 
+## Version 2.3 FR-Spec allocation and identity
+
+The 65,536-row BF16 draft head adds 320 MiB relative to the shared full target
+head; startup can also have a larger clone-then-index transient. This is not a
+memory-free optimization. The measured Flash-Next FR-Spec configuration retained
+824,384 target/native-MTP KV tokens, 524,288 context, C4, 24 Mamba slots,
+graphs and 32 GiB HiCache without lowering capacity settings.
+
+The token-map content hash belongs to the persistence identity. The new public
+recipe incorporates it before selecting a NIXL root; removing/changing the map
+must not silently reuse an incompatible root. Fresh FR writes, identical
+restart reuse, released-to-FR-to-released/FR revisits, concurrent restored
+requests and two dependent 490K continuation turns were exercised. Complete
+hybrid restore boundaries are unchanged; no transaction guarantee is added.
+
+The FR recipe supplies dedicated-filesystem 85%/80% cleaner thresholds.
+Existing non-FR/27B sample configs are retained, not globally rewritten.
+
 ## Flash-Next GPU allocation
 
 | Configuration | Intermediate SSM | Mamba slots | GPU KV capacity |

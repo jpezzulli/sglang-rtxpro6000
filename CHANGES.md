@@ -5,13 +5,50 @@ The current runtime is the ordered range
 including the graph-lifetime trial and its full revert. The integration base
 is unchanged. The v2.1.1 upstream check fetched `main` at
 `cdbfe90b4a31079859817c148ef4498240ec2580` on 2026-08-29; older PR-status
-tables below retain their stated observation dates. Version 2.1.2 adds only
-the two bounded maintenance corrections described next, without a rebase.
+tables below retain their stated observation dates. Version 2.1.2 added the
+two bounded maintenance corrections below, without a rebase. Version 2.3
+retains that executable and publishes the qualified FR-Spec configuration.
 
 “Local” does not mean a permanent fork requirement. It means the exact active
 commit has not merged upstream. Where a PR has a later refined head, that is
 shown separately rather than pretending the local commit and PR head are
 identical.
+
+## Version 2.3: Flash-Next FR-Spec
+
+**Affected model: Flash-Next NVFP4 with native NEXTN MTP.** Each draft step
+previously scored the full vocabulary. The new recipe uses the existing
+FR-Spec path to score a qualified 65,536-token subset, reducing draft-head
+work while leaving the target head, full target vocabulary, target verification,
+and acceptance policy unchanged. The 27B FP8/DFlash2 recipe is untouched.
+
+Direct adoption credit:
+[`gabrielolympie/sglang-flashnext-sm120`](https://github.com/gabrielolympie/sglang-flashnext-sm120),
+reviewed at `67d2f9234fa45ae1339f0d53cd37cb695e9c6493`. Penny generated its
+own map from non-evaluation runtime source with all special tokens retained;
+it did not copy the external map or claim authorship of FR-Spec.
+
+The release adds the map, provenance, deterministic builder, and a sanitized
+FR-Spec launcher. The same executable `836206a0ad` and wheel are retained;
+no shared runtime code, kernel, target checkpoint, or dependency is changed.
+Full 524,288 context, 824,384 KV tokens, C4, 24 Mamba slots, graphs, and
+32 GiB HiCache/NIXL remain qualified. The map hash is part of cache identity.
+The retained 27B profile keeps its 1,118,784-token pool.
+
+The frozen RC's full reasoning, tools, vision, sealed agentic, controlled
+prefill/decode, long continuation and NIXL restoration evidence is retained.
+Tools are not represented as an invented all-green literal score; collector
+and answer-quality caveats appear in the linked validation report. Both
+profiles completed smoke, prefill, decode/concurrency and restart restoration.
+The 27B full reasoning/tool campaign was not repeated because this release
+installs no shared candidate code. Performance definitions and both baseline
+boots are in [RESULTS.md](RESULTS.md#pennyroyal-23--flash-next-fr-spec).
+
+**Excluded:** the additional BF16 low-M kernel, FP8 dense-weight copies,
+relaxed speculative acceptance, reduced context/pools and the previously
+rejected graph-lifetime change. The BF16 add-on did not demonstrate a useful
+incremental gain in the later clean A/B. Its earlier hang remains unexplained,
+not proof of a BF16 defect or a claimed fixed driver bug.
 
 ## Version 2.1.2: maintenance only
 

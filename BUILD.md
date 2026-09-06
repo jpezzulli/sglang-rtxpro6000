@@ -28,7 +28,10 @@ The installed SGLang wheel from source commit `836206a0ad` has SHA-256
 The release tag includes documentation commits above the executable source.
 For an exact rebuild of the installed wheel and version string, check out
 `836206a0adc8ef7aaa49f652230d5577a25014a5`; use
-`pennyroyal-v2.1.2` when browsing the complete release documentation. Then
+`pennyroyal-v2.3.0` when browsing the complete release documentation. FR-Spec
+2.3 uses the same executable and wheel as v2.1.2; no rebuild is needed when
+that qualified package is already installed. Keep the release checkout (with
+its recipes/map) separate from an exact-source rebuild checkout. Then
 create an isolated Python 3.12 environment:
 
 ```bash

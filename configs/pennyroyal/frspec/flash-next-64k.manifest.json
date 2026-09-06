@@ -1,0 +1,1762 @@
+{
+  "model": "Qwen3.8 Flash-Next ModelOpt NVFP4",
+  "model_vocab_size": 248320,
+  "tokenizer_vocab_size": 248077,
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "size": 65536,
+  "base_count": 32768,
+  "special_ids": [
+    248044,
+    248045,
+    248046,
+    248047,
+    248048,
+    248049,
+    248050,
+    248051,
+    248052,
+    248053,
+    248054,
+    248055,
+    248056,
+    248057,
+    248070,
+    248071,
+    248072,
+    248073,
+    248074,
+    248075,
+    248076
+  ],
+  "all_special_ids_included": true,
+  "ids_sha256": "1e73eb425f27c13572327c29e4695ee763c26de73ebba955144eb041f7fb95b9",
+  "map_sha256": "becfa41d394b86c26c632bea8f3c6ea64bbb76d7b238d8673c06afae21269f25",
+  "corpus_bytes": 7537952,
+  "corpus_tokens": 1780923,
+  "corpus_coverage": 1,
+  "corpus": [
+    {
+      "path": "python/sglang/srt/function_call/apertus2509_detector.py",
+      "bytes_used": 9925,
+      "sha256_used": "10b776d3364f3bce87d8564903ae0b7f266e7cee2912f610f64299862f855b15"
+    },
+    {
+      "path": "python/sglang/srt/function_call/base_format_detector.py",
+      "bytes_used": 19451,
+      "sha256_used": "0e56a1402b1d27dd92c5299f4bdeed3bc4499660df3c910c473a9691ba23265a"
+    },
+    {
+      "path": "python/sglang/srt/function_call/cohere_command4_detector.py",
+      "bytes_used": 5823,
+      "sha256_used": "008deb2e5c078d5371a571479988c1b001f8b162287ce225b041484f0498b1a0"
+    },
+    {
+      "path": "python/sglang/srt/function_call/core_types.py",
+      "bytes_used": 786,
+      "sha256_used": "c0b52c5bc99403e8be212cf94140cbec48eaef65be2b51c88456bd5a6fbfa00f"
+    },
+    {
+      "path": "python/sglang/srt/function_call/deepseekv31_detector.py",
+      "bytes_used": 8996,
+      "sha256_used": "ec6374c040a86dd2021b7ea7b989300299dea623fdaa3c71d6d9aa3f18e845d7"
+    },
+    {
+      "path": "python/sglang/srt/function_call/deepseekv32_detector.py",
+      "bytes_used": 16214,
+      "sha256_used": "a7d6263b1e9d5ec3742ca399d1df2f7d4ff91a8d8c079d953035a976b6090a4f"
+    },
+    {
+      "path": "python/sglang/srt/function_call/deepseekv3_detector.py",
+      "bytes_used": 9368,
+      "sha256_used": "a555137527cd524f51a888ee49224d4761856f5b4a9d93d3ca77abfb755c06d5"
+    },
+    {
+      "path": "python/sglang/srt/function_call/deepseekv4_detector.py",
+      "bytes_used": 1991,
+      "sha256_used": "d826876e0b6229ff5d363da16b6c954c3211a080d72edb81cd56b0fd477487ba"
+    },
+    {
+      "path": "python/sglang/srt/function_call/dots_detector.py",
+      "bytes_used": 13513,
+      "sha256_used": "77e86e1e3c613929eb077c8f4ea940448428708c7e640e550e15cb803b76d351"
+    },
+    {
+      "path": "python/sglang/srt/function_call/function_call_parser.py",
+      "bytes_used": 13609,
+      "sha256_used": "a80f836d801c7c801fbe336054a4663437f8643c6ff9d661ae305ee0f9bdac59"
+    },
+    {
+      "path": "python/sglang/srt/function_call/gemma4_detector.py",
+      "bytes_used": 15969,
+      "sha256_used": "712146a24e1873fe5d2872253a1688399a8929f7d5c04094e2027428ff767d99"
+    },
+    {
+      "path": "python/sglang/srt/function_call/gigachat3_detector.py",
+      "bytes_used": 7124,
+      "sha256_used": "f544d3bf51e1afaf9c8fe62878c5ec9e929c1db2eb9b1e4040daeb0be81c413a"
+    },
+    {
+      "path": "python/sglang/srt/function_call/glm47_moe_detector.py",
+      "bytes_used": 32306,
+      "sha256_used": "93c882d0d3d5613c792a4a20da22a9e54d4f36ebb828846dce05a1acb81d83cb"
+    },
+    {
+      "path": "python/sglang/srt/function_call/glm4_moe_detector.py",
+      "bytes_used": 26967,
+      "sha256_used": "a8daa4f4ef6d45aaf612b0e0fd3f922e5b52a406ac85abcf7c2cc2e39857ed81"
+    },
+    {
+      "path": "python/sglang/srt/function_call/gpt_oss_detector.py",
+      "bytes_used": 9354,
+      "sha256_used": "5c81fe623acd20c19106ce946d8d902a285769babba43e8ddc4c181a5a9da3e7"
+    },
+    {
+      "path": "python/sglang/srt/function_call/hermes_detector.py",
+      "bytes_used": 4180,
+      "sha256_used": "5dc30e64c7ccd453f3b5fc50be0321c3bb404dac3e689ad4cc384ab2c45de27c"
+    },
+    {
+      "path": "python/sglang/srt/function_call/hunyuan_detector.py",
+      "bytes_used": 20131,
+      "sha256_used": "546cf13fa2951d89641b02394fb4da0913baae82d5f5e4db7e2f48f76126b329"
+    },
+    {
+      "path": "python/sglang/srt/function_call/inkling_detector.py",
+      "bytes_used": 14070,
+      "sha256_used": "52273f962e652026e86324d2e6320225e10cd24cf1b002674d1d7e1659680d99"
+    },
+    {
+      "path": "python/sglang/srt/function_call/internlm_detector.py",
+      "bytes_used": 9619,
+      "sha256_used": "a2339f334c5bcc7fe36d7cb7cb3b7621918eed857397df47e6f3ecee28b38133"
+    },
+    {
+      "path": "python/sglang/srt/function_call/json_array_parser.py",
+      "bytes_used": 1831,
+      "sha256_used": "7ebbff7e8ad4fd1ca0f227b9edc345715d637387301710fb8ab619286a31b934"
+    },
+    {
+      "path": "python/sglang/srt/function_call/kimik2_detector.py",
+      "bytes_used": 18890,
+      "sha256_used": "92d6dd3751ba1bdcc5ef64eca0db87c1e341d0f81bbd764664ac6ff38f08f839"
+    },
+    {
+      "path": "python/sglang/srt/function_call/kimik3_detector.py",
+      "bytes_used": 9227,
+      "sha256_used": "65509e54508b7bf152e69c7c8ac9025d4ed03f6378450120443f352e4cb1bf71"
+    },
+    {
+      "path": "python/sglang/srt/function_call/kimik3_format.py",
+      "bytes_used": 1787,
+      "sha256_used": "65b893bb3314c02ef2537cc4a8c85b3d798101a5cebebb548a2cac1caa5a3a63"
+    },
+    {
+      "path": "python/sglang/srt/function_call/kimik3_structural_tag.py",
+      "bytes_used": 20244,
+      "sha256_used": "bd00d77898be7f6231f165eaf716f0c0cb71cff66036495e261fffd39f462aa1"
+    },
+    {
+      "path": "python/sglang/srt/function_call/lfm2_detector.py",
+      "bytes_used": 33496,
+      "sha256_used": "5d1d78ca2ad85595b497d13a9773f18020552dd2c96c5b87d691832c10be5e41"
+    },
+    {
+      "path": "python/sglang/srt/function_call/llama32_detector.py",
+      "bytes_used": 5572,
+      "sha256_used": "e83ee75917cc1921c21ce899e0103af4b94bc492195f87843364580dac73eb5b"
+    },
+    {
+      "path": "python/sglang/srt/function_call/mimo_detector.py",
+      "bytes_used": 10340,
+      "sha256_used": "2b4ca63e1de0b232c69cf26609e87d0da9a8a3be9c4acd29f0db62e2dbb0db45"
+    },
+    {
+      "path": "python/sglang/srt/function_call/minicpm5_detector.py",
+      "bytes_used": 12860,
+      "sha256_used": "12fc0378e86b337706ee1e64e3b3c96b8550eaefda74a97e8dde54dee954c1e0"
+    },
+    {
+      "path": "python/sglang/srt/function_call/minimax_m2.py",
+      "bytes_used": 20150,
+      "sha256_used": "fe1dba10e3d9a76c3549a20c2b8ba1b609eefa4a817197abba8175b725a724fc"
+    },
+    {
+      "path": "python/sglang/srt/function_call/minimax_m3.py",
+      "bytes_used": 20286,
+      "sha256_used": "cbd83122df28c1ef6d6ab34007bd7d64eb56f902614fa3bd74e5c681f2fd0e65"
+    },
+    {
+      "path": "python/sglang/srt/function_call/mistral_detector.py",
+      "bytes_used": 12438,
+      "sha256_used": "ecb2637d1766f096c698b6b8eaadeb6e772aa3487d6566f61f665c145dd73336"
+    },
+    {
+      "path": "python/sglang/srt/function_call/muse_glimmer_detector.py",
+      "bytes_used": 9297,
+      "sha256_used": "c7becee4831996d4b3bab24659ed45c10980b1d341ac4f05ffd567bc76a5935f"
+    },
+    {
+      "path": "python/sglang/srt/function_call/muse_glimmer_format.py",
+      "bytes_used": 1738,
+      "sha256_used": "91126a99c959c98e287db819411b099a6db3fa0d9060bb736694e33d8b89e8e6"
+    },
+    {
+      "path": "python/sglang/srt/function_call/poolside_v1_detector.py",
+      "bytes_used": 19516,
+      "sha256_used": "3bc52645891d5c9bf97c3796f5dcabdf1bfcdcac0f4483aa5786da5bf950d295"
+    },
+    {
+      "path": "python/sglang/srt/function_call/pythonic_detector.py",
+      "bytes_used": 9835,
+      "sha256_used": "40116537af5d8f117f2d043db1e93c1a1e3a65fc6dbd122db82aca90b9f93fe1"
+    },
+    {
+      "path": "python/sglang/srt/function_call/qwen25_detector.py",
+      "bytes_used": 4775,
+      "sha256_used": "e4ebe052024b4236819932ee3d54941fe2db9bb9107711ec33514d1d68c3c9e4"
+    },
+    {
+      "path": "python/sglang/srt/function_call/qwen3_coder_detector.py",
+      "bytes_used": 21122,
+      "sha256_used": "2a960f741dae7f6323efa853331f42c2f57e6a0d765cdabd1ac29a1c304d3651"
+    },
+    {
+      "path": "python/sglang/srt/function_call/spark25_detector.py",
+      "bytes_used": 8904,
+      "sha256_used": "9b0d363b205d727f006964859e0160f4af3b9e0e891ab93f2622c36415d825b4"
+    },
+    {
+      "path": "python/sglang/srt/function_call/step3_detector.py",
+      "bytes_used": 16414,
+      "sha256_used": "7ece8be2b2f8dcf9285d405baffdf69ba3632cf799ef5a1a942a73b2ae1d1cb6"
+    },
+    {
+      "path": "python/sglang/srt/function_call/trinity_detector.py",
+      "bytes_used": 1573,
+      "sha256_used": "868f345fb3129456073497949c913457cdc2d54ec90885d71e302bc85114fca8"
+    },
+    {
+      "path": "python/sglang/srt/function_call/utils.py",
+      "bytes_used": 15341,
+      "sha256_used": "fc55c1b3d63a3631841aa1b6b5979cb0647e6ba27a4f5a1f1a1573f46eca8c25"
+    },
+    {
+      "path": "python/sglang/srt/managers/async_dynamic_batch_tokenizer.py",
+      "bytes_used": 7249,
+      "sha256_used": "a52ed01045e146dbddcd915f3ea1c0d15775207bebf26777df84bbaabb709ff6"
+    },
+    {
+      "path": "python/sglang/srt/managers/cache_controller.py",
+      "bytes_used": 51684,
+      "sha256_used": "f96933a2fdf07a928a76395ce416813b6626215ac346081f5174ad474d07db10"
+    },
+    {
+      "path": "python/sglang/srt/managers/communicator.py",
+      "bytes_used": 3807,
+      "sha256_used": "8228691d693cc2877b23fc777866a6779c1ed8511dff0c64ad002d2c602e0552"
+    },
+    {
+      "path": "python/sglang/srt/managers/configure_logging.py",
+      "bytes_used": 2456,
+      "sha256_used": "acfd1542b779fcfdc207ea5f94037f9275e5ecfcd7ca77e17b7a63d9d4dbbdfa"
+    },
+    {
+      "path": "python/sglang/srt/managers/data_parallel_controller.py",
+      "bytes_used": 35549,
+      "sha256_used": "6cdb450a940e922660b23aa36341bc278e5523e4132a52646fb5a5d8940a6f53"
+    },
+    {
+      "path": "python/sglang/srt/managers/detokenizer_manager.py",
+      "bytes_used": 22596,
+      "sha256_used": "d72a007a6ef7f1e9fe0b623e4c71aaa1879c0103d9c25bb79dccedbce3663db6"
+    },
+    {
+      "path": "python/sglang/srt/managers/disagg_service.py",
+      "bytes_used": 1945,
+      "sha256_used": "99bdd9fa3db947ed8bd939ae61e5d8f2a8538aa1d984878a2941340a28a2fcf1"
+    },
+    {
+      "path": "python/sglang/srt/managers/embed_types.py",
+      "bytes_used": 2317,
+      "sha256_used": "a82f4dec31163faf0982b1346290698b1a19aa648f7b6381d3b129d73046de75"
+    },
+    {
+      "path": "python/sglang/srt/managers/hisparse_coordinator.py",
+      "bytes_used": 43818,
+      "sha256_used": "f40ff83c78647cee92d674df808681dd805e29aca0711e2a944231d10cddc8c8"
+    },
+    {
+      "path": "python/sglang/srt/managers/io_struct.py",
+      "bytes_used": 65536,
+      "sha256_used": "89abc81e67201b38a0abe6594016e046de28842d77dd6d9aab87ea3b3291fd9f"
+    },
+    {
+      "path": "python/sglang/srt/managers/load_snapshot.py",
+      "bytes_used": 23047,
+      "sha256_used": "f19aa530a3514e23456cd3d6248f6d3dcd422428e7384f117b8a3a57ba8464dd"
+    },
+    {
+      "path": "python/sglang/srt/managers/min_free_slots_delayer.py",
+      "bytes_used": 1522,
+      "sha256_used": "bb864fc17446d3ccedc208250ac0171a235a39870bc151139c411049772fbeef"
+    },
+    {
+      "path": "python/sglang/srt/managers/mm_schedule.py",
+      "bytes_used": 27363,
+      "sha256_used": "170472d1d852a400de32713a3017eb07aa0e2c0bd8e5a6c4daa333221cf77244"
+    },
+    {
+      "path": "python/sglang/srt/managers/mm_utils.py",
+      "bytes_used": 57410,
+      "sha256_used": "de9686ba2a7b8c791979feed95d25c868df70dcb9ac0cb99580efe8ded18c08f"
+    },
+    {
+      "path": "python/sglang/srt/managers/multi_tokenizer_mixin.py",
+      "bytes_used": 34482,
+      "sha256_used": "fd879cd9e16329f72fb69c5541495c8552d51019923810ca5ed90e1cd0bd5a35"
+    },
+    {
+      "path": "python/sglang/srt/managers/multimodal_processor.py",
+      "bytes_used": 3337,
+      "sha256_used": "d295ce69c2fa2c5eb6940a28609ed913fef980f64de6af30635292c250875f0f"
+    },
+    {
+      "path": "python/sglang/srt/managers/overlap_utils.py",
+      "bytes_used": 23880,
+      "sha256_used": "f1db27ba53291ebd06e2b5750cea3ff34f53b6207bea39cdeec7f66496571e97"
+    },
+    {
+      "path": "python/sglang/srt/managers/prefill_delayer.py",
+      "bytes_used": 19493,
+      "sha256_used": "599f8ca22e0a02c86729d4d580d168b53f3ecef6e0f04749bf14ee65137638ad"
+    },
+    {
+      "path": "python/sglang/srt/managers/rust_server.py",
+      "bytes_used": 39953,
+      "sha256_used": "d1dd6001d39568a1ef8678b8a6692f73683b524829c1617358e95333d568ed0b"
+    },
+    {
+      "path": "python/sglang/srt/managers/schedule_batch.py",
+      "bytes_used": 65536,
+      "sha256_used": "27e82bd4ddc63276dfc5706821f6b502d9511c92793c116be15ec60e6586c408"
+    },
+    {
+      "path": "python/sglang/srt/managers/schedule_policy.py",
+      "bytes_used": 63100,
+      "sha256_used": "64f3ea4ab0ac071d56639e407abd36ea392a656c2966ed92e6614dfa85cc02e8"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler.py",
+      "bytes_used": 65536,
+      "sha256_used": "f737dd21e348042b5861a5c2729047a5af15b1686445ea6e956e9343ce235206"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/batch_result_processor.py",
+      "bytes_used": 55498,
+      "sha256_used": "8c9626605546de2bc54d5f25a7ae16caeb9ec96e273af50adf91076df543e05b"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/dp_attn.py",
+      "bytes_used": 17076,
+      "sha256_used": "61594780e0860d1c6ca644f1e1c1ef630e10db2224942ddb4711efbfbf181d32"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/flush_wrapper.py",
+      "bytes_used": 2133,
+      "sha256_used": "5adbcdccd5fd6de5760735126fb83f9f578ea6d2d77c14dad374213ae0f2a925"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/idle_sleeper.py",
+      "bytes_used": 2398,
+      "sha256_used": "3d1b0a784c7dd3f9468a30745be4ed8cf83fbaa02501833c7a8ae8ee7f210e22"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/invariant_checker.py",
+      "bytes_used": 19957,
+      "sha256_used": "c7f6faa73a6f572ab52952df34bd45ca1d19364e78c64319966a5a3d14b2f442"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/ipc_channels.py",
+      "bytes_used": 3192,
+      "sha256_used": "ec73fc4546bb75991daf1abf5be1b4f0fc23770eebcdb704ea0973e51285699e"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/kv_events_publisher.py",
+      "bytes_used": 3333,
+      "sha256_used": "600d51ae91978322fbc8d3cf8b8f136b7f6f9eb803819e90149ad69698dbcae7"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/load_inquirer.py",
+      "bytes_used": 10218,
+      "sha256_used": "bd81d06c60ecb49fe68e4d5bcfa8ae1cd103a853d2e6df91a04a33369b6848e7"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/logprob_result_processor.py",
+      "bytes_used": 15933,
+      "sha256_used": "e155923884c924cc6cc98fe9ee7800f093f0d8b755be27599902992cdab1725f"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/memory_usage.py",
+      "bytes_used": 1230,
+      "sha256_used": "82844af91ffed25cf1468ce3ee9afa4bf7d170432d6e7a3242971bb886848e40"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/metrics_reporter.py",
+      "bytes_used": 53326,
+      "sha256_used": "6149a4ae4ebc2318517f8583915255de4f3549064d4fd5a4caaf015a48aafc02"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/new_token_ratio_tracker.py",
+      "bytes_used": 1608,
+      "sha256_used": "2086ea0fad965f24fcda645a0ceddb4b5fc576013f9c983335ff7db092942185"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/output_sender.py",
+      "bytes_used": 800,
+      "sha256_used": "e1c4e17a45a69157a73396f2d46099cef2a48ec8a2c86ee652f460e58eef8611"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/output_streamer.py",
+      "bytes_used": 33053,
+      "sha256_used": "20bfb1a5d8e1b253628b187e09fa19b47b0097efb740e4e8f8cb6ebfc13dbf94"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/pool_stats_observer.py",
+      "bytes_used": 13013,
+      "sha256_used": "eddf2fbc62868639336e10909157f9fc1439d6ab08cf20445ca0adc42cb1deb2"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/profiler_manager.py",
+      "bytes_used": 18461,
+      "sha256_used": "8e4a29923065c2c674151e94d1d4355ee295f1fca0104d36d5de70e5f7e22fe2"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/recv_skipper.py",
+      "bytes_used": 2829,
+      "sha256_used": "2b6e6d4e493a232db068b60ed3699452cde0cc2d7d4d9dc7df9fd4c22560f0e7"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/request_receiver.py",
+      "bytes_used": 11242,
+      "sha256_used": "0ef81087e03ecc2e9db3b25a41c00fb289f4769fb0f01d848384cdc21c4cf87b"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_components/weight_updater.py",
+      "bytes_used": 15309,
+      "sha256_used": "ca88d041c8f14ac6df740bfb36bbd9000b9bcbfa7e6d14fed9d4695044051a96"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_input_blocker.py",
+      "bytes_used": 3748,
+      "sha256_used": "edfe07948d75b3871bae173997914397878aca66aba0b42ffb8e26eb7e97102d"
+    },
+    {
+      "path": "python/sglang/srt/managers/scheduler_pp_mixin.py",
+      "bytes_used": 65536,
+      "sha256_used": "ec0677f44f600d211ce49c740a8196d9755b0a5d98a9a85ff8ab5eb9203271f1"
+    },
+    {
+      "path": "python/sglang/srt/managers/tokenizer_control_mixin.py",
+      "bytes_used": 38885,
+      "sha256_used": "f8cca94806bfe8d8d317231499d98a1664f8c0ee5a64e92022d78c398ef074db"
+    },
+    {
+      "path": "python/sglang/srt/managers/tokenizer_manager.py",
+      "bytes_used": 65536,
+      "sha256_used": "d0dc491461625d32845291e99b64cb4ccd53d2c78bd7a4a3731f19729d435375"
+    },
+    {
+      "path": "python/sglang/srt/managers/tokenizer_manager_score_mixin.py",
+      "bytes_used": 27914,
+      "sha256_used": "f9e2559d266f2e0d45aed1dde19471468c4932f4ad5fab8589fac94ff1c861c0"
+    },
+    {
+      "path": "python/sglang/srt/managers/tp_worker.py",
+      "bytes_used": 28436,
+      "sha256_used": "7a7d243b7348e49e75821f1d9fa627ce73f6675f5df225d5be6406a95772fb07"
+    },
+    {
+      "path": "python/sglang/srt/managers/utils.py",
+      "bytes_used": 17852,
+      "sha256_used": "be9abd9d37c801a8a3aa6383a8daf89cf84fac4f7f3a8ee5e333ae75ef1ff2a4"
+    },
+    {
+      "path": "python/sglang/srt/models/afmoe.py",
+      "bytes_used": 23239,
+      "sha256_used": "51416d24e54e8686c2a15a08ad211dd62fa281b5a9ffaf7c32461d44ba69771d"
+    },
+    {
+      "path": "python/sglang/srt/models/apertus.py",
+      "bytes_used": 25102,
+      "sha256_used": "9369ba665dd91bafe8b9151efd25f4063dccef4f438b1880ef124d9b4e5ca121"
+    },
+    {
+      "path": "python/sglang/srt/models/arcee.py",
+      "bytes_used": 18822,
+      "sha256_used": "acde03f2e303da18c652e7f7ccceaa701b202fa3ecd557d29c585664e64d9e95"
+    },
+    {
+      "path": "python/sglang/srt/models/baichuan.py",
+      "bytes_used": 16160,
+      "sha256_used": "3a8ea172c648f8e472012dd7c6a68e02b4df34bbf0d2d36527aa35c6542b0e00"
+    },
+    {
+      "path": "python/sglang/srt/models/bailing_moe.py",
+      "bytes_used": 38212,
+      "sha256_used": "e52761b3e576055aa68f7da2e1dfec9713bd78693682b10903314ccad88064c7"
+    },
+    {
+      "path": "python/sglang/srt/models/bailing_moe_linear.py",
+      "bytes_used": 60506,
+      "sha256_used": "59eb0af987e261c2fb68970a414ded151875844712e51529640db96874095b58"
+    },
+    {
+      "path": "python/sglang/srt/models/bailing_moe_nextn.py",
+      "bytes_used": 9314,
+      "sha256_used": "aea5a3a4c507b1a85b58ed5719213caed581cd4917bcdd3ad9f6cd87cf79b476"
+    },
+    {
+      "path": "python/sglang/srt/models/bert.py",
+      "bytes_used": 15851,
+      "sha256_used": "23b157b2a5d90c24c7ced6a67909120d1d0759fe5b9d518c15bb29ee7e4240aa"
+    },
+    {
+      "path": "python/sglang/srt/models/chatglm.py",
+      "bytes_used": 13921,
+      "sha256_used": "76f9c49d9b4cba67d244841774449485a8c98201402508fc9cbd2d7efc07d302"
+    },
+    {
+      "path": "python/sglang/srt/models/clip.py",
+      "bytes_used": 23251,
+      "sha256_used": "0d77e447d6ac9a3c01028affe72c90be18098d1ccabe3220852892cb57f07cf5"
+    },
+    {
+      "path": "python/sglang/srt/models/cohere2_moe.py",
+      "bytes_used": 23133,
+      "sha256_used": "bba44f58ef1ec55e1004d8ddbf99950eae69806f3a061c102a45fcd428fcffa0"
+    },
+    {
+      "path": "python/sglang/srt/models/cohere2_vision.py",
+      "bytes_used": 11270,
+      "sha256_used": "4350018aa1c8f8dee60024ff48756ec7b88a1d906b35263308b666772d7ea346"
+    },
+    {
+      "path": "python/sglang/srt/models/commandr.py",
+      "bytes_used": 16117,
+      "sha256_used": "a80d35171cbd8f87dfe2a1832440c311c340ce06ac8c66324a29afb1c915cf2e"
+    },
+    {
+      "path": "python/sglang/srt/models/dbrx.py",
+      "bytes_used": 16142,
+      "sha256_used": "9f0d6d344cd10eb4f810d042137ffa067b547f86a1a82f9c4882b959f62d7814"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek.py",
+      "bytes_used": 18676,
+      "sha256_used": "7f1e7743b734acc16f821d166301015120bd6e64242464d326d5c3a38883c830"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_common/amd/__init__.py",
+      "bytes_used": 46,
+      "sha256_used": "91337352ff5bde7bb2d74116c6beabf628948ab03fe055604376861e3486bb19"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_common/amd/deepseek_v4_fused_mhc.py",
+      "bytes_used": 12652,
+      "sha256_used": "65666062b9de59909facc7f6e6fb58920f9ab0c6443ef27b4f88fb4aa9084cb1"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_common/attention_backend_handler.py",
+      "bytes_used": 9758,
+      "sha256_used": "0d379aed9bac29ccea54361ffd22ffbd4853c9008f70a8d75b06b6a6ebd8a2de"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/__init__.py",
+      "bytes_used": 656,
+      "sha256_used": "4907531368605837fb09f3579dd648ce6a27cbbbd2177ac69629a1f6705dbd37"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_methods.py",
+      "bytes_used": 1084,
+      "sha256_used": "4d66f9a7098eb22e1a94ba16ceb2865e18df578de9e9878cb3b314dcaa3d2e1c"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mha.py",
+      "bytes_used": 22350,
+      "sha256_used": "d06254176f8854b6a6026348726fe12c6c6ae914876a22d6ef6e3313bddfb590"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mha_rocm.py",
+      "bytes_used": 13026,
+      "sha256_used": "398271bf5d75636eb721987b3c73387be7ce17349bd20533a1fd259e0d35b15e"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py",
+      "bytes_used": 40607,
+      "sha256_used": "69695243cb94e753f46437e5f54d6fd7e3d5c17ab0a43110ea9f1aada8bf8627"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla_fused_rope_cpu.py",
+      "bytes_used": 6212,
+      "sha256_used": "dc0888bb343513fc8724e8b96fd1fe29343b1adc17d12f7e4637bafae7077de7"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla_fused_rope_rocm.py",
+      "bytes_used": 7925,
+      "sha256_used": "9a7cd4113aa4c830aa4403ecf240fe13eecfcb84bca4100a762b571d07d70145"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla_rocm.py",
+      "bytes_used": 35096,
+      "sha256_used": "00f7b5bd93dc4ec87c126ca7d9b02bfbe86fe4048ca99cf94af122abd1fc0188"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_common/deepseek_weight_loader.py",
+      "bytes_used": 37249,
+      "sha256_used": "428f8d221d7f4be5c148a571adb62570e9003c65d7aec703da44ba0a0d945ab6"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_common/utils.py",
+      "bytes_used": 5737,
+      "sha256_used": "c05b271d0ee18cdacc497a8af1fc695d958cc4dea3c509a535692f12d948151d"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_janus_pro.py",
+      "bytes_used": 65536,
+      "sha256_used": "26ce221ef7a9d10247f011a283e7c8505136e7ac6a4d0ba16529d53e6a5b46fb"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_nextn.py",
+      "bytes_used": 16189,
+      "sha256_used": "8082e7860122af1d93d28e0ffdc9c870d83adced0b61af067b3e2be2b69cd6a5"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_ocr.py",
+      "bytes_used": 65536,
+      "sha256_used": "3e19aa634ab5eeaca6ddbc2abdc9c8a64cc2c25f3031da483854ad0a82109631"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_v2.py",
+      "bytes_used": 65536,
+      "sha256_used": "f9bbfbede6edd3659c7cf81b83007a670d5da714a5defd9640f7248417451a35"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_v4.py",
+      "bytes_used": 65536,
+      "sha256_used": "20d9a699ad5bb92d6a10b8906e19cf6cbfc7a3eecaa054dcdb8b965db887821f"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_v4_dspark.py",
+      "bytes_used": 40513,
+      "sha256_used": "fb5df3b0ad16c3c1ef5fcd94c8ee748380ef016524918e232412ba6979b490c5"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_v4_nextn.py",
+      "bytes_used": 11091,
+      "sha256_used": "bdb93a600a12a53abdd7cee8f49959b8544b7d180d8e7a2dcd930b1305ade1b3"
+    },
+    {
+      "path": "python/sglang/srt/models/deepseek_vl2.py",
+      "bytes_used": 13368,
+      "sha256_used": "f2ec27c761892722ea7003e4f16f66b84786866551f77de4debb3961b4702a7a"
+    },
+    {
+      "path": "python/sglang/srt/models/dflash.py",
+      "bytes_used": 46211,
+      "sha256_used": "bfdef4b6ebe54f0ed88e04295310102c88b4b85798604f736cdb46320f3929ef"
+    },
+    {
+      "path": "python/sglang/srt/models/dots3.py",
+      "bytes_used": 926,
+      "sha256_used": "29ea533ebff8c22e4e712ecf46fda7835c6015627f5bf90f32b59c13f59346ac"
+    },
+    {
+      "path": "python/sglang/srt/models/dots3_common/__init__.py",
+      "bytes_used": 54,
+      "sha256_used": "8cd25a165c3c6f8307e8afa07b03d8c2eada9c0cf08bae8cba2aa75370609ecf"
+    },
+    {
+      "path": "python/sglang/srt/models/dots3_common/dots_omni_audio.py",
+      "bytes_used": 40848,
+      "sha256_used": "aeec00fb81c72d43fe83fe9bc7b0086854790f6044e344d3f1384245d3799525"
+    },
+    {
+      "path": "python/sglang/srt/models/dots3_common/dots_omni_towers.py",
+      "bytes_used": 9214,
+      "sha256_used": "cc211745cf13b255768ef9ceb7c31b9fad2e631b3274a6abd6493b0e18d5e2b6"
+    },
+    {
+      "path": "python/sglang/srt/models/dots3_common/dots_omni_vision.py",
+      "bytes_used": 28982,
+      "sha256_used": "ec06d9e528b6a013963e4b6e79660ae12183d4250b8c371d9bfa0eed27c6a8ae"
+    },
+    {
+      "path": "python/sglang/srt/models/dots3_common/fp8.py",
+      "bytes_used": 3015,
+      "sha256_used": "0863305d436974c5be308027fbae81400137b0b8b809a89cf28782b6103f7296"
+    },
+    {
+      "path": "python/sglang/srt/models/dots3_common/modeling.py",
+      "bytes_used": 65536,
+      "sha256_used": "56c19151141e18963ad9b49e7b974abc3c652bd91de96fa9f4a887ca4c5c9b87"
+    },
+    {
+      "path": "python/sglang/srt/models/dots3_common/nextn.py",
+      "bytes_used": 7382,
+      "sha256_used": "a2134acc085b0efdc0859198ee77e48804e2cae539805fa079f4464f0c371e5f"
+    },
+    {
+      "path": "python/sglang/srt/models/dots3_nextn.py",
+      "bytes_used": 409,
+      "sha256_used": "b1c65a2b788c0451c89259991778765b59174653fb7ca923ee5e630546053b1c"
+    },
+    {
+      "path": "python/sglang/srt/models/dots_ocr.py",
+      "bytes_used": 6683,
+      "sha256_used": "b16905b043635f96ff09e70b0aa5e37a9b2bea2cb209b3539a365b45fa01e1e9"
+    },
+    {
+      "path": "python/sglang/srt/models/dots_vlm.py",
+      "bytes_used": 8090,
+      "sha256_used": "13e74814ce7ae20cf2d37855cd429e3227b2d40269d301985f41ce1888d0da7f"
+    },
+    {
+      "path": "python/sglang/srt/models/dots_vlm_vit.py",
+      "bytes_used": 12315,
+      "sha256_used": "03dfa21a2955d6d00148f97c40c9a840ca9613e33261b88911497954cc608f74"
+    },
+    {
+      "path": "python/sglang/srt/models/dspark.py",
+      "bytes_used": 30251,
+      "sha256_used": "844ab808c46bd832b0c19f71effdaebcb26c9933ec61e9784b61d1590c61b18a"
+    },
+    {
+      "path": "python/sglang/srt/models/ernie4.py",
+      "bytes_used": 16408,
+      "sha256_used": "4abc04d651826bc014b589fe1020ee95862d3dd9d7a4c4451b77d6ded12788e9"
+    },
+    {
+      "path": "python/sglang/srt/models/ernie45_moe_vl.py",
+      "bytes_used": 20643,
+      "sha256_used": "bff7e5893e22e79299075f0ed721a14f28381a05c395ffa103d0ef10bff03af9"
+    },
+    {
+      "path": "python/sglang/srt/models/ernie45_vl.py",
+      "bytes_used": 32019,
+      "sha256_used": "cc7804e3875b65c7f541eb2676565616158fd019c8a6fcc6635119ae57dc93a1"
+    },
+    {
+      "path": "python/sglang/srt/models/ernie4_eagle.py",
+      "bytes_used": 7221,
+      "sha256_used": "fcc548df82ad5df32cbe847406951d47800265931226e68853f4d97c17a16b77"
+    },
+    {
+      "path": "python/sglang/srt/models/exaone.py",
+      "bytes_used": 13546,
+      "sha256_used": "a38b7b4bc8e2e2ec25108bfde1414f33fd585b06772aa376a10974799bf5bce0"
+    },
+    {
+      "path": "python/sglang/srt/models/exaone4.py",
+      "bytes_used": 25378,
+      "sha256_used": "1b594d4030f95f32051e9a58c4ca4123a2a3233380e683a5d18a1298f28a41e2"
+    },
+    {
+      "path": "python/sglang/srt/models/exaone_moe.py",
+      "bytes_used": 31614,
+      "sha256_used": "d34b573bf15c2ae2b18ed16a26626654c3f0181bbc6eafae32bc800f188093d3"
+    },
+    {
+      "path": "python/sglang/srt/models/exaone_moe_mtp.py",
+      "bytes_used": 3827,
+      "sha256_used": "845584240effea7d15e1c5b7ce60da2f08fdd9fe0626e55ada93ecfba1410624"
+    },
+    {
+      "path": "python/sglang/srt/models/falcon_h1.py",
+      "bytes_used": 20768,
+      "sha256_used": "b6ab4e824d65c36f3637360d4572d32e10448b3fb2547df64ab1f4c9fecd855c"
+    },
+    {
+      "path": "python/sglang/srt/models/gemma.py",
+      "bytes_used": 14271,
+      "sha256_used": "0fb42f0965d7b846b9e1b04cb63f76404bf77b9fd9db91c76c08cb940e37ece5"
+    },
+    {
+      "path": "python/sglang/srt/models/gemma2.py",
+      "bytes_used": 17458,
+      "sha256_used": "aeef5821188e4b01c3e7d3569851ac9609de210d7988d7bc560a3d9c9b0202c3"
+    },
+    {
+      "path": "python/sglang/srt/models/gemma2_reward.py",
+      "bytes_used": 2791,
+      "sha256_used": "2b89ab5090aa9c7832763ac38084c58095d1f5584b23c5acef29cf5287194ab8"
+    },
+    {
+      "path": "python/sglang/srt/models/gemma3_causal.py",
+      "bytes_used": 41523,
+      "sha256_used": "e68b3840ebef0b986ab96653ee2bc4395192f330ddd2a95f0ad1e420912166a4"
+    },
+    {
+      "path": "python/sglang/srt/models/gemma3_mm.py",
+      "bytes_used": 20904,
+      "sha256_used": "f35141ba77b106706574e8ba3f905e54e8210e5a7d7fbdcd1d2991d036a36e71"
+    },
+    {
+      "path": "python/sglang/srt/models/gemma3n_audio.py",
+      "bytes_used": 36405,
+      "sha256_used": "8ac80a7e30395227986b0c54ea679d2f6b2c5e5cd83ea01b6a00c19cb71e982d"
+    },
+    {
+      "path": "python/sglang/srt/models/gemma3n_causal.py",
+      "bytes_used": 36632,
+      "sha256_used": "833ca64d4d4571a6612d6cbd63c7260ddc1207691e8f0d835a58a9b6c017e079"
+    },
+    {
+      "path": "python/sglang/srt/models/gemma3n_mm.py",
+      "bytes_used": 20317,
+      "sha256_used": "c5b0965ccf240ae0d6216bd4796a12a85d0f16920f5c658a5fefb1363137331c"
+    },
+    {
+      "path": "python/sglang/srt/models/gemma4_audio.py",
+      "bytes_used": 31556,
+      "sha256_used": "08a394f05e3b87593346cc68f2c7c6fca5edd527a9564f2e25fbd0117dafb8c1"
+    },
+    {
+      "path": "python/sglang/srt/models/gemma4_causal.py",
+      "bytes_used": 57260,
+      "sha256_used": "8086b91be84b67dede4a9dbee219e367d440e385a2dbef828929bc94b8428f8a"
+    },
+    {
+      "path": "python/sglang/srt/models/gemma4_mm.py",
+      "bytes_used": 47015,
+      "sha256_used": "3ce5fe727d23695a019e77e474561c35689f3377e3f233f0e298fb2bcba05724"
+    },
+    {
+      "path": "python/sglang/srt/models/gemma4_mtp.py",
+      "bytes_used": 15976,
+      "sha256_used": "3925febb19bb91c786d943693d27950673eb53e12ccdcfc698f07a6cf04ccc8f"
+    },
+    {
+      "path": "python/sglang/srt/models/gemma4_unified.py",
+      "bytes_used": 19217,
+      "sha256_used": "d5498b253f35e83ab0aaf219a2c2bf2f42c6bbd3f95ffce02760e78b2e38a4e9"
+    },
+    {
+      "path": "python/sglang/srt/models/gemma4_vision.py",
+      "bytes_used": 22589,
+      "sha256_used": "3a720814bdf2c4d378658b29db414faf892587be53f3178cb0aa355f34d19fff"
+    },
+    {
+      "path": "python/sglang/srt/models/glm4.py",
+      "bytes_used": 23070,
+      "sha256_used": "ca559ff25961b5c87e017d76a8169c48a3ac6e6e59ada6ee8f2d5699ba5ba6c8"
+    },
+    {
+      "path": "python/sglang/srt/models/glm4_moe.py",
+      "bytes_used": 58456,
+      "sha256_used": "ac47dbf35200e0f97958accc09979ec9a8f289eac70ba4b0fd2d39af8049e2f1"
+    },
+    {
+      "path": "python/sglang/srt/models/glm4_moe_lite.py",
+      "bytes_used": 50537,
+      "sha256_used": "fe0d7a15c3f2b979a90d40dccb012e9f2b49284089e33a6ac04383bc51f23aa3"
+    },
+    {
+      "path": "python/sglang/srt/models/glm4_moe_lite_nextn.py",
+      "bytes_used": 6578,
+      "sha256_used": "6de9156d0cc2733a29354c02fd68e6119a2789b814ef79c9eeb3c923028d101f"
+    },
+    {
+      "path": "python/sglang/srt/models/glm4_moe_nextn.py",
+      "bytes_used": 6022,
+      "sha256_used": "ed7d87db55c02092e376723a45b6fc0182055c80636f5e1509141b3849e37f24"
+    },
+    {
+      "path": "python/sglang/srt/models/glm4v.py",
+      "bytes_used": 30818,
+      "sha256_used": "92ea7274deab155e77bdc8acaff13b422ef46038aadb46aaa59c0783aa1e526e"
+    },
+    {
+      "path": "python/sglang/srt/models/glm4v_moe.py",
+      "bytes_used": 11947,
+      "sha256_used": "0295c96a52bdeafc06def878079273662fc4c0db931de1b706959bab6d845cb6"
+    },
+    {
+      "path": "python/sglang/srt/models/glm_image_vl.py",
+      "bytes_used": 44211,
+      "sha256_used": "7d994d2b83a9cd46151bf525dae23525d4b1ab6636b57d62933348242c2d40cd"
+    },
+    {
+      "path": "python/sglang/srt/models/glm_ocr.py",
+      "bytes_used": 16430,
+      "sha256_used": "1f0af6af0d24a3d8e36ca50e93e52ec8f2d45f8b6e2db7634bd551301deed8d0"
+    },
+    {
+      "path": "python/sglang/srt/models/glm_ocr_nextn.py",
+      "bytes_used": 5687,
+      "sha256_used": "073536614ef9a6db9331b3c015ae39efe0ef6f15f515a07d021b42cffb0694ea"
+    },
+    {
+      "path": "python/sglang/srt/models/glmasr.py",
+      "bytes_used": 8525,
+      "sha256_used": "708ee514e377f19f339030428c49727028343e96b77c36c3f013742654131469"
+    },
+    {
+      "path": "python/sglang/srt/models/gpt2.py",
+      "bytes_used": 9791,
+      "sha256_used": "acc560106bdb0f4bf7666a6500bfe04871cc7cc330ff9f984343825a048ae429"
+    },
+    {
+      "path": "python/sglang/srt/models/gpt_bigcode.py",
+      "bytes_used": 10379,
+      "sha256_used": "d93a118f5a053b4f5a916a38ac277e8ecffa810497fc36f38104586f381b405d"
+    },
+    {
+      "path": "python/sglang/srt/models/gpt_j.py",
+      "bytes_used": 10906,
+      "sha256_used": "ea6573f8f959be3ad3e6b429955cbc2c8e60957af456b439ddb2fb53b1121536"
+    },
+    {
+      "path": "python/sglang/srt/models/gpt_oss.py",
+      "bytes_used": 53819,
+      "sha256_used": "61ac969f4dcefae8d6f3145ddd6b1aa4f48a576782d81f771932f7996d1d02d8"
+    },
+    {
+      "path": "python/sglang/srt/models/granite.py",
+      "bytes_used": 21698,
+      "sha256_used": "024ee51e388231439fd1a4fe321c150dc09dd0bf94898e2686a06741172e23e7"
+    },
+    {
+      "path": "python/sglang/srt/models/granitemoe.py",
+      "bytes_used": 16411,
+      "sha256_used": "e12b0052f1f221129689c20bc9deb5d20d8b605bfaeccd5af8b61c2a1afe5c33"
+    },
+    {
+      "path": "python/sglang/srt/models/granitemoehybrid.py",
+      "bytes_used": 24898,
+      "sha256_used": "5d4e3b88837e7007cd62669b5e77744fa685986d9f3ab18b03fe8deb33bc9f1f"
+    },
+    {
+      "path": "python/sglang/srt/models/grok.py",
+      "bytes_used": 35783,
+      "sha256_used": "63b87b5e58545c7bc474f9f1793917afb18cf33b9618946a0f7631acc52cc481"
+    },
+    {
+      "path": "python/sglang/srt/models/hrm_text.py",
+      "bytes_used": 17584,
+      "sha256_used": "d71689264ede55ce8ba847ac63ce6cb43b671734d267a0b67b08d60b62a1a88f"
+    },
+    {
+      "path": "python/sglang/srt/models/hunyuan.py",
+      "bytes_used": 30661,
+      "sha256_used": "137de560974b24bd2c8705d82a13f4a2357d2b86fd16c389c8f07d1cb5639749"
+    },
+    {
+      "path": "python/sglang/srt/models/hunyuan_v3.py",
+      "bytes_used": 23889,
+      "sha256_used": "bcf21fe22dafbf739b009eb3ea0c996251c08c69b07d5a61284e735ae6d184ff"
+    },
+    {
+      "path": "python/sglang/srt/models/hunyuan_v3_nextn.py",
+      "bytes_used": 8987,
+      "sha256_used": "1389dc50cc287248b03adcbe4e2c394d5c81cec5191e3c047a1b3f2156dbfed7"
+    },
+    {
+      "path": "python/sglang/srt/models/idefics2.py",
+      "bytes_used": 12919,
+      "sha256_used": "b2794f629f7faeb43d25050ea3d7dc0a1aad0da55134217973ac6c6bfc2869e2"
+    },
+    {
+      "path": "python/sglang/srt/models/inkling.py",
+      "bytes_used": 65536,
+      "sha256_used": "74e8a1707460a87a2e55fc1eaf6bb5af34e627a0242b18dee1a40141f2182fc0"
+    },
+    {
+      "path": "python/sglang/srt/models/inkling_common/__init__.py",
+      "bytes_used": 735,
+      "sha256_used": "b96821456ca126fc0ba0c2d6d026664714dcaea47fea7add939d80d74f401d94"
+    },
+    {
+      "path": "python/sglang/srt/models/inkling_common/attn.py",
+      "bytes_used": 42953,
+      "sha256_used": "c04e06d8b69341c836528f91631f91789ea8fa88b4057bebe5047fa88862a6c6"
+    },
+    {
+      "path": "python/sglang/srt/models/inkling_common/dense_mlp.py",
+      "bytes_used": 19888,
+      "sha256_used": "632432bc4dba4d2e9d7593777aee00af746b2da448d0d0e7e30b424c11b30f59"
+    },
+    {
+      "path": "python/sglang/srt/models/inkling_common/hmlp.py",
+      "bytes_used": 5749,
+      "sha256_used": "377c5ac0d2fd579897dfe8e059e60052ffdf08095e02d5c8ab90c8c1fa288474"
+    },
+    {
+      "path": "python/sglang/srt/models/inkling_common/kernels/comm.py",
+      "bytes_used": 46538,
+      "sha256_used": "f2e1224fe7f1eeb1c576c4592ce55d875a8681e26efdfea54b504b41667bddec"
+    },
+    {
+      "path": "python/sglang/srt/models/inkling_common/kernels/sconv.py",
+      "bytes_used": 45328,
+      "sha256_used": "7e9862ea08df10fea5772f51bad0708424b996409c5447ac3872f539e6414b4c"
+    },
+    {
+      "path": "python/sglang/srt/models/inkling_common/lora.py",
+      "bytes_used": 9880,
+      "sha256_used": "706df5c637c5b092c246d0bf95605604c33329880f292c061441c4c9ed788c69"
+    },
+    {
+      "path": "python/sglang/srt/models/inkling_common/moe.py",
+      "bytes_used": 44397,
+      "sha256_used": "4bf39c7662ac4337ce81c5136ce288be18e532290400fd27de5fc0ea4384ea92"
+    },
+    {
+      "path": "python/sglang/srt/models/inkling_common/norm.py",
+      "bytes_used": 1281,
+      "sha256_used": "2f386379b4ec8680cfa438202885a5c31de9e0d9287c2a5fa10e2f1874f2d39e"
+    },
+    {
+      "path": "python/sglang/srt/models/inkling_common/quantization/__init__.py",
+      "bytes_used": 460,
+      "sha256_used": "20764ebd292899f5c31c5747ae7289174126807570f84482ebdf44a01ebf5329"
+    },
+    {
+      "path": "python/sglang/srt/models/inkling_common/quantization/config.py",
+      "bytes_used": 10648,
+      "sha256_used": "ffd7c1bda9e756ec6056b61a5b6d853a2bde682cd6ac39b9fe8b0b3ceba21613"
+    },
+    {
+      "path": "python/sglang/srt/models/inkling_common/quantization/quant.py",
+      "bytes_used": 6180,
+      "sha256_used": "9fac6d421bdfd85086e390c45f22794f79bc23934387be094206df26ff8a00b0"
+    },
+    {
+      "path": "python/sglang/srt/models/inkling_common/sconv.py",
+      "bytes_used": 29887,
+      "sha256_used": "39f7e78b8b9b476de003a902ebfc7acd98cae625901d94d23b24d383238dce06"
+    },
+    {
+      "path": "python/sglang/srt/models/inkling_common/util.py",
+      "bytes_used": 3962,
+      "sha256_used": "6258d774bb930aad9f93c7fa91475e808d1a427fe3d6044e1fbc2fe8867a25cd"
+    },
+    {
+      "path": "python/sglang/srt/models/internlm2.py",
+      "bytes_used": 13222,
+      "sha256_used": "e9a1b60b9ec93b02cebb60b2a8db90ec75a5ba07aac92ef48d0b418f03a59bc3"
+    },
+    {
+      "path": "python/sglang/srt/models/internlm2_reward.py",
+      "bytes_used": 2695,
+      "sha256_used": "c229f6bcf851c72696b5d637f04ce8dc865ae49f8436fe9558c2b57d2aa7364a"
+    },
+    {
+      "path": "python/sglang/srt/models/interns1.py",
+      "bytes_used": 11705,
+      "sha256_used": "f36a7f8af20b4dc127f3138fc951b573d693fa16ab3af96dbcca267a63583dec"
+    },
+    {
+      "path": "python/sglang/srt/models/interns1pro.py",
+      "bytes_used": 9157,
+      "sha256_used": "f8e196bb3eae4df08312c58ac124587f2195732bef28851aff0d3e7b1b31d3e4"
+    },
+    {
+      "path": "python/sglang/srt/models/interns2_mobius.py",
+      "bytes_used": 32947,
+      "sha256_used": "bbb3fae1316a963aa763745d67b2e9a3762768d3f3e9d6b13c3839980d4e79b6"
+    },
+    {
+      "path": "python/sglang/srt/models/interns2preview.py",
+      "bytes_used": 273,
+      "sha256_used": "f19744e2c4c18d2919100423b8bfdc0546c80512a293b2e49a2a727272e067b7"
+    },
+    {
+      "path": "python/sglang/srt/models/internvl.py",
+      "bytes_used": 31672,
+      "sha256_used": "f84bcac3f4a8c2ef87385d35159eb2f922db810121a545ce03b577ea8450c6d9"
+    },
+    {
+      "path": "python/sglang/srt/models/iquest_loopcoder.py",
+      "bytes_used": 18435,
+      "sha256_used": "a9276f23629feb434f0e12a81709c7d9bd903b228b84e68c2c6706373713b91b"
+    },
+    {
+      "path": "python/sglang/srt/models/jet_nemotron.py",
+      "bytes_used": 19378,
+      "sha256_used": "38ebd2df37393986c1d816f316634412cb2a7a0d4bb52b0acc068b012e3c8b92"
+    },
+    {
+      "path": "python/sglang/srt/models/jet_vlm.py",
+      "bytes_used": 4705,
+      "sha256_used": "2b406a23b6a742e0e0912b330191d7795dc52fc9ee8828abcf774a029e624d02"
+    },
+    {
+      "path": "python/sglang/srt/models/kimi_k25.py",
+      "bytes_used": 36413,
+      "sha256_used": "ade7724d092be7fdf067c3b9f04f8921690ca7c16beee20b469cb976646fcfb7"
+    },
+    {
+      "path": "python/sglang/srt/models/kimi_k25_eagle3.py",
+      "bytes_used": 21004,
+      "sha256_used": "4717e7ced2536b879ffecbafd8597ad55a78707cda79cffa27ebc11a9aa25f1d"
+    },
+    {
+      "path": "python/sglang/srt/models/kimi_k3.py",
+      "bytes_used": 65536,
+      "sha256_used": "bf7310a76e605a3cc704561422585bd783b10ee06c405100f6c19ff7012b8861"
+    },
+    {
+      "path": "python/sglang/srt/models/kimi_k3_vl.py",
+      "bytes_used": 32790,
+      "sha256_used": "2924c38f652a6ebff2ef79c49f2f336ba18723ea4b854d3ac14d95292988acdb"
+    },
+    {
+      "path": "python/sglang/srt/models/kimi_linear.py",
+      "bytes_used": 34566,
+      "sha256_used": "cbace6c73aa337452a1899465eb10f773dc485cad29678333f3c22b57a6ee15f"
+    },
+    {
+      "path": "python/sglang/srt/models/kimi_vl.py",
+      "bytes_used": 14804,
+      "sha256_used": "8b6d662dfccf19543ff8223a862bd1eaeed80f073001c27f20c655130ee9c713"
+    },
+    {
+      "path": "python/sglang/srt/models/kimi_vl_moonvit.py",
+      "bytes_used": 25890,
+      "sha256_used": "e417162c4e61613bd76994ee9fe0af1a58eebaa44ec14b6d6b85bf778ae6dec4"
+    },
+    {
+      "path": "python/sglang/srt/models/laguna.py",
+      "bytes_used": 32928,
+      "sha256_used": "d5f5c4c5c3da38da5d1250fa575a32bfca5d6ac8d645876b7c346b4b69c27e95"
+    },
+    {
+      "path": "python/sglang/srt/models/lfm2.py",
+      "bytes_used": 24618,
+      "sha256_used": "1ed88642d9370b69be11d219e86caeae80aaac035062a70fd2d148a2ecb14f92"
+    },
+    {
+      "path": "python/sglang/srt/models/lfm2_moe.py",
+      "bytes_used": 27685,
+      "sha256_used": "7a3eb60fa52f32f07cea305e233bc0514a940a9a7444daa42252b4be06596f3d"
+    },
+    {
+      "path": "python/sglang/srt/models/lfm2_vl.py",
+      "bytes_used": 13183,
+      "sha256_used": "256facc230ca3455a651a2feb94302a9b25cfb66316f041f87ae5d5fb306db77"
+    },
+    {
+      "path": "python/sglang/srt/models/lightonocr.py",
+      "bytes_used": 12837,
+      "sha256_used": "88b3e3f81a099bb19d280f078c9ba303e1ca85e1f5fa078424d516d29fe39577"
+    },
+    {
+      "path": "python/sglang/srt/models/llada2.py",
+      "bytes_used": 36234,
+      "sha256_used": "52165bc6605d87c6931674d3a9bde7500cdb4c7d441ae4ed70e787de9adc0088"
+    },
+    {
+      "path": "python/sglang/srt/models/llama.py",
+      "bytes_used": 34810,
+      "sha256_used": "1469468c72718d0197e3efa5622bfea756ff3f44f856882e1ebe882930772beb"
+    },
+    {
+      "path": "python/sglang/srt/models/llama4.py",
+      "bytes_used": 21091,
+      "sha256_used": "e372b3afea00078bb75e1b0d6d3c3472a740db63c54e84b9511549fc5d47da0e"
+    },
+    {
+      "path": "python/sglang/srt/models/llama_classification.py",
+      "bytes_used": 3146,
+      "sha256_used": "055235ecdd405590a3e883eb3279012f5ae52b6889b842e489794a3f713e67bb"
+    },
+    {
+      "path": "python/sglang/srt/models/llama_eagle.py",
+      "bytes_used": 5067,
+      "sha256_used": "03a48b74e97bd7f43582fc4b11d06f3423f384538c4845c86df1c6804fbde6f8"
+    },
+    {
+      "path": "python/sglang/srt/models/llama_eagle3.py",
+      "bytes_used": 14017,
+      "sha256_used": "16ab0259f7823174688e0461827aecdc51edeb7693eb720c9a0f7cab3bdcc8cb"
+    },
+    {
+      "path": "python/sglang/srt/models/llama_embedding.py",
+      "bytes_used": 3254,
+      "sha256_used": "ceafbf94dbb7e5504573b79e9a26a6d3376418813c7f3ae093939661f8ab6670"
+    },
+    {
+      "path": "python/sglang/srt/models/llama_reward.py",
+      "bytes_used": 5203,
+      "sha256_used": "87625f811511a8aea3e11e05a12e4490edced7703ac3126a015db48a0098039b"
+    },
+    {
+      "path": "python/sglang/srt/models/llava.py",
+      "bytes_used": 39985,
+      "sha256_used": "49ffe4b8e6dab21185e6dfd5e632bfab9f02b8ffdccb3e3ef94e95aaf7a021c3"
+    },
+    {
+      "path": "python/sglang/srt/models/llavavid.py",
+      "bytes_used": 13114,
+      "sha256_used": "cd78585da7006df12425fb2a5d1fc5a6998e13ed1a4e2ff4c51efd1e3c45fd76"
+    },
+    {
+      "path": "python/sglang/srt/models/locate_anything.py",
+      "bytes_used": 17097,
+      "sha256_used": "e5ad5a36e85f417e38ec297ac091dee0ef54fe9495c7cd5c9d1ab920b277b8fc"
+    },
+    {
+      "path": "python/sglang/srt/models/longcat_flash.py",
+      "bytes_used": 47689,
+      "sha256_used": "e0c2034058d54a700812df78e0ffcf38d8cecf9ee6c491a4a831c0800cb11071"
+    },
+    {
+      "path": "python/sglang/srt/models/longcat_flash_nextn.py",
+      "bytes_used": 29244,
+      "sha256_used": "b2dab60290fbba8c612e2f0712fcab802f98aee18d585665ca4697a60439a636"
+    },
+    {
+      "path": "python/sglang/srt/models/mellum.py",
+      "bytes_used": 21190,
+      "sha256_used": "e4ff0199c4fa331b9e2030a12855b9b2002158cae9ef2b4bcc18d45e0185876e"
+    },
+    {
+      "path": "python/sglang/srt/models/midashenglm.py",
+      "bytes_used": 25841,
+      "sha256_used": "41feec5b1cd1c902f518dfbfe829d072a46046b945c2a8cd2ed00d388c17e14b"
+    },
+    {
+      "path": "python/sglang/srt/models/mimo.py",
+      "bytes_used": 5662,
+      "sha256_used": "4dd89f957b5ea3f1cb1fb43561feb10c039747336b3a92d1e248d55ccb9e96d3"
+    },
+    {
+      "path": "python/sglang/srt/models/mimo_audio.py",
+      "bytes_used": 52202,
+      "sha256_used": "2530a986a818f518d258ef1353c5b436eac05a5eaa43dcd9f0097060afd33114"
+    },
+    {
+      "path": "python/sglang/srt/models/mimo_mtp.py",
+      "bytes_used": 7384,
+      "sha256_used": "da82aeb473817dfea5828b65cc4c9724c9ba80aae0fc6397b11c7450cbba2a94"
+    },
+    {
+      "path": "python/sglang/srt/models/mimo_v2.py",
+      "bytes_used": 63137,
+      "sha256_used": "20017436b6682602aa130b70d9524bf52a35371337214f38bfc276bed8ff87d0"
+    },
+    {
+      "path": "python/sglang/srt/models/mimo_v2_asr.py",
+      "bytes_used": 4685,
+      "sha256_used": "6527276c32b62e75af54d95f6132b600f8e0e62a4afe45c3a263fbf72ab68ca2"
+    },
+    {
+      "path": "python/sglang/srt/models/mimo_v2_nextn.py",
+      "bytes_used": 14739,
+      "sha256_used": "203d0b57d49af4d23145d72ceebdc9dcd861aeed6e24451f56b898d6400e1338"
+    },
+    {
+      "path": "python/sglang/srt/models/mimo_vl.py",
+      "bytes_used": 18857,
+      "sha256_used": "0b365aafabc003b0a8bfc7617542e1ae7cbbc1ab2b32a13763c05fc69606f6d8"
+    },
+    {
+      "path": "python/sglang/srt/models/mindspore.py",
+      "bytes_used": 13079,
+      "sha256_used": "e05c612e4f467779caf96267f2e7e07146b04fe1bc81e578758bd92911346c87"
+    },
+    {
+      "path": "python/sglang/srt/models/minicpm.py",
+      "bytes_used": 23038,
+      "sha256_used": "dc65a89726f27475349a16aeac05e4d8c11f3e8022b21a0a6173a39ee739c65e"
+    },
+    {
+      "path": "python/sglang/srt/models/minicpm3.py",
+      "bytes_used": 19317,
+      "sha256_used": "4f0519477f7cc9aa708a040c184b6544a21c6c5a142ae3b3767ec61d6853df55"
+    },
+    {
+      "path": "python/sglang/srt/models/minicpmo.py",
+      "bytes_used": 65536,
+      "sha256_used": "2cae1230f67177ff89b91b419d8af4db0eacd2d20a75af590fbf863fae9d5358"
+    },
+    {
+      "path": "python/sglang/srt/models/minicpmv.py",
+      "bytes_used": 62392,
+      "sha256_used": "cf93d077bffac4401d7d8de57f728dabb1197537da615143777092249a23bdef"
+    },
+    {
+      "path": "python/sglang/srt/models/minicpmv_vit.py",
+      "bytes_used": 20937,
+      "sha256_used": "bf539b30ce1fb139bf70c43ef0fe6bd4d96dc7104fc0004cdfd313a394f008e6"
+    },
+    {
+      "path": "python/sglang/srt/models/minimax_m2.py",
+      "bytes_used": 51409,
+      "sha256_used": "60608acd8d5fa28c6293b1284099cd4055bc4f887b2905b304320c87f150245a"
+    },
+    {
+      "path": "python/sglang/srt/models/minimax_m3.py",
+      "bytes_used": 65536,
+      "sha256_used": "8431ed8acefe558074cbeb282df80580a689d22a46b6a2a3e694499b3b405395"
+    },
+    {
+      "path": "python/sglang/srt/models/minimax_m3_vl.py",
+      "bytes_used": 16087,
+      "sha256_used": "55a31f4d41238ab644575e2033479d120bd083113af048c40c74ae6d464b2528"
+    },
+    {
+      "path": "python/sglang/srt/models/minimax_vl_common.py",
+      "bytes_used": 32125,
+      "sha256_used": "3f141f6fb07081d11d7255adbcd11d5feb506cd291315501a8f1653b8de40be3"
+    },
+    {
+      "path": "python/sglang/srt/models/ministral3.py",
+      "bytes_used": 5836,
+      "sha256_used": "93a77d7707c5415d24704ef83e15d6a080bbe39796715b105288ce8fcc63cbdd"
+    },
+    {
+      "path": "python/sglang/srt/models/mistral.py",
+      "bytes_used": 8163,
+      "sha256_used": "21a2df76c3cb114833f521a64e8dac53986036e1eb4bdd5b65759a5100904cea"
+    },
+    {
+      "path": "python/sglang/srt/models/mistral_eagle.py",
+      "bytes_used": 8776,
+      "sha256_used": "c286d3f3946dfa08537cefc3f1979ce1fc6ac4469ec6aa7eb2bcc62a67782aa4"
+    },
+    {
+      "path": "python/sglang/srt/models/mistral_large_3.py",
+      "bytes_used": 4847,
+      "sha256_used": "787c57a6499ebf68e3661135e3f14350ee808eacff9e7a339fe5bcd73492e09e"
+    },
+    {
+      "path": "python/sglang/srt/models/mistral_large_3_eagle.py",
+      "bytes_used": 3153,
+      "sha256_used": "172bca42aeb3f1f1399de0de9d45bb8046d64f319c407cd48eea9f91e10ac056"
+    },
+    {
+      "path": "python/sglang/srt/models/mixtral.py",
+      "bytes_used": 17098,
+      "sha256_used": "96da18082e741b197a428089558b2c9454edc59bf4c8e3786ea476c7c0c04346"
+    },
+    {
+      "path": "python/sglang/srt/models/mixtral_quant.py",
+      "bytes_used": 15441,
+      "sha256_used": "cd8cd32e82be078d4dc7609a7f5483180dd859a3698c5451185066c428c51f1d"
+    },
+    {
+      "path": "python/sglang/srt/models/mllama.py",
+      "bytes_used": 40742,
+      "sha256_used": "3da05e06e5479fb909cd3f890063bda3dff10a4bc621da8563d842c959f09184"
+    },
+    {
+      "path": "python/sglang/srt/models/mllama4.py",
+      "bytes_used": 37817,
+      "sha256_used": "a532260b2312fc894f8b7029e44e9351cbfb64a5a519a429ab98ef0a1d997c63"
+    },
+    {
+      "path": "python/sglang/srt/models/moss_vl.py",
+      "bytes_used": 65136,
+      "sha256_used": "28308ce12e14186c7c49a6c3a30e420d56d85ba26f9e3672f3b31dfd7d238712"
+    },
+    {
+      "path": "python/sglang/srt/models/muse_glimmer.py",
+      "bytes_used": 36801,
+      "sha256_used": "eebf558cf180de061283def5662a2b2489f6e6330f4e812e5ea47b3a183d708c"
+    },
+    {
+      "path": "python/sglang/srt/models/nano_nemotron_vl.py",
+      "bytes_used": 15949,
+      "sha256_used": "02d4da72d125ce97b1c511c081da136369009ab6c90ddf5eb6e27012677fbc37"
+    },
+    {
+      "path": "python/sglang/srt/models/nemotron_h.py",
+      "bytes_used": 49973,
+      "sha256_used": "30bf5864d910a158af3739467008338cdeffe06439e33d0d4db35fa34892c78c"
+    },
+    {
+      "path": "python/sglang/srt/models/nemotron_h_mtp.py",
+      "bytes_used": 13084,
+      "sha256_used": "b05bf25e6c9af3a669a380c5d80cf9aa416ec87fc4208121efca001f3b2c0faf"
+    },
+    {
+      "path": "python/sglang/srt/models/nemotron_h_utils.py",
+      "bytes_used": 3692,
+      "sha256_used": "a7ddbf52ee14533da3a06e9f63f3bdcee2726007af615fdd22aba88143c3b510"
+    },
+    {
+      "path": "python/sglang/srt/models/nemotron_nas.py",
+      "bytes_used": 16057,
+      "sha256_used": "875028f2d773fb1f7904894a2437e060238fb6e1e49723b72698da89f02d43bf"
+    },
+    {
+      "path": "python/sglang/srt/models/nvila.py",
+      "bytes_used": 12213,
+      "sha256_used": "667265c922eff8080a13a5bc52aadc71754a1353588a91243721bd9e40235559"
+    },
+    {
+      "path": "python/sglang/srt/models/nvila_lite.py",
+      "bytes_used": 6425,
+      "sha256_used": "1331c607d087580f1d6772a057d912b71e5dd84eceb9df2e4f41c36b804c0252"
+    },
+    {
+      "path": "python/sglang/srt/models/olmo.py",
+      "bytes_used": 12784,
+      "sha256_used": "bccc66bc7985745d36ab09a7f6c0e66548687cb789fd0cdbad9547a1076d05f8"
+    },
+    {
+      "path": "python/sglang/srt/models/olmo2.py",
+      "bytes_used": 17005,
+      "sha256_used": "e6101e714e0e3daaf2166b9222b6728b40fed166785a9c0993c59d37786985d9"
+    },
+    {
+      "path": "python/sglang/srt/models/olmoe.py",
+      "bytes_used": 16156,
+      "sha256_used": "0369a0f057bb8905727ecd38368e7153664f9f40bb67081734ca6deec236f521"
+    },
+    {
+      "path": "python/sglang/srt/models/opt.py",
+      "bytes_used": 23348,
+      "sha256_used": "276fdc26df083a110a5b368c129731f313a641a77b8d917f928a88d5ff10d1b2"
+    },
+    {
+      "path": "python/sglang/srt/models/orion.py",
+      "bytes_used": 13020,
+      "sha256_used": "60d9f622dcfb5c89346b86c2fe00e978d71b6e36b7746480c5eced5db2bf93a3"
+    },
+    {
+      "path": "python/sglang/srt/models/paddleocr_vl.py",
+      "bytes_used": 25788,
+      "sha256_used": "dcdc24bc2f3f27d1c6b8adcab26a271afefea21f9a9c1964ad290b6d5bec5f08"
+    },
+    {
+      "path": "python/sglang/srt/models/parakeet.py",
+      "bytes_used": 7337,
+      "sha256_used": "afa477ab4dc5fe1e82855066664db54f8fed8602ce9e7bc744c83ded57d80ab5"
+    },
+    {
+      "path": "python/sglang/srt/models/persimmon.py",
+      "bytes_used": 11261,
+      "sha256_used": "a270b4ae43f763a41304c37b90af3fc651134b03af6e5feb8f24c5b9068cb8b5"
+    },
+    {
+      "path": "python/sglang/srt/models/phi.py",
+      "bytes_used": 10383,
+      "sha256_used": "382592c42616624252577c2e4f75d610db2da0a446f9f1f9a76fab24505094c1"
+    },
+    {
+      "path": "python/sglang/srt/models/phi3_small.py",
+      "bytes_used": 16063,
+      "sha256_used": "e2a701bdadc1747b89294cb646f2a3f080133372362ec2fdbee1b611fd9f2e02"
+    },
+    {
+      "path": "python/sglang/srt/models/phi4mm.py",
+      "bytes_used": 20694,
+      "sha256_used": "f5ad75724add38c0488c6c1e73a4968393e99aa19bfa3a88cd22d6b5dcd093d4"
+    },
+    {
+      "path": "python/sglang/srt/models/phi4mm_audio.py",
+      "bytes_used": 48877,
+      "sha256_used": "d0285e930a18b9d0276d8d3e272370cff8a7ccc97133c16650ba91f66c243e14"
+    },
+    {
+      "path": "python/sglang/srt/models/phi4mm_utils.py",
+      "bytes_used": 65536,
+      "sha256_used": "911f5c45581aa9369fda936be1df5876a5875e0c0737ff9e4bdb1dd97d0269d1"
+    },
+    {
+      "path": "python/sglang/srt/models/phimoe.py",
+      "bytes_used": 19059,
+      "sha256_used": "603aa98fd79c0167db1cafb9b2c80e27375ac340325c34b721d03b3378e39b0f"
+    },
+    {
+      "path": "python/sglang/srt/models/pixtral.py",
+      "bytes_used": 38492,
+      "sha256_used": "744492a3d65174ae2f0341c3542afd55c870f67b158e83c7b49fe1bb8f1a4dbb"
+    },
+    {
+      "path": "python/sglang/srt/models/points_v15_chat.py",
+      "bytes_used": 6415,
+      "sha256_used": "1d5fc64602d371eb4a8740766a026bcb4d8dfdab5c588e4d3e38d010b6ab5069"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen.py",
+      "bytes_used": 12210,
+      "sha256_used": "00aa71bb9b7fa8c8879133832c77556588418a6464e11e7e6563bf57632e81d2"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen2.py",
+      "bytes_used": 28482,
+      "sha256_used": "41741eb780a3f75bc3ae4f43cc09d538b15752b1d5da34b5a96d8bca36970fdc"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen2_5_vl.py",
+      "bytes_used": 37778,
+      "sha256_used": "c35b6408b5c8449327ac2902a8002ffaffef850f34a0fdce47d6ebf0c2b8adca"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen2_audio.py",
+      "bytes_used": 7098,
+      "sha256_used": "36fd4a320987a53035bd94c9bdc49bacf664aee884f139ed43bbd9c5215be55f"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen2_classification.py",
+      "bytes_used": 2744,
+      "sha256_used": "b45ecd8c713792662fcf8d6df0810a59e6fda40011fc35f82ea0678b6da7976b"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen2_eagle.py",
+      "bytes_used": 4885,
+      "sha256_used": "8c7f437f93e991dc33e04333a77eabd945cecf5fc6e039e64c5e188ef04add71"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen2_moe.py",
+      "bytes_used": 51063,
+      "sha256_used": "441a5e992c7299a0a6be1a3268706759062f6a15bf9a0c8350e24def051c4c2f"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen2_rm.py",
+      "bytes_used": 3185,
+      "sha256_used": "e81ec356c191ea45d5db5a1eb3bbc72c29bd9599c70ed3011aa1027c70f15579"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen2_vl.py",
+      "bytes_used": 22101,
+      "sha256_used": "ed6c3b2039b1e8bf2e43aaf9d7dd59be224fd6022e20ff84223caaf8c0d9bd4d"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen3.py",
+      "bytes_used": 25844,
+      "sha256_used": "ee530c67c9bff924df184befe4621692d07c431d367d356c8067e6cbdcc60fe3"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen3_5.py",
+      "bytes_used": 65536,
+      "sha256_used": "37fe97b7877a66c6e164d456c5269824693e0768b7a3de8b887ae400557033fe"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen3_5_mtp.py",
+      "bytes_used": 17317,
+      "sha256_used": "7f147ddb7505a13e5a5207c6266edd826a7d3e5a8281612613fc896570bd76e9"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen3_5_text.py",
+      "bytes_used": 8181,
+      "sha256_used": "7399dc5422d65fb74d4f6e53b1870e81d4c712fe543e23189ae18a69eeadeb3f"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen3_asr.py",
+      "bytes_used": 7139,
+      "sha256_used": "f3b30fda98ac587f87ae4c2f414dc56ca2246867598e9c6ba3ea8a3db6076777"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen3_classification.py",
+      "bytes_used": 5747,
+      "sha256_used": "8eeb04172601531add9cc72c5a2ef7c5f370c443b3407fafd9af188e687aaf66"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen3_embedding.py",
+      "bytes_used": 4840,
+      "sha256_used": "863f53ed09e8d28e657212d9379191f9ce684c736a98f4a6d4d1b593c5cdb598"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen3_moe.py",
+      "bytes_used": 46341,
+      "sha256_used": "15a7fadeb6eaad90c18898b76b64766e1765997ba64baf706941d706f846721c"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen3_moe_mtp.py",
+      "bytes_used": 4920,
+      "sha256_used": "9f8d9a49a2e3c204d5ee55a89b52548045818f2cc1fa08d1aab92c0941360a65"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen3_next.py",
+      "bytes_used": 48010,
+      "sha256_used": "ba46c6b703fd78772a1b6613f5de23681eb0ebcdb0f4e5f4cda8399df06eee8c"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen3_next_mtp.py",
+      "bytes_used": 6281,
+      "sha256_used": "ca4986a0166d437da67cc90dfb65e34a407e11072640a07934d8c3437693e422"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen3_omni_moe.py",
+      "bytes_used": 27912,
+      "sha256_used": "ccb9850c1353f145ff31856b9307e9064f59024c2a7eee0a70338e986ab99a80"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen3_rm.py",
+      "bytes_used": 1713,
+      "sha256_used": "07a12c16cdab6a97ed7896aee9dfbfe746591816aece1ab4181ed1d5891a1166"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen3_vl.py",
+      "bytes_used": 62683,
+      "sha256_used": "b8db3ba4b970dbe28d0294a9c7a8228d8b1fecbe0425f9f87c3972008bd0db74"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen3_vl_moe.py",
+      "bytes_used": 16056,
+      "sha256_used": "48adc25f100392919f446ebd7e662b0d7fe7d13f85daa3b01cb694b79dd6e4c8"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen4_exp.py",
+      "bytes_used": 65536,
+      "sha256_used": "6f1b7971a0281bee3b828e0c1e765436413af06aec40931ae1324c9bad1bc9c0"
+    },
+    {
+      "path": "python/sglang/srt/models/qwen4_exp_mtp.py",
+      "bytes_used": 8418,
+      "sha256_used": "e5d1f10bc66d73d4f52c0a139473ac34b6471481f239bfa7d498578a950ce3fb"
+    },
+    {
+      "path": "python/sglang/srt/models/radio.py",
+      "bytes_used": 20025,
+      "sha256_used": "3e603a16807d9fb511e8ea463366cb685224dc0a7bd71c1bc2f8879db69e116a"
+    },
+    {
+      "path": "python/sglang/srt/models/registry.py",
+      "bytes_used": 4857,
+      "sha256_used": "3c5b4e87c5943147c28cb5b68e187cdf8f8f9d880c42f1f6941fce99fe757e41"
+    },
+    {
+      "path": "python/sglang/srt/models/roberta.py",
+      "bytes_used": 11907,
+      "sha256_used": "87994b2a22c88c1c5810581439159759d5ba6c9f2c90ac8558d9c4a9525706de"
+    },
+    {
+      "path": "python/sglang/srt/models/sarashina2_vision.py",
+      "bytes_used": 10951,
+      "sha256_used": "76d16c2d77f38de321d58d29275670e63897707763394dc1efea72677b124165"
+    },
+    {
+      "path": "python/sglang/srt/models/sarvam_moe.py",
+      "bytes_used": 54737,
+      "sha256_used": "5726ea4a3e2234930c4aa0c15f85f0c0cbd8ee1c382f67783aa6220e5559b70a"
+    },
+    {
+      "path": "python/sglang/srt/models/sdar.py",
+      "bytes_used": 20331,
+      "sha256_used": "fe2a0132ca83f8b96ce40cc609962bb57105ebbc0a049dc58649082473d75355"
+    },
+    {
+      "path": "python/sglang/srt/models/sdar_moe.py",
+      "bytes_used": 25231,
+      "sha256_used": "593d4bc4608b715ca99cb8cd39f8ca017cf9f599fe4ddfeed9edebfa5e3127a7"
+    },
+    {
+      "path": "python/sglang/srt/models/siglip.py",
+      "bytes_used": 11275,
+      "sha256_used": "9c349496353228272e26392113e302326ad09719c8511316c3030cfab1c10cae"
+    },
+    {
+      "path": "python/sglang/srt/models/siglip2.py",
+      "bytes_used": 21465,
+      "sha256_used": "bc81904cf0a746fc15932e73298bb6401ead827a2399924ee754013f68507c95"
+    },
+    {
+      "path": "python/sglang/srt/models/solar.py",
+      "bytes_used": 18246,
+      "sha256_used": "b2ba46c5d1931bf11aeff6c31390934602be133a2defe7381ed6f69b0dd1fcca"
+    },
+    {
+      "path": "python/sglang/srt/models/spark2_5.py",
+      "bytes_used": 19460,
+      "sha256_used": "509c00aabf344897ca8a0e56f0dc247b68f0b214bdb3fd761dd154e1316ca476"
+    },
+    {
+      "path": "python/sglang/srt/models/stablelm.py",
+      "bytes_used": 12965,
+      "sha256_used": "3b13b359144c799b2a2947906dcb199552783f91f5117d4a0ae6640060f04fdd"
+    },
+    {
+      "path": "python/sglang/srt/models/starcoder2.py",
+      "bytes_used": 12394,
+      "sha256_used": "2fcaef42743aefd14ff44b8cf2ca7357aa4a69ea23e9ec9b2deb9b934ab5c461"
+    },
+    {
+      "path": "python/sglang/srt/models/step3_vl.py",
+      "bytes_used": 37756,
+      "sha256_used": "a7b918d8cc89d0c1347d5553bd15738dcd0d7c79b726c2f4ecaa073bc5d486b4"
+    },
+    {
+      "path": "python/sglang/srt/models/step3_vl_10b.py",
+      "bytes_used": 22864,
+      "sha256_used": "9654f28e13bb8fdafd157e603608fe4212f48c028b026cd08ccd6b90b8d22428"
+    },
+    {
+      "path": "python/sglang/srt/models/step3p5.py",
+      "bytes_used": 40372,
+      "sha256_used": "c93127b8376f785f74ee6840be3df5409c17633b4cf6ccb68f1c6fee40d8ba35"
+    },
+    {
+      "path": "python/sglang/srt/models/step3p5_mtp.py",
+      "bytes_used": 13342,
+      "sha256_used": "59403c590c52c69376f6b3b7997686f1bf60b24983cdaf8fb1cc0439f745094e"
+    },
+    {
+      "path": "python/sglang/srt/models/step3p7.py",
+      "bytes_used": 8003,
+      "sha256_used": "814dff8fec4ed5e310ccfd3300a543d63f7620a6a084eed05126bd0c6cd99b42"
+    },
+    {
+      "path": "python/sglang/srt/models/teleflm.py",
+      "bytes_used": 3972,
+      "sha256_used": "d5d2af97bc09d103cc8891a6c19863651a8247b2929f293db6e5bba2f953c2a5"
+    },
+    {
+      "path": "python/sglang/srt/models/torch_native_llama.py",
+      "bytes_used": 18502,
+      "sha256_used": "5cb5a798c87fc2c546bb04fe9cffb0695dfe6b20ea22ab05d5340feede692248"
+    },
+    {
+      "path": "python/sglang/srt/models/transformers.py",
+      "bytes_used": 63919,
+      "sha256_used": "7b27cebdce3cf46be8e76cf9c5b400f022acc845f7c5e74190dbc8af75f1610a"
+    },
+    {
+      "path": "python/sglang/srt/models/unlimited_ocr.py",
+      "bytes_used": 17108,
+      "sha256_used": "dc4605bf016db9a619353e7ae21a798571b9c565ab5652e20495ab66b1ca3e34"
+    },
+    {
+      "path": "python/sglang/srt/models/utils.py",
+      "bytes_used": 26549,
+      "sha256_used": "7a05f7b446086ea6427b562b895355c1dd5b0b2b2563467d8daf11bcbfa979d1"
+    },
+    {
+      "path": "python/sglang/srt/models/voxtral.py",
+      "bytes_used": 17127,
+      "sha256_used": "5a81bd2c2219aa791ac5d5a4a78c1969e9c678a3fec3282dc21fe526e026e4e3"
+    },
+    {
+      "path": "python/sglang/srt/models/whisper.py",
+      "bytes_used": 18434,
+      "sha256_used": "3ca327482f0e6be78408da1b64a59018cce4f62741e713c38ddec0057232288d"
+    },
+    {
+      "path": "python/sglang/srt/models/xverse.py",
+      "bytes_used": 14113,
+      "sha256_used": "f675d37ed6d32e7da68f35f6a59232082f03e173ddddd8b2942c7f06049de619"
+    },
+    {
+      "path": "python/sglang/srt/models/xverse_moe.py",
+      "bytes_used": 17207,
+      "sha256_used": "f26cddaac7b663cd2b1605d1575e8f4ff0413b1ac3a1a68f460e39604f40806f"
+    },
+    {
+      "path": "python/sglang/srt/models/yivl.py",
+      "bytes_used": 5051,
+      "sha256_used": "f329de6db7907d07267d44c261186801c580df2bb9022128f4a958716b0a42f5"
+    },
+    {
+      "path": "python/sglang/srt/models/zaya.py",
+      "bytes_used": 65536,
+      "sha256_used": "a8a4a3ff16000bb618e1cfc395b1e86765c4ed2b5ffeedb792bdf3595fe22526"
+    }
+  ],
+  "evaluation_cases_used": false,
+  "corpus_source_revision": "836206a0adc8ef7aaa49f652230d5577a25014a5",
+  "corpus_path_note": "Paths made repository-relative and checkpoint display name generalized for publication; hashes and selected map bytes unchanged."
+}

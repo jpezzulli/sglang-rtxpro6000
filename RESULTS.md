@@ -22,7 +22,78 @@ interchangeable throughput number.
 - **Restored-prefix effective prefill:** input tokens divided by TTFT after
   NIXL restoration. It is not cold model prefill.
 
-## Flash-Next final campaign
+## Pennyroyal 2.3 — Flash-Next FR-Spec
+
+September 5–6, 2026. Same Flash-Next ModelOpt NVFP4 checkpoint across arms,
+one RTX PRO 6000, TP1; executable `836206a0ad`, unchanged v2.1.2 wheel.
+Native NEXTN 3/1/4, 65,536-ID FR map, full target vocabulary and unchanged
+acceptance policy. Context 524,288, KV 824,384, page 64, C4, 24 Mamba slots,
+BF16 GDN, graphs and 32 GiB HiCache/NIXL remain enabled.
+
+Adoption credit: [gabrielolympie/sglang-flashnext-sm120](https://github.com/gabrielolympie/sglang-flashnext-sm120).
+The token map was independently generated; no external throughput headline
+or complete external patch stack is presented as a Penny measurement.
+
+### Controlled decode and prefill
+
+Ordinary Chat Completions, ordinary warmups, 1,024 server-reported completion
+tokens per stream. C1 is **post-first-token** throughput; C4 is aggregate
+**synchronized whole-request makespan**, including first-token delay.
+
+| Arm | Samples C1/C4 | C1 median, tok/s | C1 whole-request median, tok/s | C4 aggregate median, tok/s |
+|---|---:|---:|---:|---:|
+| Initial v2.1.2 baseline | 3/3 | 156.79 | 151.17 | 417.92 |
+| Initial FR-Spec | 3/3 | 165.33 | 157.16 | 447.83 |
+| v2.1.2 baseline after reboot | 3/3 | 147.15 | 140.88 | 427.91 |
+| Frozen FR-Spec release candidate | 6/6 | **171.93** | **164.40** | **447.04** |
+
+The frozen candidate improved C1 by **9.7–16.8%** and C4 by **4.5–7.0%**
+against the two baseline medians. The initial FR trial measured +5.4%/+7.2%
+against the initial baseline. These are sequential session comparisons with
+material baseline variance and an intervening reboot, not randomized paired
+confidence intervals. All sample-level rates and per-stream/acceptance/memory
+observations are in the [numeric record](https://github.com/jpezzulli/pennyroyal-validation/blob/main/results/qwen38-flash-next-frspec-20260905.json).
+
+| Fresh-namespace prefill | Baseline TTFT | FR-Spec TTFT | Correctness |
+|---|---:|---:|---|
+| 63,864 prompt tokens | 4.969 s | 4.886 s | Exact READY |
+| One 489,879-token prompt | 61.070 s | 61.319 s | All three separated needles exact |
+
+Cold prefill is essentially unchanged. It is not mixed with decode. A later
+clean six-sample confirmation measured FR-only C1 **173.05** and C4 **450.94**;
+adding the held BF16 low-M kernel measured **172.13**/**451.55** (−0.53%/+0.13%).
+That kernel is excluded from 2.3. Those follow-up arms are not replacements
+for the frozen baseline/FR measurements or a new cold-prefill A/B.
+
+### Qualification and persistence
+
+- Full current reasoning: two warmups, nine measured requests in the
+  `three-user-1-3-3-1` schedule; **98.52/100**, 131,770 completion tokens,
+  all natural stops and no fatal/loop caps. Full case/dimension breakdown
+  and grading limitations are in the detailed report.
+- Tools: 27/30 literal, 29/30 exact calls/arguments, 30/30 parseable, zero
+  runtime errors. Actual workflows: **29 clean plus one redundant read-only
+  call**, no consequential execution failure. Two answer-discipline caveats
+  are separately disclosed; no invented 30/30 automatic result.
+- Vision and sealed agentic passed. The natural 3,072-token response contained
+  all direct IDs; the original automatic failure is retained because the
+  collector expected the wrong field. Collector fixes were not bundled.
+- Both supported profiles passed smoke, 64K/490K prefill, C1/C4 decode, and
+  actual NIXL restart restoration, with their original graph/pool capacities.
+- FR restart restored **489,856 tokens** with three exact needles. Concurrent
+  paired 64K/490K restoration completed correctly in **9.396 s**, with 553,664
+  NIXL-hit tokens plus 553,664 device-hit tokens and four Mamba states restored.
+  Duplicate prefixes reused admitted state; this is not four independent
+  full disk transfers. Two dependent 490K conversation turns also passed.
+- Final recovery after the excluded-kernel A/B again passed 9/9 smoke and
+  489,856-token NIXL restoration. Full capacity and idle state were verified.
+
+Detailed model results and interpretation belong in the
+[validation report](https://github.com/jpezzulli/pennyroyal-validation/blob/main/results/qwen38-flash-next-frspec-20260905.md).
+The raw local evidence and first attempts remain preserved separately.
+No new 27B speed gain, shared-kernel promotion, or transactional-cache claim.
+
+## Earlier Flash-Next campaign
 
 Source: `64ecd64924fee338e3bf846a32167cd604186827`.
 

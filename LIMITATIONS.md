@@ -5,13 +5,38 @@
 - One NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 96 GB, SM120, TP=1.
 - Exact checkpoint revisions and the recorded CUDA, PyTorch, FlashInfer, NIXL,
   GCC, and SGLang source stack.
-- Flash-Next final qualification ran at `64ecd64924`. The 27B controlled and
+- Earlier Radix Flash-Next qualification ran at `64ecd64924`. The 27B controlled and
   real-agentic campaigns ran on the earlier qualified runtime line retained in
   current history; later Flash-Next-specific commits were not all re-benchmarked
   on 27B.
 - Both launchers admit 524,288 tokens, but the controlled needle prompts were
   approximately 490K. This is not proof for every possible 524K prompt,
   modality, sampling configuration, or concurrent schedule.
+
+## Version 2.3 qualification boundary
+
+- FR-Spec was fully exercised on Flash-Next ModelOpt NVFP4 with executable
+  `836206a0ad`, keeping the checkpoint fixed across the baseline/FR arms. The
+  target vocabulary, acceptance policy and target weights were unchanged;
+  bit-for-bit sampled-output parity is not claimed.
+- Reported improvements compare two baseline boots and the frozen candidate
+  in one session campaign, not a randomized paired benchmark. Baseline C1
+  varied materially; both baselines and the initial FR trial are disclosed.
+- The extra BF16 low-M kernel is excluded after a flat incremental A/B. An
+  earlier combined-arm hang was not reproduced or causally explained; this
+  release does not claim to fix it.
+- FR tools: 27/30 literal, 29/30 exact calls/arguments, 30/30 parseable; actual
+  workflows were 29 clean plus one redundant read-only call. Two answer-
+  discipline issues remain disclosed, separate from tool-execution failures.
+- The natural-decode collector read the wrong token-ID response field;
+  all 3,072 IDs were present in the raw response. The original failed automatic
+  gate is retained. Saved mutable message-list snapshots also have a collector
+  limitation; no evaluation source or first attempt was rewritten for release.
+- 27B smoke, prefill, decode/concurrency and NIXL restart restore passed with
+  its unchanged recipe/build. A new full 27B reasoning/tool campaign was not
+  needed to qualify a Flash-Next-only recipe/map and is not claimed.
+- Checkpoint weights, private logs and raw conversations remain outside this
+  runtime repository; compact evidence and detailed validation are linked.
 
 ## Early Flash-Next integration
 
