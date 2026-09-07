@@ -1,0 +1,12 @@
+[Unit]
+Description=Check GitHub traffic archive freshness twice hourly
+
+[Timer]
+OnCalendar=*-*-* *:17,47:00 UTC
+OnActiveSec=30s
+Persistent=true
+AccuracySec=1s
+Unit=traffic-archive-watchdog.service
+
+[Install]
+WantedBy=timers.target

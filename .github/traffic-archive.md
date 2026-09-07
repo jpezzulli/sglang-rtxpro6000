@@ -2,7 +2,8 @@
 
 The workflow `.github/workflows/archive-traffic.yml` runs at **00:17 UTC daily**
 (`17 0 * * *`) on `pennyroyal-main-sm120-final` and supports manual dispatch.
-Scheduled execution can be delayed by GitHub. Run manually with:
+Scheduled execution can be delayed or dropped by GitHub. An independent persistent
+timer on thegrid now ensures a daily capture (details below). Run manually with:
 
 ```sh
 gh workflow run archive-traffic.yml --repo jpezzulli/sglang-rtxpro6000 --ref pennyroyal-main-sm120-final
@@ -103,3 +104,65 @@ The first capture exposed 2026-08-22 through 2026-09-04, including all dates fro
 launch on 2026-08-24. No launch-period dates had been discarded. August 24 contains
 explicit GitHub-reported zero counts. September 5 and 6 were not yet exposed at
 the initial 2026-09-06T01:14:03Z collection; they were not invented or counted.
+
+## Independent timer and recovery on thegrid
+
+GitHub's first 00:17 UTC schedule event produced no run by 2026-09-07T02:03Z,
+although the workflow was active on the correct default branch. Manual dispatch
+continued to succeed. The underlying GitHub scheduler cause is unconfirmed;
+manual success alone does not verify GitHub's schedule delivery.
+
+Thegrid therefore runs `traffic-archive-watchdog.timer` as `mrkaos`, independently
+of Codex, Neomatrix, and any interactive session. User lingering was already enabled.
+The timer starts a check 30 seconds after activation and at minutes **17 and 47
+of every UTC hour**, with `Persistent=true` for calendar catch-up after downtime.
+The target is one capture at or after **00:17 UTC each day**. Fresh days perform
+only read-only API checks; this does not make twice-hourly archive commits.
+The first activation commissions one real workflow run even if a manual capture
+is already fresh, proving that unattended credentials and execution work.
+
+The watchdog dispatches the existing GitHub workflow if collection is overdue.
+It adopts a queued/running collector instead of dispatching another, waits up to
+eight minutes, and verifies both workflow success and a fresh `daily.json` on
+`traffic-history`. A still-pending run is resumed on the next timer tick. If a pending run was
+deleted, a confirmed HTTP 404 plus a successful run listing retires that reference
+so recovery can proceed; authentication errors never clear pending state. Failed
+runs or transport/authentication failures leave history untouched, mark the local
+service failed, and are retried on later timer ticks. Ambiguous dispatch responses
+are reconciled against GitHub run history before another dispatch is attempted.
+The existing GitHub workflow concurrency group serializes all collectors.
+
+The watchdog reuses the operator's `gh` login directly and does not copy or print
+a credential. It makes no Git clone/fetch requests and never writes history
+itself. GitHub retains collection and all archive writes, using the existing
+Actions secret and built-in write token. GitHub's original daily schedule remains
+active as a second trigger; its delivery is not relied on for the guarantee.
+Both schedulers still depend on GitHub API/Actions availability; recovery resumes
+when the service is available. A thegrid outage is caught up after user-manager
+startup; data absent from GitHub's retention window cannot be reconstructed.
+
+Installed locations:
+
+- `/opt/sglang/traffic-archive/traffic_watchdog.py`: deployed watchdog.
+- `/opt/sglang/traffic-archive/state/verified.json`: last run verified by watchdog.
+- `/opt/sglang/traffic-archive/state/pending.json`: in-flight dispatch, when present.
+- `~/.config/systemd/user/traffic-archive-watchdog.{service,timer}`: user units.
+- `.github/traffic-archive/`: portable unit templates; substitute `@INSTALL_DIR@`
+  and `@REPOSITORY@` in the service template during installation.
+
+Inspect without changing anything:
+
+```sh
+systemctl --user list-timers traffic-archive-watchdog.timer
+systemctl --user status traffic-archive-watchdog.service
+journalctl --user -u traffic-archive-watchdog.service --since today
+cat /opt/sglang/traffic-archive/state/verified.json
+```
+
+A successful oneshot service normally shows `inactive (dead)` with exit status 0;
+the timer remains `active (waiting)`. Check that combination, the journal, the
+verified state, and the remote archive timestamp. Do not interpret a completed
+oneshot's inactive state as a failed scheduler.
+
+Focused watchdog tests: `python3 .github/scripts/test_traffic_watchdog.py`.
+No runtime code or inference service participates in this mechanism.

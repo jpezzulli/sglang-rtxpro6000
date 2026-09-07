@@ -1,0 +1,7 @@
+[Unit]
+Description=Ensure GitHub repository traffic is archived daily
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 @INSTALL_DIR@/traffic_watchdog.py --repository @REPOSITORY@ --state-dir @INSTALL_DIR@/state
+TimeoutStartSec=12min
