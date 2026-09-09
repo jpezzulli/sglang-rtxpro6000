@@ -4,6 +4,7 @@ import re
 from typing import Any, List, Optional
 
 from sglang.srt.entrypoints.openai.protocol import Tool
+from sglang.srt.environ import envs
 from sglang.srt.function_call.base_format_detector import BaseFormatDetector
 from sglang.srt.function_call.core_types import (
     StreamingParseResult,
@@ -62,6 +63,12 @@ class Qwen3CoderDetector(BaseFormatDetector):
         # Initialize attributes that were missing in the original PR
         self.current_func_name: Optional[str] = None
 
+        # Hold the wrapper until its name is validated. Rejected examples must
+        # survive as literal text, including markup received in earlier chunks.
+        self._pending_tool_prefix: Optional[str] = None
+        self._suppress_current_call = False
+        self._preserve_tool_wrapper = False
+
     def has_tool_call(self, text: str) -> bool:
         return self.tool_call_start_token in text
 
@@ -100,6 +107,14 @@ class Qwen3CoderDetector(BaseFormatDetector):
         if inferred_type is None:
             return "string"
         return str(inferred_type).strip().lower()
+
+    def _is_declared_tool(self, func_name: str, tools: Optional[List[Tool]]) -> bool:
+        if not tools or envs.SGLANG_FORWARD_UNKNOWN_TOOLS.get():
+            return True
+        return any(
+            tool.type == "function" and tool.function.name == func_name
+            for tool in tools
+        )
 
     def _convert_param_value(
         self, param_value: str, param_name: str, param_config: dict, func_name: str
@@ -187,23 +202,35 @@ class Qwen3CoderDetector(BaseFormatDetector):
         try:
             # Simple cleanup of the text to find tool calls
             # Note: This is a simplified regex approach consistent with vLLM
-            raw_tool_calls = self.tool_call_regex.findall(text)
+            raw_tool_calls = list(self.tool_call_regex.finditer(text))
             if not raw_tool_calls:
-                # Fallback: maybe the whole text is inside the tag or tags are stripped
-                if self.tool_call_prefix in text:
-                    raw_tool_calls = [text]
+                # Keep the incomplete-wrapper fallback local to that wrapper;
+                # bare function examples preceding it are ordinary text.
+                raw_tool_calls = list(re.finditer(r"<tool_call>(.*)$", text, re.DOTALL))
 
             tool_idx = 0
-            for tool_content in raw_tool_calls:
+            normal_text_chunks = []
+            text_pos = 0
+            for tool_match in raw_tool_calls:
+                self._append_normal_text(
+                    text[text_pos : tool_match.start()], normal_text_chunks
+                )
+                tool_content = tool_match.group(1)
                 # Find function calls
-                funcs = self.tool_call_function_regex.findall(tool_content)
+                funcs = list(self.tool_call_function_regex.finditer(tool_content))
+                accepted_spans = []
                 for func_match in funcs:
-                    func_body = func_match[0] or func_match[1]
+                    func_body = func_match.group(1) or func_match.group(2)
                     if ">" not in func_body:
                         continue
 
                     name_end = func_body.index(">")
                     func_name = func_body[:name_end]
+                    if not self._is_declared_tool(func_name, tools):
+                        logger.warning(
+                            "Model attempted to call undefined function: %s", func_name
+                        )
+                        continue
                     params_str = func_body[name_end + 1 :]
 
                     param_config = self._get_arguments_config(func_name, tools)
@@ -233,12 +260,23 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         )
                     )
                     tool_idx += 1
+                    accepted_spans.append(func_match.span())
 
-            # Determine normal text (text before the first tool call)
-            start_idx = text.find(self.tool_call_start_token)
-            if start_idx == -1:
-                start_idx = text.find(self.tool_call_prefix)
-            normal_text = text[:start_idx] if start_idx > 0 else ""
+                if accepted_spans and len(accepted_spans) == len(funcs):
+                    self._pending_tool_separator = ""
+                else:
+                    # Remove only accepted functions from a mixed wrapper; an
+                    # undeclared call is prose, not permission to drop content.
+                    literal = tool_match.group(0)
+                    offset = len(self.tool_call_start_token)
+                    for start, end in reversed(accepted_spans):
+                        literal = literal[: offset + start] + literal[offset + end :]
+                    self._append_normal_text(literal, normal_text_chunks)
+                text_pos = tool_match.end()
+
+            self._append_normal_text(text[text_pos:], normal_text_chunks)
+            normal_text = "".join(normal_text_chunks)
+            self._pending_tool_separator = None
 
             return StreamingParseResult(normal_text=normal_text, calls=calls)
 
@@ -273,7 +311,13 @@ class Qwen3CoderDetector(BaseFormatDetector):
             # 1. Priority detection: check if it's the start of Tool Call
             # -------------------------------------------------------
             if current_slice.startswith(self.tool_call_start_token):
-                self._pending_tool_separator = None
+                if self._pending_tool_prefix is not None:
+                    self._append_normal_text(
+                        self._pending_tool_prefix, normal_text_chunks
+                    )
+                self._pending_tool_prefix = self.tool_call_start_token
+                self._suppress_current_call = False
+                self._preserve_tool_wrapper = False
                 self.parsed_pos += len(self.tool_call_start_token)
                 self.is_inside_tool_call = True
                 continue
@@ -281,10 +325,33 @@ class Qwen3CoderDetector(BaseFormatDetector):
             # -------------------------------------------------------
             # 2. Function Name: <function=name>
             # -------------------------------------------------------
-            if current_slice.startswith(self.tool_call_prefix):
+            # Bare function/parameter markup in prose is not a call (#38624).
+            if self.is_inside_tool_call and current_slice.startswith(
+                self.tool_call_prefix
+            ):
                 end_angle = current_slice.find(">")
                 if end_angle != -1:
                     func_name = current_slice[len(self.tool_call_prefix) : end_angle]
+
+                    if not self._is_declared_tool(func_name, tools):
+                        logger.warning(
+                            "Model attempted to call undefined function: %s", func_name
+                        )
+                        self._suppress_current_call = True
+                        self._preserve_tool_wrapper = True
+                        self.current_func_name = None
+                        self._append_normal_text(
+                            (self._pending_tool_prefix or "")
+                            + current_slice[: end_angle + 1],
+                            normal_text_chunks,
+                        )
+                        self._pending_tool_prefix = None
+                        self.parsed_pos += end_angle + 1
+                        continue
+
+                    self._pending_tool_prefix = None
+                    self._pending_tool_separator = None
+                    self._suppress_current_call = False
 
                     self.current_tool_id += 1
                     self.current_tool_name_sent = True
@@ -309,7 +376,11 @@ class Qwen3CoderDetector(BaseFormatDetector):
             # -------------------------------------------------------
             # 3. Parameter: <parameter=name>value...
             # -------------------------------------------------------
-            if current_slice.startswith(self.parameter_prefix):
+            if (
+                self.is_inside_tool_call
+                and self.current_func_name is not None
+                and current_slice.startswith(self.parameter_prefix)
+            ):
                 name_end = current_slice.find(">")
                 if name_end != -1:
                     value_start_idx = name_end + 1
@@ -393,7 +464,16 @@ class Qwen3CoderDetector(BaseFormatDetector):
             # -------------------------------------------------------
             # 4. Function End: </function>
             # -------------------------------------------------------
-            if current_slice.startswith(self.function_end_token):
+            if self.is_inside_tool_call and current_slice.startswith(
+                self.function_end_token
+            ):
+                if self.current_func_name is None:
+                    self._append_unparsed_text(
+                        self.function_end_token, normal_text_chunks
+                    )
+                    self._suppress_current_call = False
+                    self.parsed_pos += len(self.function_end_token)
+                    continue
                 if not self.json_started:
                     calls.append(
                         ToolCallItem(tool_index=self.current_tool_id, parameters="{")
@@ -410,10 +490,25 @@ class Qwen3CoderDetector(BaseFormatDetector):
             # -------------------------------------------------------
             # 5. Tool Call End: </tool_call>
             # -------------------------------------------------------
-            if current_slice.startswith(self.tool_call_end_token):
+            if self.is_inside_tool_call and current_slice.startswith(
+                self.tool_call_end_token
+            ):
+                if self._pending_tool_prefix is not None:
+                    self._append_normal_text(
+                        self._pending_tool_prefix + self.tool_call_end_token,
+                        normal_text_chunks,
+                    )
+                    self._pending_tool_prefix = None
+                elif self._preserve_tool_wrapper:
+                    self._append_normal_text(
+                        self.tool_call_end_token, normal_text_chunks
+                    )
+                else:
+                    self._pending_tool_separator = ""
                 self.parsed_pos += len(self.tool_call_end_token)
                 self.is_inside_tool_call = False  # [FIX] Exit tool call region
-                self._pending_tool_separator = ""
+                self._suppress_current_call = False
+                self._preserve_tool_wrapper = False
                 continue
 
             # -------------------------------------------------------
@@ -427,8 +522,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
             if next_open_angle == -1:
                 # This entire segment is plain text
-                if not self.is_inside_tool_call:
-                    self._append_normal_text(current_slice, normal_text_chunks)
+                self._append_unparsed_text(current_slice, normal_text_chunks)
                 # [FIX] If inside tool call, discard this text (usually \n), don't append
                 self.parsed_pos += len(current_slice)
                 continue
@@ -455,16 +549,14 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     break  # Wait for more
                 else:
                     # Just a plain '<' symbol
-                    if not self.is_inside_tool_call:
-                        self._append_normal_text("<", normal_text_chunks)
+                    self._append_unparsed_text("<", normal_text_chunks)
                     self.parsed_pos += 1
                     continue
 
             else:
                 # '<' is in the middle
                 text_segment = current_slice[:next_open_angle]
-                if not self.is_inside_tool_call:
-                    self._append_normal_text(text_segment, normal_text_chunks)
+                self._append_unparsed_text(text_segment, normal_text_chunks)
                 # [FIX] If inside tool call, discard whitespace/text before Tag
                 self.parsed_pos += next_open_angle
                 continue
@@ -477,6 +569,28 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
         normal_text = "".join(normal_text_chunks) if normal_text_chunks else ""
         return StreamingParseResult(calls=calls, normal_text=normal_text)
+
+    def _append_unparsed_text(self, text: str, chunks: List[str]) -> None:
+        if self._pending_tool_prefix is not None:
+            self._pending_tool_prefix += text
+        elif (
+            not self.is_inside_tool_call
+            or self._suppress_current_call
+            or self._preserve_tool_wrapper
+        ):
+            self._append_normal_text(text, chunks)
+
+    def finish(self, tools: List[Tool]) -> StreamingParseResult:
+        # Only flush unrecognized syntax. An unfinished accepted call must not
+        # silently become prose or have fabricated argument-closing delimiters.
+        chunks = []
+        if self.current_func_name is None:
+            self._append_normal_text(
+                (self._pending_tool_prefix or "") + self._buffer, chunks
+            )
+            self._pending_tool_prefix = None
+            self._buffer = ""
+        return StreamingParseResult(normal_text="".join(chunks))
 
     def _append_normal_text(self, text: str, chunks: List[str]) -> None:
         if self._pending_tool_separator is not None:
