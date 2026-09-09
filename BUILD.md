@@ -22,18 +22,18 @@ assumed equivalent.
 
 The earlier v2.1.2/v2.3 SGLang wheel from source commit `836206a0ad` has SHA-256
 `96cb28701ac6f2ad1523e5607218f4fa68d9f9bb26041d6f36f36e2a39362542`.
-It does not contain the v2.3.1 GDN correction. v2.3.1 was tested with updated
-Python/Triton sources on this same dependency stack; no new prebuilt wheel is
-distributed.
+It does not contain the later v2.3.1 or v2.4.0 source changes. v2.4.0 was checked
+with updated Python/JIT sources on this same dependency stack; no new prebuilt
+wheel is distributed.
 
 ## Native build
 
-To use the v2.3.1 correction, install the updated source; keeping the older
-v2.3 wheel alone does not apply it. Use a clean checkout of
-`pennyroyal-v2.3.1.1`, which includes the launchers, chat template, and FR-Spec
-map. The executable change is commit `739aff3dc59958101882c75c2e4fb2e6d69d99bd`.
-An existing v2.3.1 installation needs no runtime rebuild for the v2.3.1.1
-launcher/template update.
+To use v2.4.0, build/install the updated source; keeping an older wheel alone
+does not apply it. Use a clean checkout of `pennyroyal-v2.4.0`, which includes
+the launchers, pinned chat template, and FR-Spec map. The last runtime-source
+commit is `4aaf531cafd8bccaaed48ce562ab6bc83aca2d8c`; release documentation
+sits above it. Existing model weights, dependency versions and launch settings
+do not need changing for this update.
 Create an isolated Python 3.12 environment:
 
 ```bash

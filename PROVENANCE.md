@@ -6,16 +6,16 @@
 |---|---|
 | Upstream | `https://github.com/sgl-project/sglang.git` |
 | Canonical branch | `pennyroyal-main-sm120-final` |
-| Executable source HEAD | `739aff3dc59958101882c75c2e4fb2e6d69d99bd` |
+| Executable source HEAD | `4aaf531cafd8bccaaed48ce562ab6bc83aca2d8c` |
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Local runtime commits | 27, including the fully reverted graph trial; excludes docs/recipe-only commits |
-| Maintenance test base package | `sglang==0.5.19.dev492+g836206a0a` plus the v2.3.1 source correction |
-| Release | v2.3.1.1 |
-| Git tag | `pennyroyal-v2.3.1.1` |
+| Local runtime commits | 35, including the fully reverted graph trial; excludes docs/recipe-only commits |
+| Qualification dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.4.0 Python/JIT source |
+| Release | v2.4.0 |
+| Git tag | `pennyroyal-v2.4.0` |
 
 The release includes launch recipes, documentation, and measurement summaries.
-v2.3.1.1 keeps the v2.3.1 executable source and dependencies unchanged; it
-updates the launch recipes to CPU image preprocessing and the pinned
+v2.4.0 updates runtime source while retaining the existing dependency stack,
+launch configurations, CPU image preprocessing and pinned
 [Froggeric v22.5 template](configs/pennyroyal/templates/README.md).
 The earlier 27B dated release
 remains reachable through `qwen38-dflash2-pro6000-20260824`; its useful results
@@ -36,9 +36,29 @@ no change to the released graph implementation. Dependencies and launch
 settings are unchanged. [CHANGES.md](CHANGES.md) records the focused
 two-profile regression scope; existing performance results are not refreshed.
 
+## v2.4.0 source provenance
+
+The release adds eight reviewed source commits above `739aff3dc5`, ending at
+`4aaf531cafd8`. QSA prefill preparation and short-extend bounds, no-bias routing
+and GPU dependency ordering, dispatched-request cleanup, explicit Chat effort
+precedence, and tool-markup handling are described with upstream credits in
+[CHANGES.md](CHANGES.md#v240--maintenance-and-faster-flash-next-prefill).
+
+The published runtime/test files match the source used for both-profile
+checks. The package version in the table identifies the dependency environment,
+not a prebuilt wheel containing the new changes. Build/install the release
+source using [BUILD.md](BUILD.md). No new model weights, token map, compiler,
+CUDA, PyTorch, FlashInfer or NIXL version is required by this update.
+
+The prefill comparison uses source `739aff3dc5` before and `4aaf531cafd8` after,
+the same Flash-Next ModelOpt NVFP4 checkpoint, and the same TP1 context/pool
+configuration. It measures the combined update rather than attributing a
+percentage to any one commit. [RESULTS.md](RESULTS.md#pennyroyal-v240--prefill-and-maintenance)
+distinguishes server prefill from client time to first token.
+
 ## v2.3.1 maintenance provenance
 
-The only runtime change is `739aff3dc5`, adapted from SGLang
+That release's only runtime change was `739aff3dc5`, adapted from SGLang
 [#36014](https://github.com/sgl-project/sglang/pull/36014) by V-aerus
 (Hangshuai He), head `bf5d4227dde4e532b4668327a8d6dcc4d79d9c2b`.
 It aligns paired Triton GDN verification and recovery with packed decode's

@@ -22,11 +22,15 @@ from sglang.srt.layers.attention.qsa.config import (
     is_qwen_qsa,
     parse_qsa_profile,
 )
-from sglang.srt.layers.attention.qsa.kernel import qsa_sparse_attention
+from sglang.srt.layers.attention.qsa.kernel import (
+    QSA_PREFILL_ALL_VISIBLE_MAX_BATCH,
+    qsa_sparse_attention,
+)
 from sglang.srt.layers.attention.qsa.metadata import (
     QSAIndexerMetadata,
     build_group_ring_slots,
     build_pending_ring_slots,
+    build_qsa_row_ranges,
     build_rope_position_matrix,
     compressed_decode_view,
 )
@@ -236,6 +240,12 @@ class QwenSparseAttnBackend(AttentionBackend):
             Tuple[int, int, torch.dtype, torch.device],
             Tuple[torch.Tensor, torch.Tensor],
         ] = {}
+        self._qsa_prefill_compressed_scratch: Dict[
+            Tuple[int, int, torch.dtype, torch.device], torch.Tensor
+        ] = {}
+        self._qsa_prefill_indices_scratch: Dict[
+            Tuple[int, torch.device], torch.Tensor
+        ] = {}
         self._graph_seq_lens = None
         self._graph_token_to_batch = None
         self._graph_cu_seqlens_q = None
@@ -259,6 +269,17 @@ class QwenSparseAttnBackend(AttentionBackend):
         if forward_mode is None:
             return False
         return forward_mode.is_target_verify() or forward_mode.is_draft_extend_v2()
+
+    @staticmethod
+    def _can_use_qsa_prefill_all_visible(
+        max_length: int,
+        num_sequences: int,
+        token_topk: int,
+    ) -> bool:
+        return (
+            max_length <= token_topk
+            and num_sequences <= QSA_PREFILL_ALL_VISIBLE_MAX_BATCH
+        )
 
     def _require_chain_speculation(self, forward_mode, spec_info) -> None:
         if forward_mode is None or not forward_mode.is_target_verify():
@@ -542,7 +563,7 @@ class QwenSparseAttnBackend(AttentionBackend):
                 row_token_starts[rows] + blocks * compress_ratio - prefix_lens[rows],
                 torch.zeros_like(blocks),
             )
-        return write_locs, group_end_positions, rows, member_rows
+        return write_locs, group_end_positions, rows, member_rows, valid
 
     def _qsa_build_write_plan(
         self,
@@ -554,9 +575,9 @@ class QwenSparseAttnBackend(AttentionBackend):
     ):
         """Plan the compressed writes for this forward, device-side only.
 
-        Returns (write_locs, group_end_positions, sequence_ids). The only
-        per-mode part is the block range each row owns, which is device
-        arithmetic over lengths the batch already carries.
+        Returns (write_locs, group_end_positions, sequence_ids, member_rows,
+        plan_valid). The only per-mode part is the block range each row owns,
+        which is device arithmetic over lengths the batch already carries.
         """
         ratio = self.token_to_kv_pool.qsa_compress_ratio
         lengths = sequence_lengths.long()
@@ -649,10 +670,43 @@ class QwenSparseAttnBackend(AttentionBackend):
         else:
             sequence_lengths = forward_batch.seq_lens.to(torch.int32)
             batch_size = sequence_lengths.numel()
-            if forward_batch.seq_lens_cpu is not None:
-                max_length = int(forward_batch.seq_lens_cpu[:batch_size].max())
-            else:
-                max_length = int(sequence_lengths.max())
+            seq_lens_cpu = forward_batch.seq_lens_cpu
+            if seq_lens_cpu is None and not forward_batch.forward_mode.is_decode():
+                prefix_lens_cpu = getattr(forward_batch, "extend_prefix_lens_cpu", None)
+                extend_lens_cpu = getattr(forward_batch, "extend_seq_lens_cpu", None)
+                if (
+                    prefix_lens_cpu is not None
+                    and extend_lens_cpu is not None
+                    and not (
+                        isinstance(prefix_lens_cpu, torch.Tensor)
+                        and prefix_lens_cpu.device.type != "cpu"
+                    )
+                    and not (
+                        isinstance(extend_lens_cpu, torch.Tensor)
+                        and extend_lens_cpu.device.type != "cpu"
+                    )
+                    and len(prefix_lens_cpu) >= batch_size
+                    and len(extend_lens_cpu) >= batch_size
+                ):
+                    seq_lens_cpu = tuple(
+                        int(prefix_lens_cpu[i]) + int(extend_lens_cpu[i])
+                        for i in range(batch_size)
+                    )
+            if seq_lens_cpu is None and not forward_batch.forward_mode.is_decode():
+                raise ValueError(
+                    "QSA prefill metadata requires scheduler-maintained CPU "
+                    "sequence or extend lengths"
+                )
+            if (
+                isinstance(seq_lens_cpu, torch.Tensor)
+                and seq_lens_cpu.device.type != "cpu"
+            ):
+                raise ValueError("QSA seq_lens_cpu must be host-resident")
+            max_length = (
+                int(sequence_lengths.max())
+                if seq_lens_cpu is None
+                else max(int(seq_lens_cpu[i]) for i in range(batch_size))
+            )
             row_req_pool_indices = forward_batch.req_pool_indices[:batch_size]
             token_slot_table = self.req_to_token[
                 row_req_pool_indices.long(), :max_length
@@ -700,6 +754,7 @@ class QwenSparseAttnBackend(AttentionBackend):
         group_positions = None
         group_sequence_ids = None
         group_member_rows = None
+        group_plan_valid = None
         decode_page_table = None
         decode_lengths = None
         decode_logical_positions = None
@@ -710,13 +765,17 @@ class QwenSparseAttnBackend(AttentionBackend):
             self.qsa_profile is None
             or self.qsa_profile.variant == QSA_VARIANT_COMPRESSED
         ):
-            write_locs, group_positions, group_sequence_ids, group_member_rows = (
-                self._qsa_build_write_plan(
-                    forward_batch=forward_batch,
-                    speculative_paged=speculative_paged,
-                    token_slot_table=token_slot_table,
-                    sequence_lengths=sequence_lengths,
-                )
+            (
+                write_locs,
+                group_positions,
+                group_sequence_ids,
+                group_member_rows,
+                group_plan_valid,
+            ) = self._qsa_build_write_plan(
+                forward_batch=forward_batch,
+                speculative_paged=speculative_paged,
+                token_slot_table=token_slot_table,
+                sequence_lengths=sequence_lengths,
             )
             decode_like = speculative_paged or forward_batch.forward_mode.is_decode()
             if decode_like:
@@ -767,6 +826,62 @@ class QwenSparseAttnBackend(AttentionBackend):
                             sequence_ids=group_sequence_ids.long(),
                             compress_ratio=self.compress_ratio,
                         )
+        prefill_compressed_cu_seqlens = None
+        prefill_row_starts = None
+        prefill_row_ends = None
+        prefill_compressed_scratch = None
+        prefill_all_visible = False
+        prefill_all_visible_scratch = None
+        if (
+            (
+                self.qsa_profile is None
+                or self.qsa_profile.variant == QSA_VARIANT_COMPRESSED
+            )
+            and not speculative_paged
+            and not forward_batch.forward_mode.is_decode()
+        ):
+            num_sequences = int(sequence_lengths.numel())
+            if seq_lens_cpu is None or len(seq_lens_cpu) < num_sequences:
+                raise ValueError(
+                    "QSA prefill pack requires the scheduler's CPU sequence lengths"
+                )
+            pool = self.token_to_kv_pool
+            prefill_all_visible = self._can_use_qsa_prefill_all_visible(
+                max_length,
+                num_sequences,
+                pool.qsa_token_topk,
+            )
+            if prefill_all_visible:
+                prefill_all_visible_scratch = self._get_qsa_prefill_indices_scratch(
+                    token_to_batch_idx.numel(),
+                    pool.qsa_token_topk + self.compress_ratio - 1,
+                    sequence_lengths.device,
+                )
+            else:
+                packed_blocks = sum(
+                    int(seq_lens_cpu[i]) // self.compress_ratio
+                    for i in range(num_sequences)
+                )
+                query_positions = forward_batch.positions.flatten()[
+                    : token_to_batch_idx.numel()
+                ]
+                (
+                    prefill_row_starts,
+                    prefill_row_ends,
+                    prefill_compressed_cu_seqlens,
+                ) = build_qsa_row_ranges(
+                    sequence_lengths,
+                    query_positions,
+                    token_to_batch_idx,
+                    self.compress_ratio,
+                )
+                prefill_compressed_scratch = self._get_qsa_prefill_compressed_scratch(
+                    packed_blocks,
+                    pool.qsa_index_kv_heads,
+                    pool.qsa_index_head_dim,
+                    pool.qsa_compressed_flat.dtype,
+                    pool.qsa_compressed_flat.device,
+                )
         indexer_metadata = QSAIndexerMetadata(
             sequence_lengths=sequence_lengths,
             token_to_batch_idx=token_to_batch_idx,
@@ -780,12 +895,19 @@ class QwenSparseAttnBackend(AttentionBackend):
             compress_group_positions=group_positions,
             compress_sequence_ids=group_sequence_ids,
             compress_member_rows=group_member_rows,
+            compress_plan_valid=group_plan_valid,
             decode_page_table=decode_page_table,
             decode_lengths=decode_lengths,
             decode_logical_positions=decode_logical_positions,
             pending_ring_slots=pending_ring_slots,
             compress_group_ring_locs=compress_group_ring_locs,
             extend_rope_matrix=extend_rope_matrix,
+            prefill_compressed_cu_seqlens=prefill_compressed_cu_seqlens,
+            prefill_row_starts=prefill_row_starts,
+            prefill_row_ends=prefill_row_ends,
+            prefill_compressed_scratch=prefill_compressed_scratch,
+            prefill_all_visible=prefill_all_visible,
+            prefill_all_visible_scratch=prefill_all_visible_scratch,
         )
         return QwenSparseAttnMetadata(
             sequence_lengths=sequence_lengths,
@@ -1512,6 +1634,45 @@ class QwenSparseAttnBackend(AttentionBackend):
             )
             self._fa2_scratch[key] = buffers
         return buffers[0][:capacity], buffers[1][:capacity]
+
+    def _get_qsa_prefill_compressed_scratch(
+        self,
+        capacity: int,
+        num_kv_heads: int,
+        head_dim: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        # QSA layers consume the packed keys before the next layer overwrites
+        # them on the model stream. This is scratch, not persisted cache state;
+        # keep one high-water allocation per layout, not one per layer/forward.
+        key = (num_kv_heads, head_dim, dtype, device)
+        buffer = self._qsa_prefill_compressed_scratch.get(key)
+        if buffer is None or buffer.shape[0] < capacity:
+            buffer = torch.empty(
+                (capacity, num_kv_heads, head_dim),
+                dtype=dtype,
+                device=device,
+            )
+            self._qsa_prefill_compressed_scratch[key] = buffer
+        return buffer[:capacity]
+
+    def _get_qsa_prefill_indices_scratch(
+        self,
+        capacity: int,
+        width: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        key = (width, device)
+        buffer = self._qsa_prefill_indices_scratch.get(key)
+        if buffer is None or buffer.shape[0] < capacity:
+            buffer = torch.empty(
+                (capacity, width),
+                dtype=torch.int32,
+                device=device,
+            )
+            self._qsa_prefill_indices_scratch[key] = buffer
+        return buffer[:capacity]
 
     def _get_trtllm_sparse_tables(self, batch, pages_per_row, page, device):
         key = (batch, pages_per_row, device)

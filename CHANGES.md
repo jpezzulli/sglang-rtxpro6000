@@ -1,23 +1,60 @@
 # Cumulative changes and upstream status
 
 The current runtime is the ordered range
-`e7e78940168f..739aff3dc599`. All 27 runtime commits remain in source history,
+`e7e78940168f..4aaf531cafd8`. All 35 runtime commits remain in source history,
 including the graph-lifetime trial and its full revert. The integration base
 is unchanged. The v2.1.1 upstream check fetched `main` at
 `cdbfe90b4a31079859817c148ef4498240ec2580` on 2026-08-29; older PR-status
 tables below retain their stated observation dates. Version 2.1.2 added the
 two maintenance corrections below, without a rebase. v2.3 adds the
 FR-Spec launch configuration using the same executable. v2.3.1 adds only the
-GDN rounding correction described below.
-
-**v2.3 is the main performance release—no need to upgrade if it’s working for you.**
-
-**Optional v2.3.1.1:** Both profiles use [Froggeric v22.5](https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates) and CPU image preprocessing for a heavy-vision agentic edge case when GPU memory is nearly full.
+GDN rounding correction described below. v2.4.0 adds prefill and maintenance
+corrections while retaining the same dependency stack and launch settings.
 
 “Local” does not mean a permanent fork requirement. It means the exact active
 commit has not merged upstream. Where a PR has a later refined head, that is
 shown separately rather than pretending the local commit and PR head are
 identical.
+
+## v2.4.0 — Maintenance and faster Flash-Next prefill
+
+Released September 9, 2026. An optional update for lower prefill overhead and
+request/tool-handling fixes; no new decode-speedup claim.
+
+| Affected profile | What changed in normal terms | Upstream credit / lineage |
+|---|---|---|
+| **Flash-Next** | Reuse prefill preparation and gather compressed attention keys more efficiently, reducing repeated setup and CPU/GPU synchronization. | Adapted [#38209](https://github.com/sgl-project/sglang/pull/38209). |
+| **Flash-Next** | Keep padded entries within valid memory when processing very short QSA extensions, without concealing invalid real entries. | Adapted the validity-aware policy from [#37786](https://github.com/sgl-project/sglang/pull/37786). |
+| **Flash-Next** | Remove an unnecessary routing buffer and wait for GPU inputs to be ready before reading them. | Adapted [#36811](https://github.com/sgl-project/sglang/pull/36811), its Qwen4 port [#38308](https://github.com/sgl-project/sglang/pull/38308), and [#38290](https://github.com/sgl-project/sglang/pull/38290). |
+| **Both profiles** | Stop abandoned streaming work and release its request resources after a client disconnects, including cancellation around dispatch. | Adapted [#35255](https://github.com/sgl-project/sglang/pull/35255), with local lifecycle corrections. |
+| **Both profiles** | Honor an explicitly requested Chat reasoning effort instead of overwriting it with the launcher default. Default medium and Responses API behavior are unchanged. | Local correction informed by [#38105](https://github.com/sgl-project/sglang/pull/38105) and [#38338](https://github.com/sgl-project/sglang/pull/38338); not a verbatim import of either proposal. |
+| **Both profiles** | Keep bare or undeclared function markup as text rather than inventing tool calls. Preserve valid parallel calls and rejected example text across streaming boundaries. | Adapted [#38624](https://github.com/sgl-project/sglang/pull/38624), with local nested-markup corrections; retains the earlier #37408 separator fix. |
+
+Flash-Next cold-prefill throughput increased approximately **4–10%** in the
+64K and 490K measurements, using the same server-prefill timing window before
+and after the changes. Cached-prefix extension and NIXL restart restoration
+remain verified; warm-prefill speedup was not separately measured. See the
+[compact comparison](RESULTS.md#pennyroyal-v240--prefill-and-maintenance).
+
+Both 27B FP8/DFlash2 and Flash-Next NVFP4/native MTP passed startup/API smoke,
+64K/490K prefill, single/concurrent decode, controlled disconnect cleanup and
+NIXL restart-restoration checks. Context, full token pools, graphs, speculative
+decoding, Froggeric v22.5 and CPU image preprocessing are retained. The 27B
+model is dense: QSA and MoE-router changes apply to Flash-Next, while the API
+and tool-parser corrections are shared.
+
+The eight source commits are `9d60890c9e`, `2bac74119f`, `21b1bdb0f7`,
+`2c41489fbe`, `acd23bbe1f`, `dba83fad2a`, `7f3c4bf488`, and `4aaf531caf`.
+Build/install the updated source; an older wheel alone does not contain them.
+The launchers derive a new NIXL namespace for the new source without deleting
+older cache directories. [RUN.md](RUN.md) explains the upgrade behavior.
+
+## v2.3.1.1 — Template and CPU image preprocessing
+
+Released September 6, 2026. Both profiles use the pinned
+[Froggeric v22.5 template](configs/pennyroyal/templates/README.md) and CPU image
+preprocessing for a heavy-vision agentic edge case when GPU memory is nearly
+full. Runtime source and dependencies were unchanged from v2.3.1.
 
 ## v2.3.1 — GDN rounding maintenance
 
@@ -147,7 +184,7 @@ Both supported models then completed ordinary 64K prefill, one 490K
 three-needle prefill, one 1,024-token decode, four simultaneous 1,024-token
 decodes, and post-restart NIXL restoration. Each restart restored 489,856
 tokens and retained all three exact needles. The final Flash-Next canonical
-namespace was separately seeded and restart-verified after promotion.
+namespace was separately seeded and verified across a restart.
 
 ## Version 2.1.0: bounded upstream correctness sync
 
@@ -232,6 +269,14 @@ RecoverSSM, complete hybrid-state persistence, and three-axis fused mRoPE.
 | `e2c6f4a4f8` | Adapts PRs [#37962](https://github.com/sgl-project/sglang/pull/37962) and [#37408](https://github.com/sgl-project/sglang/pull/37408) | One-rank sampler synchronization and Qwen3 Coder streaming separators | Exact-base red/green tests, sequential review, and both-profile API/decode/prefill/restore regressions. This commit also contains a graph-lifetime trial, fully reverted by the next commit. |
 | `836206a0ad` | Local disposition of PR [#37448](https://github.com/sgl-project/sglang/pull/37448) | Restores pre-existing graph behavior and tests | Reverts the rejected graph-lifetime trial exactly to the v2.1.1 base, leaving only the two maintenance corrections above. Original launch shapes were requalified. |
 | `739aff3dc5` | Adapts PR [#36014](https://github.com/sgl-project/sglang/pull/36014) | Paired Triton GDN verification and accepted-state recovery | Aligns beta rounding with packed decode, including recovery and ReplaySSM propagation, while preserving mixed-backend contracts. Focused GPU reproduction, final review, and both-profile runtime/NIXL regressions passed. |
+| `9d60890c9e` | Adapts #37786 | Flash-Next QSA short extensions | Bounds padded compression reads while preserving real-index validation. |
+| `2bac74119f` | Adapts #38209 | Flash-Next QSA prefill | Reuses row preparation and scratch space and packs compressed keys. |
+| `21b1bdb0f7` | Adapts #36811/#38308/#38290 | Flash-Next MoE routing | Removes zero-bias allocation and fences input reads behind GPU dependencies. |
+| `2c41489fbe` | Adapts #35255 | Shared request lifecycle | Cleans up dispatched work after disconnects while preserving cancellation ownership. |
+| `acd23bbe1f` | Local correction informed by #38105/#38338 | Chat reasoning-effort precedence | Explicit Chat values win; absent defaults and Responses semantics stay unchanged. |
+| `dba83fad2a` | Adapts #38624 | Shared Qwen3 Coder tool parser | Requires valid wrappers/names and preserves rejected markup as ordinary text. |
+| `7f3c4bf488` | Local parser refinement | Nested rejected markup | Keeps nested rejected bodies literal without losing mixed-wrapper text. |
+| `4aaf531caf` | Local lifecycle refinement | Pending and parallel request cancellation | Defers abort until dispatch and tracks generated parallel request IDs. |
 
 ## PRs opened by this project
 

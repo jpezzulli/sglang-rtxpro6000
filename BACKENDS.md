@@ -15,6 +15,11 @@ The attention, GDN, MoE, and verification backends below remain in use.
 The 27B/DFlash2 launcher is unchanged. Source credit and map identity are
 listed in [PROVENANCE.md](PROVENANCE.md#v23-fr-spec-provenance).
 
+v2.4.0 keeps those backend selections. It reduces QSA prefill preparation and
+corrects short-extend bounds, removes unnecessary softmax-router allocation,
+and waits for GPU input dependencies before routing reads. The 27B model is
+dense and does not select Flash-Next's QSA or MoE-router paths.
+
 ## Qwen3.8 Flash-Next
 
 | Component or phase | Resolved implementation | Selection | Change / evidence |
@@ -100,14 +105,13 @@ and auto-selected FP4/BF16 GEMM runners.
 | DFlash fused KV materialization | Enabled | Upstream base | five-layer/8-head startup line |
 | Target and draft KV | FP8 E4M3 | Explicit | 1,118,784-token startup pools |
 | GDN decode/prefill/state verify | Triton | Resolved linear backend | startup args and qualified run |
-| Target routed-expert MoE | Triton FP8 MoE | Auto resolves to Triton because A2A is `none` | server args plus `Fp8MoEMethod.create_moe_runner` |
+| Target feed-forward layers | Dense FP8 MLP | 27B model architecture; no routed-expert MoE | model configuration and source |
 | Target prefill / verify / draft graphs | Breakable prefill; full fixed-width verify | Automatic capture | startup graph-capture lines and live `cuda graph: True` |
 | Multimodal attention | `triton_attn` | Automatic | startup log; mRoPE fixed by `64ecd64924` |
 | Sampling / grammar | FlashInfer / XGrammar | Automatic | startup args |
 | HiCache transfer | NIXL POSIX | Explicit | persistent restore qualification |
 | Persistent state | target KV, Mamba/GDN, DFlash2 sidecar | Local NIXL integration | `8b786639e4`, `067c639c0a` |
 
-No separate local DeepGEMM SM120 patch is part of this 19-commit runtime stack.
-With `moe_runner_backend=auto` and A2A `none`, the active FP8 method's source
-resolver selects Triton rather than DeepGEMM. The DFlash2 support used here
+The 27B profile is dense, so the Flash-Next routed-expert optimizations do not
+apply to it. No separate local DeepGEMM SM120 patch is claimed. DFlash2 support
 comes from the upstream base plus the explicit XQA mask and NIXL fixes above.

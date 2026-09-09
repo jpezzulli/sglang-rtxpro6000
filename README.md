@@ -7,9 +7,18 @@ This repository contains the complete SGLang-derived source used on one
 NVIDIA RTX PRO 6000 Blackwell Workstation Edition (96 GB, SM120, TP=1). It is
 not two builds: both model configurations run from the same patched source.
 
-**v2.3 is the main performance release—no need to upgrade if it’s working for you.**
+**Pennyroyal v2.4.0 — maintenance fixes and faster Flash-Next prefill.**
 
-**Optional v2.3.1.1:** Both profiles use [Froggeric v22.5](https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates) and CPU image preprocessing for a heavy-vision agentic edge case when GPU memory is nearly full.
+Reduced Flash-Next prefill overhead, with approximately **4–10% higher throughput
+observed in cold-prefill tests at 64K and 490K**. Cached-prefix extension and
+NIXL restart restoration remain verified. Both profiles retain their full
+context, token pools, speculative decoding, and HiCache/NIXL configurations.
+
+The update also corrects disconnected-request cleanup, explicit Chat reasoning
+effort overrides, and bare/undeclared tool-markup handling. This is an optional
+update, not an urgent upgrade or a new decode-speedup claim.
+[Changes and upstream credits](CHANGES.md#v240--maintenance-and-faster-flash-next-prefill) ·
+[Build/update instructions](BUILD.md).
 
 ## Verified models
 
@@ -23,21 +32,26 @@ single RTX PRO 6000. The links point directly to the model downloads:
 
 ### Flash-Next performance at a glance
 
-Measured September 5–6, 2026, with **v2.3 FR-Spec on one RTX PRO 6000, TP1**,
+Measured September 9, 2026, with **v2.4.0 and FR-Spec on one RTX PRO 6000, TP1**,
 keeping 524,288-token context, 824,384 KV tokens, and HiCache/NIXL enabled.
 These are dated measurements, not guaranteed speeds.
 
 | Workload | Speed | Timing / result |
 |---|---:|---|
-| 64K cold prefill — 63,864 input tokens | **13,070 tok/s** | 4.886 s to first token; exact READY |
-| 490K cold prefill — 489,879 input tokens | **7,989 tok/s** | 61.319 s to first token; all three needles found |
-| Single-request decode — 1,024 output tokens | **171.93 tok/s** | Median of six runs; excludes time to first token |
-| Four simultaneous requests — 1,024 output tokens each | **447.04 tok/s aggregate** | Median of six runs; includes time to first token and the slowest response |
+| 64K cold prefill — 63,864 input tokens | **14,842 tok/s** | Server prefill rate; 5.242 s to first token; exact READY |
+| 490K cold prefill — 489,879 input tokens | **8,773 tok/s** | Server prefill rate; 60.613 s to first token; all three needles found |
+| Single-request decode — 1,024 output tokens | **181.72 tok/s** | Median of three runs; excludes time to first token |
+| Four simultaneous requests — 1,024 output tokens each | **446.49 tok/s aggregate** | Median of three runs; includes time to first token and the slowest response |
 
-Cold prefill counts input tokens processed without a matching cached prefix.
-The four-request figure is the combined output rate, not the speed of each
-response. See [RESULTS.md](RESULTS.md#pennyroyal-v23--flash-next-fr-spec) for
-the baseline comparison and full measurement details.
+Prefill rates divide input tokens by the server's initial-prefill time; client
+time to first token also includes other request processing. The 4–10% gain
+compares that same server timing window before and after this update, not the
+TTFT-based rates in older tables. These are single cold-prefill observations;
+warm-prefill speedup was not separately measured. Decode varies with workload
+and acceptance, and no decode improvement is claimed. The four-request figure
+is combined throughput, not each response's speed.
+See [RESULTS.md](RESULTS.md#pennyroyal-v240--prefill-and-maintenance) for the
+comparison; earlier v2.3 measurements remain there as dated history.
 
 **In real agentic use:** a session on September 6 sustained
 **155 tok/s** across nine responses of at least 1,024 output tokens, with
@@ -111,7 +125,7 @@ limitations are in the
 [validation report](https://github.com/jpezzulli/pennyroyal-validation/blob/main/results/qwen38-flash-next-frspec-20260905.md).
 
 v2.3 uses the same executable and dependencies as v2.1.2.
-Start with the [FR-Spec launch guide](RUN.md#launch-flash-next-with-fr-spec-v23);
+Start with the [FR-Spec launch guide](RUN.md#launch-flash-next-with-fr-spec);
 the non-FR Flash-Next launcher remains available.
 
 ## Previous v2.1.2 — maintenance release
@@ -167,21 +181,21 @@ The important work is architectural, not merely a collection of launch flags:
 | Item | Value |
 |---|---|
 | Canonical branch | `pennyroyal-main-sm120-final` |
-| Current executable source | `739aff3dc59958101882c75c2e4fb2e6d69d99bd` |
-| Current release | **v2.3.1** |
-| Git tag | `pennyroyal-v2.3.1` |
+| Current executable source | `4aaf531cafd8bccaaed48ce562ab6bc83aca2d8c` |
+| Current release | **v2.4.0** |
+| Git tag | `pennyroyal-v2.4.0` |
 | Initial unified dated tag | `sglang-rtxpro6000-20260827` |
 | Earlier 27B dated tag | `qwen38-dflash2-pro6000-20260824` |
 | Upstream integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Maintenance test base package | `0.5.19.dev492+g836206a0a` plus the v2.3.1 source correction |
+| Qualification dependency base | `0.5.19.dev492+g836206a0a` with the updated v2.4.0 Python/JIT source |
 | Python / PyTorch | `3.12.13` / `2.13.0+cu130` |
 | CUDA / compiler | CUDA `13.3` (NVCC `13.3.73`) / GCC `15.3.1` |
 | FlashInfer / NIXL | `0.6.17` / `1.4.0` |
 | GPU / driver | RTX PRO 6000 96 GB, SM120 / `610.57.04` |
 
-v2.3.1 adds the GDN rounding correction to v2.3's FR-Spec release. Install
-from the updated source using [BUILD.md](BUILD.md); the older v2.3 wheel does
-not contain this correction. Source lineage and upstream relationships are in
+Install v2.4.0 from the updated source using [BUILD.md](BUILD.md); retaining
+an older wheel alone does not apply these changes. Dependency versions and
+launch settings are unchanged. Source lineage and upstream relationships are in
 [CHANGES.md](CHANGES.md) and [PROVENANCE.md](PROVENANCE.md).
 
 ## Qualified configuration matrix
@@ -200,11 +214,11 @@ executes or accumulates entirely in BF16.
 | Speculative KV datatype | DFlash2 draft: FP8 E4M3 | native-MTP: FP8 E4M3 |
 | Recurrent/GDN SSM state | FP32 | BF16 |
 | Convolution state | BF16 | BF16 |
-| MoE backend | Triton FP8 MoE; auto resolves to Triton with A2A `none` | FlashInfer CUTLASS for target and native MTP |
+| MoE backend | Not applicable: dense FP8 feed-forward layers | FlashInfer CUTLASS for target and native MTP |
 | Target attention | FlashInfer prefill; TRTLLM-MHA/XQA decode and fixed-width verify | QSA Triton sparse prefill; FlashInfer QSA wrapper resolving to XQA for sparse decode; general attention FlashInfer |
 | Linear/GDN attention | Triton decode, prefill, and state-writing verify | FlashInfer decode/prefill; WY output-only verify/recovery in `none` mode |
 | Speculative backend | DFlash2, 8 draft tokens, 2,048-token window | native NEXTN, 3 steps, top-k 1, 4 draft tokens |
-| Draft vocabulary | unchanged DFlash2 | v2.3: 65,536-ID FR-Spec map; full target vocabulary unchanged |
+| Draft vocabulary | unchanged DFlash2 | 65,536-ID FR-Spec map introduced in v2.3; full target vocabulary unchanged |
 | Served context | 524,288, factor-2 YaRN target and draft | 524,288, factor-2 YaRN |
 | KV page size | 64 | 64 |
 | Current GPU KV capacity | 1,118,784 target and draft tokens | 824,384 target and native-MTP tokens |
@@ -225,7 +239,7 @@ in [RESULTS.md](RESULTS.md) rather than silently merging their allocations.
 | Target decode attention | TRTLLM-MHA with XQA | explicit decode backend; SM120 supported path | controlled and agentic decode |
 | Fixed-width target verification | TRTLLM-MHA/XQA with packed causal mask | local `0f159cd545` | graph-metadata regression; 1x/4x decode |
 | Linear/GDN decode, prefill, verify | Triton | resolved linear backend | startup configuration and long-context suite |
-| Target FP8 MoE | Triton | `auto` + A2A `none` resolves `Fp8MoEMethod` to Triton | server args plus source resolver |
+| Target feed-forward layers | Dense FP8 MLP | 27B model architecture; no routed-expert MoE | model configuration and source |
 | DFlash2 draft attention | FlashInfer | explicit draft backend | draft-runner startup line |
 | Draft local convolution | DFlash2 local-convolution path | merged upstream PR #35371 | DFlash2 startup and decode |
 | Candidate selection | folded into draft CUDA graph | upstream DFlash2 integration | graph-capture startup line |
@@ -238,8 +252,8 @@ in [RESULTS.md](RESULTS.md) rather than silently merging their allocations.
 
 The selected 27B target keeps `lm_head` in BF16. The quantized-head selector
 from upstream PR #35496 is present in the base but is not the source of this
-checkpoint's measured speed. No separate local DeepGEMM SM120 patch is claimed;
-this FP8 configuration resolves MoE to Triton.
+checkpoint's measured speed. The 27B model is dense; Flash-Next's MoE routing
+corrections do not apply to it. No separate local DeepGEMM SM120 patch is claimed.
 
 ## Resolved backends: Qwen3.8 Flash-Next
 
@@ -341,7 +355,7 @@ real and documented.
 ## Performance and qualification
 
 The [Flash-Next table above](#flash-next-performance-at-a-glance) shows the
-v2.3 measurements. The [earlier Flash-Next campaign](RESULTS.md#earlier-flash-next-campaign),
+v2.4.0 observations. The [earlier Flash-Next campaign](RESULTS.md#earlier-flash-next-campaign),
 including its source, clock settings, and quality results, remains in
 RESULTS.md as historical evidence. The separate 27B and third-party results
 below are not a matched A/B comparison with Flash-Next.
@@ -356,7 +370,7 @@ scope limits are preserved in [RESULTS.md](RESULTS.md#independent-tp2-fp8-valida
 ### Qwen3.8-27B FP8/DFlash2 — August 24, 2026 campaign
 
 Measured for the `qwen38-dflash2-pro6000-20260824` release on one RTX PRO
-6000 at TP1. These are retained 27B measurements, not a new v2.3.1 benchmark.
+6000 at TP1. These are retained 27B measurements, not a new v2.4.0 benchmark.
 
 | Test | Result |
 |---|---:|
@@ -453,7 +467,7 @@ OpenAI-compatible smoke requests, and cold/radix/NIXL cache distinctions.
 
 The cumulative history starts with the 2026-08-24 27B release, then layers the
 unified runtime and Flash-Next work on the same source line. The current active
-stack contains 27 runtime commits above its integration base, excluding
+stack contains 35 runtime commits above its integration base, excluding
 documentation and recipe-only commits. Major groups are:
 
 - Qwen3.8-27B/DFlash2: independent target/draft overrides, fixed-width XQA mask,
@@ -475,7 +489,11 @@ documentation and recipe-only commits. Major groups are:
   and launcher use the same runtime and kernels as v2.1.2.
 - v2.3.1 maintenance: align paired Triton GDN verification and accepted-state
   recovery with ordinary decode's gate rounding, adapted from #36014.
-- Open project PRs: #36520, #36524, and #35584.
+- v2.4.0: reduce Flash-Next prefill preparation, bound short QSA extensions,
+  correct routing dependency order, and improve shared request cancellation,
+  explicit reasoning-effort handling, and tool-markup parsing.
+- Project upstream submissions include #36520, #36524, and #35584; dated
+  status records are in CHANGES.md.
 - Closed project submissions retained in runtime history: #35583; transient
   ragged/DSpARK PR #35586 is documented but not in the active source.
 - Related upstream work: #30967, #35371, #35496, #35744, #35821, #36497,

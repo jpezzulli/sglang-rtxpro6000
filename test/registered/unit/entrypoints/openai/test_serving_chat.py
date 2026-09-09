@@ -612,6 +612,73 @@ class ServingChatTestCase(unittest.TestCase):
 
         self.assertEqual(req.reasoning_effort, "high")
 
+    def test_chat_explicit_effort_wins_at_request_to_template_boundary(self):
+        self.template_manager.chat_template_name = None
+        self.template_manager.jinja_template_content_format = "string"
+        self.tm.tokenizer.apply_chat_template.return_value = "rendered"
+        defaults = {"reasoning_effort": "medium", "enable_thinking": True, "custom": 7}
+        self.chat.default_chat_template_kwargs = defaults.copy()
+        cases = [
+            ({"reasoning_effort": "low"}, "low"),
+            ({"chat_template_kwargs": {"reasoning_effort": "xhigh"}}, "xhigh"),
+            (
+                {
+                    "reasoning_effort": "low",
+                    "chat_template_kwargs": {"reasoning_effort": "high"},
+                },
+                "high",
+            ),
+            (
+                {
+                    "reasoning_effort": "low",
+                    "chat_template_kwargs": {"reasoning_effort": None},
+                },
+                "low",
+            ),
+            ({}, "medium"),
+            ({"reasoning_effort": None}, "medium"),
+            ({"chat_template_kwargs": {"reasoning_effort": None}}, "medium"),
+        ]
+        for fields, expected in cases:
+            for thinking in (True, False):
+                with self.subTest(fields=fields, thinking=thinking):
+                    request_fields = fields.copy()
+                    request_fields["chat_template_kwargs"] = dict(
+                        fields.get("chat_template_kwargs", {}), enable_thinking=thinking
+                    )
+                    req = ChatCompletionRequest(
+                        model="x",
+                        messages=[{"role": "user", "content": "Hi"}],
+                        **request_fields,
+                    )
+                    _, normalized = self.chat._convert_to_internal_request(req)
+                    kwargs = self.tm.tokenizer.apply_chat_template.call_args.kwargs
+                    self.assertEqual(kwargs["reasoning_effort"], expected)
+                    self.assertEqual(normalized.reasoning_effort, expected)
+                    self.assertIs(kwargs["enable_thinking"], thinking)
+                    self.assertEqual(kwargs["custom"], 7)
+                    self.assertEqual(self.chat.default_chat_template_kwargs, defaults)
+
+    def test_shared_renderer_retains_responses_and_tokenize_precedence(self):
+        self.template_manager.chat_template_name = None
+        self.template_manager.jinja_template_content_format = "string"
+        self.tm.tokenizer.apply_chat_template.return_value = "rendered"
+        self.chat.default_chat_template_kwargs = {"reasoning_effort": "medium"}
+        for nested, expected in (
+            (None, "medium"),
+            ({"reasoning_effort": "high"}, "high"),
+        ):
+            with self.subTest(nested=nested):
+                req = ChatCompletionRequest(
+                    model="x",
+                    messages=[{"role": "user", "content": "Hi"}],
+                    reasoning_effort="low",
+                    chat_template_kwargs=nested,
+                )
+                self.chat._process_messages(req, is_multimodal=False)
+                kwargs = self.tm.tokenizer.apply_chat_template.call_args.kwargs
+                self.assertEqual(kwargs["reasoning_effort"], expected)
+
     def test_kimi_tool_call_keeps_template_default_thinking(self):
         self.template_manager.chat_template_name = None
         self.template_manager.jinja_template_content_format = "string"

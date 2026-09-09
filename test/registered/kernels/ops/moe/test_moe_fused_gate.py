@@ -15,13 +15,18 @@ tie-break choice) does not matter.
 
 from __future__ import annotations
 
+import importlib
+import re
 import sys
 from typing import Tuple
+from unittest.mock import patch
 
 import pytest
 import torch
+import triton
+import triton.language as tl
 
-from sglang.kernels.jit.utils import get_ci_test_range
+from sglang.kernels.jit.utils import get_ci_test_range, is_arch_support_pdl
 from sglang.kernels.ops.moe.moe_fused_gate import moe_fused_gate, moe_fused_gate_jit
 from sglang.test.ci.ci_register import register_cuda_ci
 
@@ -341,6 +346,148 @@ def test_moe_fused_gate_softmax_matches_aot(
     torch.testing.assert_close(
         dense_tri, _scatter_by_expert(aot_w, aot_i, num_experts), rtol=1e-3, atol=1e-3
     )
+
+
+@pytest.mark.parametrize("M", [1, 4, 8, 16, 32])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("renormalize", [False, True])
+def test_moe_fused_gate_softmax_none_bias_matches_zero_bias(M, dtype, renormalize):
+    torch.manual_seed(M)
+    scores = torch.randn(M, 512, dtype=dtype, device=DEVICE)
+    zero_bias = torch.zeros(512, dtype=torch.float32, device=DEVICE)
+    none_w, none_i = moe_fused_gate(
+        scores, None, topk=10, scoring_func="softmax", renormalize=renormalize
+    )
+    zero_w, zero_i = moe_fused_gate(
+        scores, zero_bias, topk=10, scoring_func="softmax", renormalize=renormalize
+    )
+    ref_w, ref_i = _reference_softmax(scores, 10, renormalize)
+    torch.testing.assert_close(none_w, zero_w, rtol=0, atol=0)
+    torch.testing.assert_close(none_i, zero_i, rtol=0, atol=0)
+    torch.testing.assert_close(none_w, ref_w, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(none_i, ref_i, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "bias_dtype", [None, torch.float32, torch.float16, torch.bfloat16]
+)
+def test_moe_fused_gate_compiled_pdl_wait_precedes_input_loads(bias_dtype):
+    """Source order is insufficient: inspect the actual launched specialization."""
+    if not is_arch_support_pdl():
+        pytest.skip("PDL requires compute capability >= 9")
+    module = importlib.import_module("sglang.kernels.ops.moe.moe_fused_gate")
+    original_kernel = module._router_triton_kernel
+    compiled = []
+
+    class CaptureLaunch:
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                kernel = original_kernel[grid](*args, **kwargs)
+                compiled.append(kernel)
+                return kernel
+
+            return launch
+
+    scores = torch.randn(4, 512, dtype=torch.float32, device=DEVICE)
+    bias = (
+        torch.randn(512, dtype=bias_dtype, device=DEVICE)
+        if bias_dtype is not None
+        else None
+    )
+    with patch.object(module, "_router_triton_kernel", CaptureLaunch()):
+        module.moe_fused_gate(scores, bias, 10, "softmax")
+    assert len(compiled) == 1
+    ptx = compiled[0].asm["ptx"]
+    wait = ptx.index("griddepcontrol.wait")
+    loads = list(re.finditer(r"\bld\.global\.", ptx))
+    assert loads and all(wait < load.start() for load in loads), ptx
+
+
+@triton.jit
+def _produce_router_inputs(
+    source_scores,
+    source_bias,
+    scores,
+    bias,
+    N: tl.constexpr,
+    TOTAL: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    # Announce the dependent launch before storing either output. The consumer
+    # must wait for completion, not assume this trigger makes inputs visible.
+    tl.extra.cuda.gdc_wait()
+    tl.extra.cuda.gdc_launch_dependents()
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    values = tl.load(source_scores + offsets, offsets < TOTAL, other=0)
+    tl.store(scores + offsets, values, offsets < TOTAL)
+    correction = tl.load(source_bias + offsets, offsets < N, other=0).to(tl.float32)
+    tl.store(bias + offsets, correction, offsets < N)
+
+
+@pytest.mark.parametrize(
+    "num_experts,topk,scoring",
+    [(512, 10, "softmax"), (128, 8, "sigmoid"), (896, 16, "sigmoid")],
+)
+def test_moe_fused_gate_fresh_input_dependency_graph(num_experts, topk, scoring):
+    """Fresh inputs through both Triton and the covered sigmoid radix branch."""
+    if not is_arch_support_pdl():
+        pytest.skip("PDL requires compute capability >= 9")
+    torch.manual_seed(num_experts)
+    source_scores = torch.randn(32, num_experts, dtype=torch.bfloat16, device=DEVICE)
+    source_bias = torch.randn(num_experts, dtype=torch.bfloat16, device=DEVICE)
+    scores = torch.empty_like(source_scores)
+    bias = torch.empty(num_experts, dtype=torch.float32, device=DEVICE)
+
+    def route():
+        scores.fill_(float("nan"))
+        bias.fill_(float("nan"))
+        _produce_router_inputs[(triton.cdiv(scores.numel(), 256),)](
+            source_scores,
+            source_bias,
+            scores,
+            bias,
+            N=num_experts,
+            TOTAL=scores.numel(),
+            BLOCK=256,
+            launch_pdl=True,
+        )
+        return moe_fused_gate(
+            scores, None if scoring == "softmax" else bias, topk, scoring
+        )
+
+    warmup = torch.cuda.Stream()
+    warmup.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup):
+        for _ in range(3):
+            route()
+    torch.cuda.current_stream().wait_stream(warmup)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        weights, indices = route()
+    for _ in range(3):
+        source_scores.copy_(torch.randn_like(source_scores))
+        source_bias.copy_(torch.randn_like(source_bias))
+        graph.replay()
+        if scoring == "softmax":
+            ref_w, ref_i = _reference_softmax(source_scores, topk, True)
+        else:
+            ref_w, ref_i = _reference_gate(
+                source_scores.float(),
+                source_bias.float(),
+                topk,
+                scoring,
+                0,
+                True,
+                1.0,
+                False,
+            )
+        assert torch.isfinite(weights).all()
+        torch.testing.assert_close(
+            _scatter_by_expert(weights, indices, num_experts),
+            _scatter_by_expert(ref_w, ref_i, num_experts),
+            rtol=1e-3,
+            atol=1e-3,
+        )
 
 
 _SIGMOID_AOT_CASES = get_ci_test_range(

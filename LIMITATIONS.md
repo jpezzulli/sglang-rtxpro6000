@@ -13,6 +13,21 @@
   approximately 490K. This is not proof for every possible 524K prompt,
   modality, sampling configuration, or concurrent schedule.
 
+## v2.4.0 scope
+
+The prefill percentage compares the same server initial-prefill timing window
+before and after the combined update, with one cold prompt at each measured
+length. It is not directly comparable to older client-TTFT-based rates. No
+warm-prefill percentage, decode speedup, bit-for-bit output parity, or general
+model-quality improvement is claimed. Both profiles retained their context,
+pools and NIXL restart-restoration behavior.
+
+Tool-markup guards cover bare functions and undeclared wrapped names; they do
+not distinguish every quotation of a fully wrapped, declared tool. This update
+is not a claim that all long-workload GPU/driver stalls or every speculative
+decoding issue are fixed. Hardware, checkpoint and workload limits below still
+apply.
+
 ## v2.3.1 maintenance scope
 
 The reported live failure was not reproduced here. Focused GPU tests reproduced

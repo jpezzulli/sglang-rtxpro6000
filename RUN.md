@@ -38,6 +38,17 @@ and CPU image preprocessing; model inference stays on GPU. The template hash
 and preprocessing backend are included in the NIXL namespace, so these
 launchers start a separate cache identity without deleting older caches.
 
+For v2.4.0, install the new source before restarting your server. The source
+change selects a fresh NIXL namespace, so matching prefixes initially start
+cold. Let the helper choose the directory; do not point the new source at an
+old representation's cache. Older namespaces are not deleted automatically.
+
+Explicit Chat Completions reasoning-effort requests now take precedence over
+launcher defaults; the normal medium default is unchanged. With the bundled
+Froggeric v22.5 template, `high`, `xhigh`, and `max` select the same xhigh
+instruction. A client whose override was previously ignored may therefore
+observe different answer length. Responses API precedence is unchanged.
+
 ## Launch Flash-Next
 
 ```bash
@@ -50,7 +61,7 @@ E4M3 target/native-MTP KV, native NEXTN, 524K YaRN, 24 Mamba slots,
 RecoverSSM `none`, explicit FlashInfer GDN decode/prefill, 32 GB HiCache, and
 NIXL POSIX persistence. This is not a claim that every kernel computes in BF16.
 
-## Launch Flash-Next with FR-Spec (v2.3)
+## Launch Flash-Next with FR-Spec
 
 Use `RadixArk/Qwen3.8-Flash-Next-NVFP4` with the common setup above:
 
@@ -74,7 +85,7 @@ launchers remain available with their existing configurations.
 
 The [map builder](scripts/pennyroyal/frspec/build_token_map.py) is included
 for users who need a different tokenizer or corpus. Use the bundled map to
-reproduce v2.3; a newly generated map requires its own validation and cache
+use the qualified FR-Spec profile; a newly generated map requires its own validation and cache
 namespace. See [PROVENANCE.md](PROVENANCE.md#v23-fr-spec-provenance) for hashes
 and source details.
 
@@ -88,7 +99,7 @@ The target uses block-FP8 E4M3 weights and dynamic FP8 activations on quantized
 paths, with BF16 for unquantized tensors. Target/draft KV are FP8 E4M3; GDN SSM
 state is FP32 and convolution state BF16. The shape uses eight DFlash2 draft
 tokens, a 2,048-token draft window, TRTLLM-MHA/XQA target decode, FlashInfer
-target prefill/draft attention, Triton FP8 MoE and GDN, 24 Mamba slots, five
+target prefill/draft attention, dense FP8 feed-forward layers and Triton GDN, 24 Mamba slots, five
 retained states per path, 96 GB HiCache, and NIXL POSIX persistence.
 
 ## Startup checks
@@ -111,7 +122,7 @@ For 27B, confirm:
 - `Initialized DFLASH draft runner` with eight tokens and window 2,048;
 - fused KV materialization;
 - FlashInfer prefill/draft and TRTLLM-MHA target decode/verify;
-- FP8 MoE resolved to Triton rather than DeepGEMM under A2A `none`;
+- a dense FP8 target, not a routed-expert MoE model;
 - 24 Mamba slots, five retained states/path, and 1,118,784 KV tokens;
 - target prefill, target verify, and draft verify graph capture.
 

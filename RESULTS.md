@@ -7,8 +7,11 @@ interchangeable throughput number.
 
 ## Measurement definitions
 
-- **Cold prefill:** prompt tokens divided by time to first token with no matching
-  radix or persistent prefix.
+- **Cold prefill:** processing a prompt with no matching radix or persistent
+  prefix. Timing is explicitly labelled: **server prefill throughput** divides
+  prompt tokens by SGLang's initial-prefill span; **client-TTFT throughput**
+  divides them by time to first token, including other request processing.
+  Earlier v2.3 and dated tables use the client-TTFT definition.
 - **Completed-request effective decode:** output tokens divided by SGLang's
   post-prefill elapsed span. This excludes initial prefill but includes waits,
   re-prefill after retraction, and interference after the prefill boundary.
@@ -21,6 +24,38 @@ interchangeable throughput number.
   group makespan.
 - **Restored-prefix effective prefill:** input tokens divided by TTFT after
   NIXL restoration. It is not cold model prefill.
+
+## Pennyroyal v2.4.0 — Prefill and maintenance
+
+Measured September 9, 2026, on one RTX PRO 6000, TP1, with the same Flash-Next
+ModelOpt NVFP4 checkpoint before and after the update. Both runs retained
+524,288-token context, 824,384 KV tokens, page64/chunk4096, native NEXTN with
+FR-Spec, and HiCache/NIXL. Requests used ordinary Chat Completions after warmups.
+
+| Cold prompt | Before: server prefill tok/s | v2.4.0: server prefill tok/s | Observed throughput increase | Before: client TTFT | v2.4.0: client TTFT |
+|---|---:|---:|---:|---:|---:|
+| 63,864 tokens | 13,506 | **14,842** | **9.90%** | 5.637 s | 5.242 s |
+| 489,879 tokens | 8,464 | **8,773** | **3.65%** | 62.314 s | 60.613 s |
+
+Server initial-prefill spans were 4.728560 → 4.302790 seconds and
+57.875780 → 55.836900 seconds. Percentages use unrounded values. The first
+request returned exact READY; the single long prompt returned all three
+separated needles. These are single cold-prefill observations at each length,
+not guaranteed gains or a repeated distribution. The optimization also covers
+prefill work for new suffixes, but no warm-prefill speedup percentage was measured.
+
+The latest three 1,024-output-token decode runs measured **181.72 tok/s C1
+median** and **446.49 tok/s four-request aggregate median**. C1 excludes
+time to first token; aggregate uses synchronized whole-batch makespan. Decode
+varied across runs/boots, and this release claims **no decode improvement**.
+The v2.3 six-sample results below remain unchanged historical measurements.
+
+Both supported profiles passed startup, prefill, single/concurrent decode,
+disconnect cleanup and identical-restart NIXL restoration. Cached long-prefix
+extension also completed correctly. Context and token-pool capacities were
+retained. [CHANGES.md](CHANGES.md#v240--maintenance-and-faster-flash-next-prefill)
+lists the adapted fixes; [LIMITATIONS.md](LIMITATIONS.md#v240-scope) bounds
+these observations.
 
 ## Pennyroyal v2.3 — Flash-Next FR-Spec
 
