@@ -230,7 +230,13 @@ class ReqState:
     ttft_observed: bool = False
 
     dispatched: bool = False
+    # Before dispatch the scheduler has no request to abort. Record intent
+    # separately; only a successful send after dispatch may latch abort_sent.
+    abort_pending: bool = False
     abort_sent: bool = False
+    # Parallel sampling's original state owns generated prefix/choice IDs until
+    # expansion completes; cancellation of that placeholder must follow them.
+    parallel_sample_rids: List[str] = dataclasses.field(default_factory=list)
 
     # For streaming output
     last_output_offset: int = 0
@@ -1572,8 +1578,9 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             time_stats = tokenized_obj.time_stats
             tokenized_obj.wrap_pickle_fields()
             self._dispatch_to_scheduler(tokenized_obj)
-            self._mark_state_dispatched(tokenized_obj.rid)
             dispatched = True
+            self._mark_state_dispatched(tokenized_obj.rid)
+            self._send_pending_aborts([tokenized_obj.rid])
             tokenized_obj.time_stats = time_stats
             tokenized_obj.time_stats.set_api_server_dispatch_finish_time()
         finally:
@@ -1589,6 +1596,12 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         state = self.rid_to_state.get(rid)
         if state is not None:
             state.dispatched = True
+
+    def _send_pending_aborts(self, rids: Iterable[str]):
+        for rid in rids:
+            state = self.rid_to_state.get(rid)
+            if state is not None and state.abort_pending:
+                self.abort_request(rid)
 
     def _send_batch_request(
         self,
@@ -1615,9 +1628,15 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 batch_req = BatchTokenizedEmbeddingReqInput(batch=tokenized_objs)
 
             self._dispatch_to_scheduler(batch_req)
+            dispatched = True
+            # The whole batch and its MM items now belong to the scheduler.
+            # Mark every state before an abort send can fail, so failure cleanup
+            # cannot discard an unmarked sibling or reclaim published MM items.
             for tokenized_obj in tokenized_objs:
                 self._mark_state_dispatched(tokenized_obj.rid)
-            dispatched = True
+            self._send_pending_aborts(
+                tokenized_obj.rid for tokenized_obj in tokenized_objs
+            )
             for tokenized_obj, time_stat in zip(tokenized_objs, time_stats):
                 tokenized_obj.time_stats = time_stat
             set_time_batch(tokenized_objs, "set_api_server_dispatch_finish_time")
@@ -1883,7 +1902,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 tokenized_obj.sampling_params = copy.copy(tokenized_obj.sampling_params)
                 tokenized_obj.sampling_params.max_new_tokens = 0
                 tokenized_obj.stream = False
-                self._init_req_state(tmp_obj)
+                self._init_parallel_req_state(tmp_obj, objs[i].rid)
                 request_rids.add(tmp_obj.rid)
                 self._send_one_request(tokenized_obj)
                 await self._wait_one_response(tmp_obj, request).__anext__()
@@ -1900,7 +1919,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                             copy.copy(item) for item in tokenized_obj.mm_inputs.mm_items
                         ]
                     tokenized_obj.rid = tmp_obj.regenerate_rid()
-                    self._init_req_state(tmp_obj)
+                    self._init_parallel_req_state(tmp_obj, objs[i].rid)
                     request_rids.add(tmp_obj.rid)
                     state = self.rid_to_state[tmp_obj.rid]
                     tokenized_obj.time_stats = state.time_stats
@@ -1921,6 +1940,12 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         else:
             async for response in self._stream_batch_responses(generators, rids):
                 yield response
+
+    def _init_parallel_req_state(self, obj: GenerateReqInput, parent_rid: str):
+        self._init_req_state(obj)
+        parent_state = self.rid_to_state[parent_rid]
+        parent_state.parallel_sample_rids.append(obj.rid)
+        self.rid_to_state[obj.rid].abort_pending = parent_state.abort_pending
 
     async def _collect_batch_responses(self, generators):
         tasks = [asyncio.create_task(gen.__anext__()) for gen in generators]
@@ -1976,6 +2001,16 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             if state is not None:
                 if state.abort_sent:
                     return
+                state.abort_pending = True
+                if not state.dispatched:
+                    # Sending now could reach the scheduler before this RID
+                    # exists there and suppress the later, effective abort.
+                    # Generated parallel IDs may already be in flight while
+                    # their original placeholder is still being expanded.
+                    for child_rid in state.parallel_sample_rids:
+                        if child_rid in self.rid_to_state:
+                            self.abort_request(child_rid)
+                    return
                 state.abort_sent = True
             elif get_serving().tokenizer_worker_num == 1:
                 return
@@ -1986,6 +2021,8 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             if state is not None:
                 state.abort_sent = False
             raise
+        if state is not None:
+            state.abort_pending = False
         if self.enable_metrics:
             # TODO: also use custom_labels from the request
             self.metrics_collector.observe_one_aborted_request(
