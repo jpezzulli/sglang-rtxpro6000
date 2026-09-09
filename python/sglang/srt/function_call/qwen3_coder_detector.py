@@ -31,11 +31,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
         self.parameter_prefix: str = "<parameter="
         self.parameter_end_token: str = "</parameter>"
 
-        # Regex for non-streaming fallback
-        self.tool_call_regex = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
-        self.tool_call_function_regex = re.compile(
-            r"<function=(.*?)</function>|<function=(.*)$", re.DOTALL
-        )
+        # Parameter conversion remains compatible with the non-streaming fallback.
         self.tool_call_parameter_regex = re.compile(
             r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)",
             re.DOTALL,
@@ -66,7 +62,10 @@ class Qwen3CoderDetector(BaseFormatDetector):
         # Hold the wrapper until its name is validated. Rejected examples must
         # survive as literal text, including markup received in earlier chunks.
         self._pending_tool_prefix: Optional[str] = None
+        self._tool_wrapper_prefix = ""
         self._suppress_current_call = False
+        self._rejected_function_depth = 0
+        self._rejected_tool_depth = 0
         self._preserve_tool_wrapper = False
 
     def has_tool_call(self, text: str) -> bool:
@@ -200,27 +199,37 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
         calls = []
         try:
-            # Simple cleanup of the text to find tool calls
-            # Note: This is a simplified regex approach consistent with vLLM
-            raw_tool_calls = list(self.tool_call_regex.finditer(text))
-            if not raw_tool_calls:
-                # Keep the incomplete-wrapper fallback local to that wrapper;
-                # bare function examples preceding it are ordinary text.
-                raw_tool_calls = list(re.finditer(r"<tool_call>(.*)$", text, re.DOTALL))
+            raw_tool_calls = list(
+                self._iter_structure_spans(
+                    text, self.tool_call_start_token, self.tool_call_end_token
+                )
+            )
+            # Preserve the legacy incomplete-wrapper fallback only when there
+            # are no complete wrappers; do not promote a truncated trailing one.
+            complete_tool_calls = [
+                span for span in raw_tool_calls if span[1] != span[2]
+            ]
+            raw_tool_calls = complete_tool_calls or raw_tool_calls
 
             tool_idx = 0
             normal_text_chunks = []
             text_pos = 0
-            for tool_match in raw_tool_calls:
-                self._append_normal_text(
-                    text[text_pos : tool_match.start()], normal_text_chunks
-                )
-                tool_content = tool_match.group(1)
+            for tool_start, tool_end, content_end in raw_tool_calls:
+                self._append_normal_text(text[text_pos:tool_start], normal_text_chunks)
+                tool_content = text[
+                    tool_start + len(self.tool_call_start_token) : content_end
+                ]
                 # Find function calls
-                funcs = list(self.tool_call_function_regex.finditer(tool_content))
+                funcs = list(
+                    self._iter_structure_spans(
+                        tool_content, self.tool_call_prefix, self.function_end_token
+                    )
+                )
                 accepted_spans = []
-                for func_match in funcs:
-                    func_body = func_match.group(1) or func_match.group(2)
+                for func_start, func_end, body_end in funcs:
+                    func_body = tool_content[
+                        func_start + len(self.tool_call_prefix) : body_end
+                    ]
                     if ">" not in func_body:
                         continue
 
@@ -260,19 +269,19 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         )
                     )
                     tool_idx += 1
-                    accepted_spans.append(func_match.span())
+                    accepted_spans.append((func_start, func_end))
 
                 if accepted_spans and len(accepted_spans) == len(funcs):
                     self._pending_tool_separator = ""
                 else:
                     # Remove only accepted functions from a mixed wrapper; an
                     # undeclared call is prose, not permission to drop content.
-                    literal = tool_match.group(0)
+                    literal = text[tool_start:tool_end]
                     offset = len(self.tool_call_start_token)
                     for start, end in reversed(accepted_spans):
                         literal = literal[: offset + start] + literal[offset + end :]
                     self._append_normal_text(literal, normal_text_chunks)
-                text_pos = tool_match.end()
+                text_pos = tool_end
 
             self._append_normal_text(text[text_pos:], normal_text_chunks)
             normal_text = "".join(normal_text_chunks)
@@ -283,6 +292,27 @@ class Qwen3CoderDetector(BaseFormatDetector):
         except Exception as e:
             logger.error(f"Error in detect_and_parse: {e}")
             return StreamingParseResult(normal_text=text)
+
+    @staticmethod
+    def _iter_structure_spans(text: str, start_token: str, end_token: str):
+        """Yield outer structure spans without promoting nested literal markup.
+
+        An unknown function owns its entire body, including nested examples.
+        A lazy first-close regex would expose later nested functions as siblings.
+        Incomplete outer structures keep the existing end-of-input fallback.
+        """
+        tokens = re.compile(re.escape(start_token) + "|" + re.escape(end_token))
+        pos = 0
+        while (start := text.find(start_token, pos)) != -1:
+            depth = 1
+            end = body_end = len(text)
+            for match in tokens.finditer(text, start + len(start_token)):
+                depth += 1 if match.group() == start_token else -1
+                if depth == 0:
+                    body_end, end = match.start(), match.end()
+                    break
+            yield start, end, body_end
+            pos = end
 
     def parse_streaming_increment(
         self, new_text: str, tools: List[Tool]
@@ -307,6 +337,43 @@ class Qwen3CoderDetector(BaseFormatDetector):
             if not current_slice:
                 break
 
+            # Rejected bodies are literal until their own function closes.
+            # Handle nested tags before callable-tag recognition: otherwise a
+            # declared function quoted inside an unknown tool's parameter can
+            # reenter the accepted path, or an inner wrapper can reset rejection.
+            if self._suppress_current_call:
+                literal_tag_len = 0
+                if current_slice.startswith(self.tool_call_prefix):
+                    end_angle = current_slice.find(">")
+                    if end_angle == -1:
+                        break
+                    self._rejected_function_depth += 1
+                    literal_tag_len = end_angle + 1
+                elif current_slice.startswith(self.function_end_token):
+                    self._rejected_function_depth -= 1
+                    if self._rejected_function_depth == 0:
+                        self._suppress_current_call = False
+                        self._rejected_tool_depth = 0
+                    literal_tag_len = len(self.function_end_token)
+                elif current_slice.startswith(self.tool_call_start_token):
+                    self._rejected_tool_depth += 1
+                    literal_tag_len = len(self.tool_call_start_token)
+                elif current_slice.startswith(self.tool_call_end_token):
+                    if self._rejected_tool_depth:
+                        self._rejected_tool_depth -= 1
+                        literal_tag_len = len(self.tool_call_end_token)
+                    else:
+                        # An outer wrapper close also bounds a malformed,
+                        # unfinished rejected function; a later wrapper is new.
+                        self._suppress_current_call = False
+                        self._rejected_function_depth = 0
+                if literal_tag_len:
+                    self._append_normal_text(
+                        current_slice[:literal_tag_len], normal_text_chunks
+                    )
+                    self.parsed_pos += literal_tag_len
+                    continue
+
             # -------------------------------------------------------
             # 1. Priority detection: check if it's the start of Tool Call
             # -------------------------------------------------------
@@ -316,6 +383,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         self._pending_tool_prefix, normal_text_chunks
                     )
                 self._pending_tool_prefix = self.tool_call_start_token
+                self._tool_wrapper_prefix = self.tool_call_start_token
                 self._suppress_current_call = False
                 self._preserve_tool_wrapper = False
                 self.parsed_pos += len(self.tool_call_start_token)
@@ -338,18 +406,28 @@ class Qwen3CoderDetector(BaseFormatDetector):
                             "Model attempted to call undefined function: %s", func_name
                         )
                         self._suppress_current_call = True
-                        self._preserve_tool_wrapper = True
+                        self._rejected_function_depth = 1
+                        self._rejected_tool_depth = 0
                         self.current_func_name = None
+                        wrapper_prefix = ""
+                        if not self._preserve_tool_wrapper:
+                            wrapper_prefix = (
+                                self._pending_tool_prefix or self._tool_wrapper_prefix
+                            )
                         self._append_normal_text(
-                            (self._pending_tool_prefix or "")
-                            + current_slice[: end_angle + 1],
+                            wrapper_prefix + current_slice[: end_angle + 1],
                             normal_text_chunks,
                         )
+                        self._preserve_tool_wrapper = True
                         self._pending_tool_prefix = None
                         self.parsed_pos += end_angle + 1
                         continue
 
-                    self._pending_tool_prefix = None
+                    if self._pending_tool_prefix is not None:
+                        # A later rejected sibling still needs the opening
+                        # wrapper and its whitespace, even after a valid call.
+                        self._tool_wrapper_prefix = self._pending_tool_prefix
+                        self._pending_tool_prefix = None
                     self._pending_tool_separator = None
                     self._suppress_current_call = False
 
@@ -576,9 +654,11 @@ class Qwen3CoderDetector(BaseFormatDetector):
         elif (
             not self.is_inside_tool_call
             or self._suppress_current_call
-            or self._preserve_tool_wrapper
+            or (self._preserve_tool_wrapper and self.current_func_name is None)
         ):
             self._append_normal_text(text, chunks)
+        elif self.current_func_name is None:
+            self._tool_wrapper_prefix += text
 
     def finish(self, tools: List[Tool]) -> StreamingParseResult:
         # Only flush unrecognized syntax. An unfinished accepted call must not

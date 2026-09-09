@@ -130,6 +130,64 @@ def test_unknown_then_valid_in_same_wrapper_does_not_poison_json(width):
     )
 
 
+@pytest.mark.parametrize("width", [None, 1, 3, 17, 10000])
+@pytest.mark.parametrize("following", ["none", "sibling", "wrapper"])
+@pytest.mark.parametrize(
+    "nested",
+    [
+        function("run_commands", "bad"),
+        function("run_commands", "bad") + function("run_commands", "also bad"),
+        wrapped("run_commands", "bad"),
+    ],
+)
+def test_rejected_body_nested_tags_stay_literal_until_real_close(
+    width, following, nested
+):
+    rejected = function("unknown", "example: " + nested)
+    literal = "<tool_call>" + rejected + "</tool_call>"
+    expected_calls = []
+    if following == "sibling":
+        source = (
+            "<tool_call>" + rejected + function("run_commands", "good") + "</tool_call>"
+        )
+        expected_calls = [("run_commands", {"command": "good"})]
+    elif following == "wrapper":
+        source = literal + wrapped("run_commands", "good")
+        expected_calls = [("run_commands", {"command": "good"})]
+    else:
+        source = literal
+    assert parse(source, width) == (literal, expected_calls)
+
+
+@pytest.mark.parametrize("width", [None, 1, 3, 17, 10000])
+@pytest.mark.parametrize("accepted_first", [False, True])
+@pytest.mark.parametrize("separator", ["", "\n \t"])
+def test_mixed_sibling_rejection_preserves_wrapper_in_either_order(
+    width, accepted_first, separator
+):
+    accepted = "<function=run_commands>\n</function>"
+    rejected = "<function=unknown></function>"
+    body = (
+        accepted + separator + rejected
+        if accepted_first
+        else rejected + separator + accepted
+    )
+    source = "<tool_call>\n" + body + "\n</tool_call>"
+    remaining = separator + rejected if accepted_first else rejected + separator
+    assert parse(source, width) == (
+        "<tool_call>\n" + remaining + "\n</tool_call>",
+        [("run_commands", {})],
+    )
+
+
+def test_nonstream_incomplete_trailing_wrapper_keeps_legacy_fallback_boundary():
+    incomplete = "<tool_call><function=run_commands></function>"
+    assert parse(wrapped("run_commands") + incomplete, None) == (
+        incomplete,
+        [("run_commands", {"command": "echo hi"})],
+    )
+
+
 @pytest.mark.parametrize("width", [1, 2, 7, 10000])
 def test_incomplete_unknown_and_stray_parameters_do_not_emit_fragments(width):
     source = (
