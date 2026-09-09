@@ -30,6 +30,33 @@ register_cpu_ci(est_time=7, suite="base-a-test-cpu")
 
 
 class InputMessageConstructionTestCase(CustomTestCase):
+    def test_responses_effort_keeps_existing_template_precedence(self):
+        serving = make_serving()
+        serving.template_manager.chat_template_name = None
+        serving.template_manager.jinja_template_content_format = "string"
+        serving.tokenizer_manager.tokenizer.apply_chat_template.return_value = (
+            "rendered"
+        )
+        serving.default_chat_template_kwargs = {"reasoning_effort": "medium"}
+        for nested, expected in (
+            (None, "medium"),
+            ({"reasoning_effort": "high"}, "high"),
+        ):
+            with self.subTest(nested=nested):
+                request = ResponsesRequest(
+                    model="x",
+                    input="Hi",
+                    reasoning={"effort": "low"},
+                    chat_template_kwargs=nested,
+                )
+                asyncio.run(
+                    serving._make_request(
+                        request, None, serving.tokenizer_manager.tokenizer
+                    )
+                )
+                kwargs = serving.tokenizer_manager.tokenizer.apply_chat_template.call_args.kwargs
+                self.assertEqual(kwargs["reasoning_effort"], expected)
+
     def test_previous_response_replays_assistant_text_not_instructions(self):
         serving = make_serving()
         prev_response = Mock(id="resp_prev")
