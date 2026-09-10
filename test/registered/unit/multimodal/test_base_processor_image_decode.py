@@ -200,6 +200,35 @@ class TestLoadSingleItemImageDecode(CustomTestCase):
         self.assertIs(image, expected)
         self.assertEqual(decode.call_args.kwargs["device"], "cuda:2")
 
+    def test_cuda_device_spelling_is_canonical_before_decode(self):
+        expected = torch.zeros((3, 8, 8), dtype=torch.uint8)
+
+        def decode_on_device(data, device):
+            self.assertEqual(torch.device(device), torch.device("cuda:1"))
+            return expected
+
+        with (
+            patch.dict("os.environ", {"SGLANG_MM_PREPROCESS_DEVICE": "cuda:01"}),
+            patch.object(torch.cuda, "is_available", return_value=True),
+            patch.object(torch.cuda, "device_count", return_value=2),
+            patch.object(common, "decode_jpeg", side_effect=decode_on_device) as decode,
+        ):
+            self.assertEqual(common.resolve_mm_preprocess_device(), "cuda:1")
+            image, _ = common.load_image(_jpeg_bytes())
+        self.assertIs(image, expected)
+        self.assertEqual(decode.call_args.kwargs["device"], "cuda:1")
+
+    def test_non_ascii_cuda_index_fails_before_decode(self):
+        with (
+            patch.dict("os.environ", {"SGLANG_MM_PREPROCESS_DEVICE": "cuda:\u0661"}),
+            patch.object(torch.cuda, "is_available", return_value=True),
+            patch.object(torch.cuda, "device_count", return_value=2),
+            patch.object(common, "decode_jpeg") as decode,
+            self.assertRaisesRegex(ValueError, "SGLANG_MM_PREPROCESS_DEVICE"),
+        ):
+            common.load_image(_jpeg_bytes())
+        decode.assert_not_called()
+
     def test_forced_cpu_model_policy_wins_over_explicit_cuda(self):
         data = _jpeg_bytes()
         with (

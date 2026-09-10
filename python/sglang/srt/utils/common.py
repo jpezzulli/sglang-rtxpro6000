@@ -1821,7 +1821,7 @@ def resolve_mm_preprocess_device() -> Optional[str]:
     value = value.strip().lower()
     if value == "cpu":
         return value
-    match = re.fullmatch(r"cuda:(\d+)", value)
+    match = re.fullmatch(r"cuda:([0-9]+)", value)
     if match is None:
         raise ValueError(
             "SGLANG_MM_PREPROCESS_DEVICE must be 'cpu' or a logical CUDA "
@@ -1839,7 +1839,9 @@ def resolve_mm_preprocess_device() -> Optional[str]:
             f"SGLANG_MM_PREPROCESS_DEVICE={value!r} selects logical CUDA "
             f"device {device_index}, but only {device_count} device(s) are visible"
         )
-    return value
+    # PyTorch rejects spellings such as cuda:01; never defer that rejection
+    # to the JPEG decoder's recoverable-image fallback.
+    return f"cuda:{device_index}"
 
 
 def is_jpeg_with_cuda(
