@@ -52,6 +52,7 @@ from sglang.srt.utils import (
     load_image,
     load_video,
     logger,
+    resolve_mm_preprocess_device,
 )
 
 _is_cpu = is_cpu()
@@ -227,11 +228,48 @@ class BaseMultimodalProcessor(ABC):
         self.use_ipc_pool_handle_cache = (
             self.use_cuda_ipc and envs.SGLANG_USE_IPC_POOL_HANDLE_CACHE.get()
         )
+        self.mm_preprocess_device = resolve_mm_preprocess_device()
         self.image_processor_backend = get_mm().image_processor_backend
         if get_mm().disable_fast_image_processor:
             self.image_processor_backend = "pil"
+        elif (
+            self.mm_preprocess_device is not None
+            and self.image_processor_backend == "auto"
+        ):
+            actual_backend = getattr(
+                getattr(self._processor, "image_processor", None), "backend", None
+            )
+            if actual_backend in ("pil", "torchvision"):
+                self.image_processor_backend = actual_backend
         self.disable_fast_image_processor = self.image_processor_backend == "pil"
         self.skip_tokenizer_init = get_serving().skip_tokenizer_init
+
+        if (
+            self.mm_preprocess_device is not None
+            and self.mm_preprocess_device.startswith("cuda:")
+        ):
+            if self.server_args.rl_on_policy_target is not None:
+                raise ValueError(
+                    "SGLANG_MM_PREPROCESS_DEVICE cannot select CUDA when "
+                    "rl_on_policy_target requires CPU preprocessing."
+                )
+            if self.disable_fast_image_processor:
+                raise ValueError(
+                    "SGLANG_MM_PREPROCESS_DEVICE selects CUDA, but the PIL image "
+                    "processor backend is configured. Enable the supported fast "
+                    "torchvision image processor backend or select 'cpu'."
+                )
+            preprocess_device_index = torch.device(self.mm_preprocess_device).index
+            if (
+                self.mm_feature_transport in ("cuda_ipc", "cuda_vmm")
+                and preprocess_device_index != self.server_args.base_gpu_id
+            ):
+                raise ValueError(
+                    "SGLANG_MM_PREPROCESS_DEVICE cannot select a CUDA device "
+                    "different from base_gpu_id when multimodal feature transport "
+                    f"is {self.mm_feature_transport!r}; use CPU transport or the "
+                    "model GPU."
+                )
 
         mm_process_config = get_mm().mm_process_config
         self.image_config = mm_process_config.get("image", {})
@@ -442,7 +480,7 @@ class BaseMultimodalProcessor(ABC):
             if isinstance(self._processor, PreprocessFingerprintProvider)
             else None
         )
-        return {
+        payload = {
             "wrapper_class": (
                 f"{type(self._processor).__module__}."
                 f"{type(self._processor).__qualname__}"
@@ -455,6 +493,11 @@ class BaseMultimodalProcessor(ABC):
             "audio_config": self.audio_config,
             "wrapped_processor": wrapped_processor,
         }
+        if self.mm_preprocess_device is not None:
+            payload["mm_preprocess_device"] = self.mm_preprocess_device
+            if self.mm_preprocess_device == "cpu":
+                payload["gpu_image_decode"] = False
+        return payload
 
     def clear_preprocess_cache(self) -> None:
         """Drop artifacts and reject cache writes from pre-flush work.
@@ -603,7 +646,21 @@ class BaseMultimodalProcessor(ABC):
         tokenizer process each carry their own ``base_gpu_id``.
         """
         server_args = self.server_args
-        if _is_cpu or server_args.rl_on_policy_target is not None:
+        preprocess_device = getattr(self, "mm_preprocess_device", None)
+        if not hasattr(self, "mm_preprocess_device"):
+            preprocess_device = resolve_mm_preprocess_device()
+        if preprocess_device == "cpu":
+            return "cpu"
+        if server_args.rl_on_policy_target is not None:
+            if preprocess_device is not None:
+                raise ValueError(
+                    "SGLANG_MM_PREPROCESS_DEVICE cannot select CUDA when "
+                    "rl_on_policy_target requires CPU preprocessing."
+                )
+            return "cpu"
+        if preprocess_device is not None:
+            return preprocess_device
+        if _is_cpu:
             return "cpu"
         if _is_xpu:
             return "xpu"
@@ -645,21 +702,22 @@ class BaseMultimodalProcessor(ABC):
 
     @contextmanager
     def _temporary_fast_processor_cuda_pool(self, device: Optional[str]):
-        """Release fast-processor CUDA temporaries after CPU feature transport."""
-        can_release = (
-            device is not None
-            and torch.device(device).type == "cuda"
-            and not self.keep_mm_features_on_device
-            and not self.precompute_hash_before_cpu_transfer
-        )
-        if not can_release:
+        """Select the CUDA device and optionally release processor temporaries."""
+        if device is None or torch.device(device).type != "cuda":
             yield
             return
 
         with torch.cuda.device(device):
+            can_release = (
+                not self.keep_mm_features_on_device
+                and not self.precompute_hash_before_cpu_transfer
+            )
+            if not can_release:
+                yield
+                return
             pool = torch.cuda.MemPool()
-        with torch.cuda.use_mem_pool(pool, device=device):
-            yield
+            with torch.cuda.use_mem_pool(pool, device=device):
+                yield
 
     def process_mm_data(
         self,
