@@ -1,7 +1,7 @@
 # Cumulative changes and upstream status
 
 The current runtime is the ordered range
-`e7e78940168f..4aaf531cafd8`. All 35 runtime commits remain in source history,
+`e7e78940168f..cf811a8c5988`. All prior runtime commits remain in source history,
 including the graph-lifetime trial and its full revert. The integration base
 is unchanged. The v2.1.1 upstream check fetched `main` at
 `cdbfe90b4a31079859817c148ef4498240ec2580` on 2026-08-29; older PR-status
@@ -10,11 +10,56 @@ two maintenance corrections below, without a rebase. v2.3 adds the
 FR-Spec launch configuration using the same executable. v2.3.1 adds only the
 GDN rounding correction described below. v2.4.0 adds prefill and maintenance
 corrections while retaining the same dependency stack and launch settings.
+v2.4.1 adds the bounded maintenance and setup changes below without a rebase.
 
 “Local” does not mean a permanent fork requirement. It means the exact active
 commit has not merged upstream. Where a PR has a later refined head, that is
 shown separately rather than pretending the local commit and PR head are
 identical.
+
+## v2.4.1 — Maintenance and easier setup
+
+An optional maintenance update. If v2.4.0 is working well for you, there is
+no urgent need to update; no additional serving-speed gain is claimed.
+
+| Affected profile | What changed in normal terms | Upstream credit / lineage |
+|---|---|---|
+| Both profiles | Remove rolled-back grammar-history entries without copying the entire accumulated history during speculative decoding. Grammar matching and acceptance are unchanged. | Adapted [#38865](https://github.com/sgl-project/sglang/pull/38865). |
+| Both profiles | Return the correct alternative-token probabilities for every token in a multi-token streaming update, rather than repeating the first token's alternatives. Sampling is unchanged. | Adapted [#38759](https://github.com/sgl-project/sglang/pull/38759). |
+| Both profiles | Use pinned host buffers for asynchronous transfers of prefill and scheduling metadata. Metadata values and model calculations are unchanged. | Adapted [#38703](https://github.com/sgl-project/sglang/pull/38703). |
+| Flash-Next | Combine PLE hashing and host-table lookup at the measured small FP8 verification shapes on SM120; retain the split path elsewhere and preserve shared-buffer stream ordering. | Adapted [#38701](https://github.com/sgl-project/sglang/pull/38701), with a local one-warp launch selection. No net serving-speed gain was demonstrated. |
+
+The README now leads with reference checkpoints and launch recipes. Build and
+run instructions distinguish a fresh setup from an existing environment;
+launchers accept paths containing spaces, show startup progress, and allow
+CPU thread overrides while keeping the four-thread default. Public build/JIT
+defaults are now four jobs and one NVCC thread, adjustable through
+`PENNY_BUILD_JOBS` or individual tool overrides. Context, token pools,
+speculative settings, Froggeric v22.5, the FR-Spec map and dependency
+versions are retained. Historical performance tables keep their original dates.
+
+Both launch profiles default `NUMPY_MADVISE_HUGEPAGE=0` to address long
+CPU image-processing stalls under host-memory fragmentation. This changes
+NumPy allocation advice, not image values or the system-wide huge-page policy.
+Operators can override it to `1`; see [RUN.md](RUN.md).
+
+Media preprocessing can be placed explicitly with
+`SGLANG_MM_PREPROCESS_DEVICE=cpu` or `cuda:N`. Public recipes default to CPU,
+including JPEG decoding; an optional secondary GPU can handle JPEG decode
+and supported image/video tensor transforms while the model stays on its
+original GPU. Device/backend enter the cache identity. Unsupported separate
+encoder-service and cross-device CUDA IPC/VMM combinations are rejected.
+Both profiles passed JPEG, concurrent-image and static-video frame checks
+with secondary-GPU preprocessing, plus NIXL restoration after restart.
+Flash-Next also passed image-bearing conversation checks at 208K context.
+CPU JPEG/PIL placement was checked separately at component level.
+
+The maintenance changes passed both-profile
+structured-output, parallel-tool, streaming-logprob and vision checks,
+64K/490K prefill, repeated single/concurrent decode,
+128K/490K long-context decode and identical-restart NIXL restoration. Full
+reasoning and tool-quality grading were not repeated for this narrow update.
+The configured 524,288 context and full token pools were retained.
 
 ## v2.4.0 — Maintenance and faster Flash-Next prefill
 

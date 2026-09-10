@@ -1808,6 +1808,42 @@ image_extension_names = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 GPUImageDecodeMode = Union[bool, Literal["nvjpeg_fancy"]]
 
 
+def resolve_mm_preprocess_device() -> Optional[str]:
+    """Validate and return the optional multimodal preprocessing device.
+
+    CUDA indices are logical indices after ``CUDA_VISIBLE_DEVICES`` remapping.
+    Validation is intentionally eager at each entry point so an explicit device
+    never degrades silently to the model GPU or CPU.
+    """
+    value = envs.SGLANG_MM_PREPROCESS_DEVICE.get()
+    if value is None:
+        return None
+    value = value.strip().lower()
+    if value == "cpu":
+        return value
+    match = re.fullmatch(r"cuda:([0-9]+)", value)
+    if match is None:
+        raise ValueError(
+            "SGLANG_MM_PREPROCESS_DEVICE must be 'cpu' or a logical CUDA "
+            f"device such as 'cuda:0', got {value!r}"
+        )
+    device_index = int(match.group(1))
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            f"SGLANG_MM_PREPROCESS_DEVICE={value!r} requires CUDA, but CUDA "
+            "is unavailable"
+        )
+    device_count = torch.cuda.device_count()
+    if device_index >= device_count:
+        raise RuntimeError(
+            f"SGLANG_MM_PREPROCESS_DEVICE={value!r} selects logical CUDA "
+            f"device {device_index}, but only {device_count} device(s) are visible"
+        )
+    # PyTorch rejects spellings such as cuda:01; never defer that rejection
+    # to the JPEG decoder's recoverable-image fallback.
+    return f"cuda:{device_index}"
+
+
 def is_jpeg_with_cuda(
     image_bytes: bytes = b"", gpu_image_decode: GPUImageDecodeMode = True
 ) -> bool:
@@ -1817,7 +1853,10 @@ def is_jpeg_with_cuda(
     2. whether input is recognized as JPEG.
     3. whether GPU image decode is enabled (some models such as CPM forcibly disable this).
     """
-    if not is_cuda() or not gpu_image_decode:
+    preprocess_device = resolve_mm_preprocess_device()
+    if preprocess_device == "cpu" or not gpu_image_decode:
+        return False
+    if preprocess_device is None and not is_cuda():
         return False
     if image_bytes != b"":
         return image_bytes.startswith(b"\xff\xd8") and image_bytes.endswith(b"\xff\xd9")
@@ -1843,6 +1882,7 @@ def _load_image(
     otherwise fallback to decode with PIL on CPU and return a PIL Image.
     Keep the fallback path since nvJPEG may fail on some JPEG images that are not strictly compliant with the standard, while PIL is more tolerant.
     """
+    preprocess_device = resolve_mm_preprocess_device()
     if image_file != "":
         image_bytes = get_image_bytes(image_file)
     if is_jpeg_with_cuda(image_bytes, gpu_image_decode):
@@ -1852,9 +1892,13 @@ def _load_image(
                     decode_jpeg_with_fancy_upsampling,
                 )
 
-                return decode_jpeg_with_fancy_upsampling(image_bytes)
+                if preprocess_device is None:
+                    return decode_jpeg_with_fancy_upsampling(image_bytes)
+                with torch.cuda.device(preprocess_device):
+                    return decode_jpeg_with_fancy_upsampling(image_bytes)
             encoded_image = torch.frombuffer(image_bytes, dtype=torch.uint8)
-            image_tensor = decode_jpeg(encoded_image, device="cuda")
+            decode_device = preprocess_device or "cuda"
+            image_tensor = decode_jpeg(encoded_image, device=decode_device)
             return image_tensor
         except Exception as e:
             if gpu_image_decode == "nvjpeg_fancy":

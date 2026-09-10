@@ -1,4 +1,5 @@
 import asyncio
+import os
 import pickle
 import unittest
 from types import SimpleNamespace
@@ -127,6 +128,17 @@ class TestEncoderPreprocessorKimiGrid(CustomTestCase):
         )
 
         torch.testing.assert_close(restored.grid_dim, torch.tensor([[40, 60]]))
+
+    def test_explicit_preprocess_device_fails_closed_in_separate_encoder(self):
+        with (
+            patch.dict(os.environ, {"SGLANG_MM_PREPROCESS_DEVICE": "cpu"}),
+            self.assertRaisesRegex(ValueError, "separate encoder preprocessing"),
+        ):
+            EncoderPreprocessor(
+                SimpleNamespace(),
+                SimpleNamespace(hf_config=SimpleNamespace(model_type="test")),
+                SimpleNamespace(),
+            )
 
 
 class TestEncoderDelivery(CustomTestCase):

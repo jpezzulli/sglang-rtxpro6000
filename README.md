@@ -7,28 +7,53 @@ This repository contains the complete SGLang-derived source used on one
 NVIDIA RTX PRO 6000 Blackwell Workstation Edition (96 GB, SM120, TP=1). It is
 not two builds: both model configurations run from the same patched source.
 
-**Pennyroyal v2.4.0 — maintenance fixes and faster Flash-Next prefill.**
+**Get running:** [Fresh install](BUILD.md#fresh-install) ·
+[Update an existing install](BUILD.md#update-an-existing-install) ·
+[Choose a model](#models-and-launch-recipes) · [Launch](RUN.md).
 
-Reduced Flash-Next prefill overhead, with approximately **4–10% higher throughput
-observed in cold-prefill tests at 64K and 490K**. Cached-prefix extension and
-NIXL restart restoration remain verified. Both profiles retain their full
-context, token pools, speculative decoding, and HiCache/NIXL configurations.
+**v2.4.1** is optional maintenance: more efficient grammar-history handling,
+correct streaming logprobs, pinned metadata transfers, and clearer setup.
+Image decoding/preprocessing defaults to CPU, with an optional secondary GPU;
+[configuration and tradeoffs](RUN.md#cpu-or-secondary-gpu-media-preprocessing).
+The separate NumPy huge-page-advice default is also overridable.
+If v2.4.0 works well for you, there is no urgent need to update. No additional
+serving-speed gain is claimed. [Changes and upstream credits](CHANGES.md#v241--maintenance-and-easier-setup).
 
-The update also corrects disconnected-request cleanup, explicit Chat reasoning
-effort overrides, and bare/undeclared tool-markup handling. This is an optional
-update, not an urgent upgrade or a new decode-speedup claim.
+The preceding v2.4.0 release reduced Flash-Next prefill overhead, with
+approximately **4–10% higher throughput observed in cold-prefill tests at 64K
+and 490K**. Cached-prefix extension and NIXL restart restoration remained
+verified. Both profiles retained their full context, token pools, speculative
+decoding, and HiCache/NIXL configurations.
+
+That v2.4.0 update also corrected disconnected-request cleanup, explicit Chat
+reasoning-effort overrides, and bare/undeclared tool-markup handling. It was an
+optional update, not an urgent upgrade or a new decode-speedup claim.
 [Changes and upstream credits](CHANGES.md#v240--maintenance-and-faster-flash-next-prefill) ·
 [Build/update instructions](BUILD.md).
 
-## Verified models
+## Models and launch recipes
 
-These model configurations have been verified with **HiCache and NIXL** on a
-single RTX PRO 6000. The links point directly to the model downloads:
+The two recipes below are equally supported with **HiCache and NIXL** on a
+single RTX PRO 6000. The linked targets are the public reference checkpoints
+for their recipes; that designation is not a claim that every checkpoint in
+this section was separately benchmarked.
 
-| Profile | Target model | Speculative decoding |
+| Recipe | Reference target | Speculative decoding and launcher |
 |---|---|---|
-| **Flash-Next NVFP4** | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) | Native NEXTN MTP included in the target checkpoint; v2.3 adds FR-Spec. No separate draft model download. |
-| **27B FP8** | [orcarouter/Qwen3.8-27B-Uncensored-FP8](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8) | Separate [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2) draft checkpoint. |
+| **Flash-Next NVFP4** | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) | Native NEXTN MTP is included. Start with the recommended [FR-Spec launcher](configs/pennyroyal/serve-flash-next-frspec.sh); the [non-FR launcher](configs/pennyroyal/serve-flash-next.sh) remains available. No separate draft download. |
+| **27B FP8** | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | Use the [27B launcher](configs/pennyroyal/serve-qwen38-27b-dflash2.sh) with the separate [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2) draft checkpoint. |
+
+The retained public 27B measurements used
+[orcarouter/Qwen3.8-27B-Uncensored-FP8](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8),
+an uncensored/abliterated derivative of the official checkpoint. That
+provenance is material to behavioral results. Compatibility still depends on
+matching architecture, quantization, tokenizer, and speculative-decoding
+requirements.
+
+FR-Spec credit goes directly to Gabriel's
+[`gabrielolympie/sglang-flashnext-sm120`](https://github.com/gabrielolympie/sglang-flashnext-sm120).
+Both recipes pin the unmodified
+[Froggeric v22.5 template](configs/pennyroyal/templates/README.md).
 
 ### Flash-Next performance at a glance
 
@@ -45,7 +70,7 @@ These are dated measurements, not guaranteed speeds.
 
 Prefill rates divide input tokens by the server's initial-prefill time; client
 time to first token also includes other request processing. The 4–10% gain
-compares that same server timing window before and after this update, not the
+compares that same server timing window before and after v2.4.0, not the
 TTFT-based rates in older tables. These are single cold-prefill observations;
 warm-prefill speedup was not separately measured. Decode varies with workload
 and acceptance, and no decode improvement is claimed. The four-request figure
@@ -60,14 +85,6 @@ the rate excludes prefill and time between requests. Short replies are excluded
 from this sustained-generation figure. This is an observed session, not a
 controlled benchmark. [Session details](RESULTS.md#flash-next-agentic-session--september-6-2026).
 
-### Expected compatibility with HiCache/NIXL
-
-The standard [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8)
-target is **expected to work with the existing 27B DFlash2 + HiCache/NIXL
-recipe**, but has not been actively verified on the v2.3 release line. Its
-architecture, quantization configuration, tokenizer, and chat template match
-the verified 27B FP8 configuration.
-
 ### Broader model support without HiCache/NIXL
 
 **Without HiCache and NIXL, many more SGLang-supported models and speculative
@@ -80,7 +97,7 @@ and complete state-restoration support. Different MTP or draft designs can
 require additional integration to save and restore target KV, draft KV, and
 recurrent or other model-specific state together.
 
-The verified configurations above are therefore not an exhaustive model
+The supported recipes above are therefore not an exhaustive model
 support list. Other models still need compatible target/draft configurations,
 supported kernels, sufficient memory, and appropriate launch settings.
 
@@ -92,6 +109,25 @@ Flash-Next is day-one engineering. It has extensive qualification on this exact
 machine—including 524K context, multimodal input, reasoning, tools, agentic
 workloads, CUDA-graph recovery, and persistent prefix restoration—but it may
 still contain rough edges or hardware/model-specific assumptions.
+
+### Hardware, storage, and first-start expectations
+
+The qualified launchers use a 96 GB GPU, but they also need substantial host
+RAM and disk. Flash-Next offloads PLE embeddings to the host in addition to its
+configured 32 GiB HiCache tier; 27B configures a 96 GiB HiCache tier. Process,
+filesystem, and driver overhead are additional. These are measured settings,
+not minimum-RAM claims.
+
+Allow disk space for the target checkpoint, the 27B draft when applicable,
+compiler/JIT caches, and persistent NIXL namespaces. NIXL cleaner percentages
+apply to the whole selected filesystem, and old representation-specific
+namespaces are preserved rather than silently deleted.
+
+The first launch can appear quiet while checkpoint identities are hashed, then
+spend substantial time compiling kernels and capturing CUDA graphs. Wait for
+the server-ready log and verify the API; a cold namespace will not restore an
+older prefix. The qualified path is the native build in [BUILD.md](BUILD.md).
+Docker material inherited from upstream is not a qualified Pennyroyal recipe.
 
 ## v2.3 — Faster Flash-Next decoding with FR-Spec
 
@@ -116,8 +152,8 @@ observed variation, not a guaranteed speedup. Cold 64K/490K prefill was
 essentially unchanged by FR-Spec.
 
 The [performance table above](#flash-next-performance-at-a-glance) gives the
-v2.3 speeds directly. [RESULTS.md](RESULTS.md#pennyroyal-v23--flash-next-fr-spec)
-preserves the complete baseline comparison and measurement definitions.
+later v2.4.0 observations. [RESULTS.md](RESULTS.md#pennyroyal-v23--flash-next-fr-spec)
+preserves the v2.3 baseline comparison and measurement definitions.
 
 Reasoning, tools, vision, agent workflows, long-context continuation, and
 NIXL restart restoration were tested. Detailed scores and evaluator
@@ -181,21 +217,21 @@ The important work is architectural, not merely a collection of launch flags:
 | Item | Value |
 |---|---|
 | Canonical branch | `pennyroyal-main-sm120-final` |
-| Current executable source | `4aaf531cafd8bccaaed48ce562ab6bc83aca2d8c` |
-| Current release | **v2.4.0** |
-| Git tag | `pennyroyal-v2.4.0` |
+| Current executable source | `cf811a8c5988dc87941c1442fdc8ba574a0400f7` |
+| Current release | **v2.4.1** |
+| Git tag | `pennyroyal-v2.4.1` |
 | Initial unified dated tag | `sglang-rtxpro6000-20260827` |
 | Earlier 27B dated tag | `qwen38-dflash2-pro6000-20260824` |
 | Upstream integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Qualification dependency base | `0.5.19.dev492+g836206a0a` with the updated v2.4.0 Python/JIT source |
+| Qualification dependency base | `0.5.19.dev492+g836206a0a` with the updated v2.4.1 Python/JIT source |
 | Python / PyTorch | `3.12.13` / `2.13.0+cu130` |
 | CUDA / compiler | CUDA `13.3` (NVCC `13.3.73`) / GCC `15.3.1` |
 | FlashInfer / NIXL | `0.6.17` / `1.4.0` |
 | GPU / driver | RTX PRO 6000 96 GB, SM120 / `610.57.04` |
 
-Install v2.4.0 from the updated source using [BUILD.md](BUILD.md); retaining
+Install v2.4.1 from the updated source using [BUILD.md](BUILD.md); retaining
 an older wheel alone does not apply these changes. Dependency versions and
-launch settings are unchanged. Source lineage and upstream relationships are in
+model settings are unchanged. Source lineage and upstream relationships are in
 [CHANGES.md](CHANGES.md) and [PROVENANCE.md](PROVENANCE.md).
 
 ## Qualified configuration matrix
@@ -206,7 +242,7 @@ executes or accumulates entirely in BF16.
 
 | Property | Qwen3.8-27B + DFlash2 | Qwen3.8 Flash-Next |
 |---|---|---|
-| Target checkpoint | [orcarouter/Qwen3.8-27B-Uncensored-FP8](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8) | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) |
+| Target checkpoint | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) recipe reference; retained measurements used the [orcarouter derivative](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8) | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) |
 | Target weight format | block FP8 E4M3, 128x128 blocks | ModelOpt NVFP4, group size 16 on selected Linear modules |
 | Quantized-path activations | dynamic FP8 E4M3 | NVFP4 input activations on selected Linear modules |
 | Runtime dtype for unquantized tensors | BF16; includes excluded layers and BF16 `lm_head` | BF16; includes ignored layers, native MTP, PLE, QSA/GDN state-facing tensors, and vision |
@@ -434,28 +470,19 @@ There is one native build procedure and two supported model profiles. Flash-Next
 provides FR-Spec and non-FR launchers:
 
 ```bash
-uv python install 3.12.13
-uv venv --python 3.12.13 .venv
-source .venv/bin/activate
-
-export CUDA_HOME=/usr/local/cuda
-export CC=/usr/bin/gcc-15 CXX=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15
-export MAX_JOBS=24 CMAKE_BUILD_PARALLEL_LEVEL=24
-export FLASHINFER_NINJA_JOBS=24 FLASHINFER_NVCC_THREADS=4
-export TORCHINDUCTOR_COMPILE_THREADS=24
-
-uv pip install --prerelease=allow --index-strategy unsafe-best-match \
-  --extra-index-url https://docs.sglang.ai/whl/cu130/ \
-  --no-build-isolation -e python
+git clone --branch pennyroyal-v2.4.1 --single-branch \
+  https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
+cd pennyroyal
+# Follow BUILD.md for the fresh or existing-environment native install.
 ```
 
 Set `REPO_ROOT`, `CACHE_BASE`, `NIXL_STORAGE_BASE`, and the checkpoint paths,
 then choose one recipe:
 
 ```bash
-configs/pennyroyal/serve-qwen38-27b-dflash2.sh
 configs/pennyroyal/serve-flash-next-frspec.sh
-# Flash-Next without FR-Spec:
+configs/pennyroyal/serve-qwen38-27b-dflash2.sh
+# Alternative Flash-Next recipe without FR-Spec:
 configs/pennyroyal/serve-flash-next.sh
 ```
 

@@ -6,16 +6,16 @@
 |---|---|
 | Upstream | `https://github.com/sgl-project/sglang.git` |
 | Canonical branch | `pennyroyal-main-sm120-final` |
-| Executable source HEAD | `4aaf531cafd8bccaaed48ce562ab6bc83aca2d8c` |
+| Executable source HEAD | `cf811a8c5988dc87941c1442fdc8ba574a0400f7` |
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Local runtime commits | 35, including the fully reverted graph trial; excludes docs/recipe-only commits |
-| Qualification dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.4.0 Python/JIT source |
-| Release | v2.4.0 |
-| Git tag | `pennyroyal-v2.4.0` |
+| Latest runtime additions | Seven commits above v2.4.0 source, listed below; prior history is retained |
+| Qualification dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.4.1 Python/JIT source |
+| Release | v2.4.1 |
+| Git tag | `pennyroyal-v2.4.1` |
 
 The release includes launch recipes, documentation, and measurement summaries.
-v2.4.0 updates runtime source while retaining the existing dependency stack,
-launch configurations, CPU image preprocessing and pinned
+v2.4.1 updates runtime source and setup guidance while retaining the dependency
+stack, model settings, CPU image preprocessing by default and the pinned
 [Froggeric v22.5 template](configs/pennyroyal/templates/README.md).
 The earlier 27B dated release
 remains reachable through `qwen38-dflash2-pro6000-20260824`; its useful results
@@ -35,6 +35,32 @@ graph-lifetime trial remains in history with its complete revert; it contributes
 no change to the released graph implementation. Dependencies and launch
 settings are unchanged. [CHANGES.md](CHANGES.md) records the focused
 two-profile regression scope; existing performance results are not refreshed.
+
+## v2.4.1 source provenance
+
+Seven source commits above `4aaf531cafd8` preserve the PLE adaptation and add
+three narrow maintenance changes and selectable media preprocessing,
+without rebasing or refreshing dependencies:
+
+| Local commit | Upstream basis |
+|---|---|
+| `d9b856b2db34` | PLE hashing/gather adaptation from [#38701](https://github.com/sgl-project/sglang/pull/38701), with fallback stream-ordering corrections. |
+| `3e822155a538` | Local one-warp PLE selection for measured SM120 FP8 verification shapes. |
+| `50a260d297` | Grammar history trimming from [#38865](https://github.com/sgl-project/sglang/pull/38865), head `72cd382088fe3494eb52e6cdcee8ec2a4b97ce21`. |
+| `6de97f90fa` | Streaming top-logprob rows from [#38759](https://github.com/sgl-project/sglang/pull/38759), head `fb848cbb749a3121c306ec9c43587561339e13a8`. |
+| `1048ef671ff9` | Pinned metadata staging from [#38703](https://github.com/sgl-project/sglang/pull/38703), head `372bce7738605f15c6d71aaaba9a93873ea6c1a9`. |
+| `79ec899ddab9` | Local CPU or explicit CUDA-device selection for JPEG decode and media tensor preprocessing, with cache-identity separation and unsupported-transport guards. |
+| `cf811a8c5988` | Local CUDA-device validation and canonical spelling, so invalid selections fail clearly instead of falling through to JPEG fallback. |
+
+No net PLE serving-speed gain was established. Earlier dated performance
+measurements remain associated with their original source and workload.
+Build/install the selected source using [BUILD.md](BUILD.md); the dependency
+base package alone does not contain these changes.
+
+Flash-Next core subsequently merged upstream through
+[#37500](https://github.com/sgl-project/sglang/pull/37500) on September 8.
+This release deliberately retains the qualified integration base; the older
+PR-status entries below remain dated history, not current merge-status claims.
 
 ## v2.4.0 source provenance
 

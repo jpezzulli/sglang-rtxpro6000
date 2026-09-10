@@ -19,6 +19,7 @@ import io
 import sys
 import types
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -164,6 +165,129 @@ class TestLoadSingleItemImageDecode(CustomTestCase):
         self.assertIsInstance(image, Image.Image)
         reference = Image.open(io.BytesIO(data))
         np.testing.assert_array_equal(np.asarray(image), np.asarray(reference))
+
+    def test_cpu_preprocess_device_bypasses_gpu_jpeg_decoder(self):
+        data = _jpeg_bytes()
+        with (
+            patch.dict(
+                "os.environ", {"SGLANG_MM_PREPROCESS_DEVICE": "cpu"}, clear=False
+            ),
+            patch.object(common, "is_cuda", return_value=True),
+            patch.object(common, "decode_jpeg") as decode,
+        ):
+            image, _ = common.load_image(data)
+
+        self.assertIsInstance(image, Image.Image)
+        decode.assert_not_called()
+        np.testing.assert_array_equal(
+            np.asarray(image), np.asarray(Image.open(io.BytesIO(data)))
+        )
+
+    def test_explicit_cuda_device_is_used_for_jpeg_decode(self):
+        data = _jpeg_bytes()
+        expected = torch.zeros((3, 8, 8), dtype=torch.uint8)
+        with (
+            patch.dict(
+                "os.environ", {"SGLANG_MM_PREPROCESS_DEVICE": "cuda:2"}, clear=False
+            ),
+            patch.object(torch.cuda, "is_available", return_value=True),
+            patch.object(torch.cuda, "device_count", return_value=3),
+            patch.object(torch.cuda, "device", return_value=nullcontext()),
+            patch.object(common, "decode_jpeg", return_value=expected) as decode,
+        ):
+            image, _ = common.load_image(data)
+
+        self.assertIs(image, expected)
+        self.assertEqual(decode.call_args.kwargs["device"], "cuda:2")
+
+    def test_cuda_device_spelling_is_canonical_before_decode(self):
+        expected = torch.zeros((3, 8, 8), dtype=torch.uint8)
+
+        def decode_on_device(data, device):
+            self.assertEqual(torch.device(device), torch.device("cuda:1"))
+            return expected
+
+        with (
+            patch.dict("os.environ", {"SGLANG_MM_PREPROCESS_DEVICE": "cuda:01"}),
+            patch.object(torch.cuda, "is_available", return_value=True),
+            patch.object(torch.cuda, "device_count", return_value=2),
+            patch.object(common, "decode_jpeg", side_effect=decode_on_device) as decode,
+        ):
+            self.assertEqual(common.resolve_mm_preprocess_device(), "cuda:1")
+            image, _ = common.load_image(_jpeg_bytes())
+        self.assertIs(image, expected)
+        self.assertEqual(decode.call_args.kwargs["device"], "cuda:1")
+
+    def test_non_ascii_cuda_index_fails_before_decode(self):
+        with (
+            patch.dict("os.environ", {"SGLANG_MM_PREPROCESS_DEVICE": "cuda:\u0661"}),
+            patch.object(torch.cuda, "is_available", return_value=True),
+            patch.object(torch.cuda, "device_count", return_value=2),
+            patch.object(common, "decode_jpeg") as decode,
+            self.assertRaisesRegex(ValueError, "SGLANG_MM_PREPROCESS_DEVICE"),
+        ):
+            common.load_image(_jpeg_bytes())
+        decode.assert_not_called()
+
+    def test_forced_cpu_model_policy_wins_over_explicit_cuda(self):
+        data = _jpeg_bytes()
+        with (
+            patch.dict(
+                "os.environ", {"SGLANG_MM_PREPROCESS_DEVICE": "cuda:0"}, clear=False
+            ),
+            patch.object(torch.cuda, "is_available", return_value=True),
+            patch.object(torch.cuda, "device_count", return_value=1),
+            patch.object(common, "decode_jpeg") as decode,
+        ):
+            image, _ = common.load_image(data, gpu_image_decode=False)
+
+        self.assertIsInstance(image, Image.Image)
+        decode.assert_not_called()
+
+    def test_invalid_explicit_preprocess_device_fails_before_decode(self):
+        with (
+            patch.dict(
+                "os.environ", {"SGLANG_MM_PREPROCESS_DEVICE": "cuda"}, clear=False
+            ),
+            patch.object(common, "decode_jpeg") as decode,
+            self.assertRaisesRegex(ValueError, "SGLANG_MM_PREPROCESS_DEVICE"),
+        ):
+            common.load_image(_jpeg_bytes())
+        decode.assert_not_called()
+
+    def test_unavailable_explicit_cuda_device_fails_before_decode(self):
+        with (
+            patch.dict(
+                "os.environ", {"SGLANG_MM_PREPROCESS_DEVICE": "cuda:1"}, clear=False
+            ),
+            patch.object(torch.cuda, "is_available", return_value=True),
+            patch.object(torch.cuda, "device_count", return_value=1),
+            patch.object(common, "decode_jpeg") as decode,
+            self.assertRaisesRegex(RuntimeError, "only 1 device"),
+        ):
+            common.load_image(_jpeg_bytes())
+        decode.assert_not_called()
+
+    def test_explicit_cuda_device_scopes_fancy_decoder(self):
+        data = _jpeg_bytes()
+        expected = torch.zeros((3, 8, 8), dtype=torch.uint8)
+        device_context = Mock(return_value=nullcontext())
+        with (
+            patch.dict(
+                "os.environ", {"SGLANG_MM_PREPROCESS_DEVICE": "cuda:1"}, clear=False
+            ),
+            patch.object(torch.cuda, "is_available", return_value=True),
+            patch.object(torch.cuda, "device_count", return_value=2),
+            patch.object(torch.cuda, "device", device_context),
+            patch(
+                "sglang.srt.utils.nvjpeg_decoder.decode_jpeg_with_fancy_upsampling",
+                return_value=expected,
+            ),
+        ):
+            image, _ = common.load_image(data, gpu_image_decode="nvjpeg_fancy")
+
+        self.assertIs(image, expected)
+        device_context.assert_called_once_with("cuda:1")
 
     def test_high_fidelity_decoder_uses_fancy_planar_rgb_and_reuses_pool(self):
         expected = torch.zeros((3, 8, 8), dtype=torch.uint8)

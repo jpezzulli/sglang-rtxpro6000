@@ -13,6 +13,14 @@
   approximately 490K. This is not proof for every possible 524K prompt,
   modality, sampling configuration, or concurrent schedule.
 
+## v2.4.1 scope
+
+This maintenance update makes no additional serving-speed or model-quality
+claim. The PLE kernel improved in focused measurements, but a net decode gain
+was not established on the qualified Flash-Next profile. The clearer setup
+instructions are not a claim of a fresh full build on a second machine.
+Existing model, topology and persistence limits still apply.
+
 ## v2.4.0 scope
 
 The prefill percentage compares the same server initial-prefill timing window

@@ -9,7 +9,7 @@ device has to come from what the worker was handed.
 import unittest
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
 from sglang.srt.server_args import ServerArgs
@@ -37,6 +37,62 @@ def _make(**fields):
 
 
 class TestFastImageProcessorDevice(CustomTestCase):
+    def _construct(
+        self,
+        *,
+        preprocess_device,
+        configured_backend="torchvision",
+        actual_backend="torchvision",
+        transport="cpu",
+        base_gpu_id=0,
+        rl_on_policy_target=None,
+    ):
+        mm = SimpleNamespace(
+            allowed_media_domains=None,
+            media_url_max_file_size_mb=10,
+            mm_feature_transport=transport,
+            image_processor_backend=configured_backend,
+            disable_fast_image_processor=False,
+            mm_process_config={},
+            mm_preprocess_cache_size_mb=0,
+            trust_mm_content_hashes=False,
+            mm_io_worker_num=1,
+            mm_processor_worker_num=1,
+        )
+        serving = SimpleNamespace(skip_tokenizer_init=False, tokenizer_worker_num=1)
+        wrapped = SimpleNamespace(
+            image_processor=SimpleNamespace(backend=actual_backend),
+            tokenizer=SimpleNamespace(encode=lambda _: []),
+        )
+        server_args = SimpleNamespace(
+            base_gpu_id=base_gpu_id,
+            tp_size=1,
+            rl_on_policy_target=rl_on_policy_target,
+        )
+        thread_executor = Mock()
+        process_executor = Mock()
+        with (
+            patch(f"{BASE}.get_mm", return_value=mm),
+            patch(f"{BASE}.get_serving", return_value=serving),
+            patch(
+                f"{BASE}.resolve_mm_preprocess_device",
+                return_value=preprocess_device,
+            ),
+            patch(f"{BASE}.concurrent.futures.ThreadPoolExecutor", thread_executor),
+            patch(f"{BASE}.concurrent.futures.ProcessPoolExecutor", process_executor),
+            patch(f"{BASE}.MmItemMemoryPool") as mm_pool,
+        ):
+            try:
+                processor = _StubProcessor(
+                    SimpleNamespace(), server_args, wrapped, transport_mode=None
+                )
+            except Exception:
+                self.assertFalse(thread_executor.called)
+                self.assertFalse(process_executor.called)
+                self.assertFalse(mm_pool.called)
+                raise
+        return processor
+
     def _device(self, processor, **platform):
         flags = {"_is_cpu": False, "_is_xpu": False, "_is_npu": False}
         flags.update(platform)
@@ -64,6 +120,77 @@ class TestFastImageProcessorDevice(CustomTestCase):
         processor = _make(base_gpu_id=3, rl_on_policy_target="fsdp")
         self.assertEqual(self._device(processor), "cpu")
 
+    def test_explicit_cuda_conflicting_with_rl_cpu_policy_fails(self):
+        with (
+            patch.dict(
+                "os.environ", {"SGLANG_MM_PREPROCESS_DEVICE": "cuda:1"}, clear=False
+            ),
+            patch(f"{BASE}.torch.cuda.is_available", return_value=True),
+            patch(f"{BASE}.torch.cuda.device_count", return_value=2),
+            self.assertRaisesRegex(ValueError, "rl_on_policy_target"),
+        ):
+            self._device(_make(base_gpu_id=3, rl_on_policy_target="fsdp"))
+
+    def test_constructor_rejects_explicit_cuda_with_configured_pil(self):
+        with self.assertRaisesRegex(ValueError, "PIL image processor backend"):
+            self._construct(preprocess_device="cuda:0", configured_backend="pil")
+
+    def test_constructor_rejects_explicit_cuda_with_auto_resolved_pil(self):
+        with self.assertRaisesRegex(ValueError, "PIL image processor backend"):
+            self._construct(
+                preprocess_device="cuda:0",
+                configured_backend="auto",
+                actual_backend="pil",
+            )
+
+    def test_constructor_rejects_cross_gpu_device_transport(self):
+        for transport in ("cuda_ipc", "cuda_vmm"):
+            with (
+                self.subTest(transport=transport),
+                self.assertRaisesRegex(ValueError, "different from base_gpu_id"),
+            ):
+                self._construct(
+                    preprocess_device="cuda:1",
+                    transport=transport,
+                    base_gpu_id=0,
+                )
+
+    def test_constructor_rejects_explicit_cuda_with_rl_cpu_policy(self):
+        with self.assertRaisesRegex(ValueError, "rl_on_policy_target"):
+            self._construct(preprocess_device="cuda:0", rl_on_policy_target="fsdp")
+
+    def test_unset_auto_backend_preserves_baseline_for_known_backends(self):
+        for actual_backend in ("pil", "torchvision"):
+            with self.subTest(actual_backend=actual_backend):
+                processor = self._construct(
+                    preprocess_device=None,
+                    configured_backend="auto",
+                    actual_backend=actual_backend,
+                )
+                self.assertEqual(processor.image_processor_backend, "auto")
+                self.assertFalse(processor.disable_fast_image_processor)
+                self.assertNotIn(
+                    "mm_preprocess_device",
+                    processor.preprocess_fingerprint_payload(),
+                )
+                self.assertEqual(self._device(processor), "cuda:0")
+
+    def test_explicit_preprocess_device_overrides_model_gpu(self):
+        with (
+            patch.dict(
+                "os.environ", {"SGLANG_MM_PREPROCESS_DEVICE": "cuda:1"}, clear=False
+            ),
+            patch(f"{BASE}.torch.cuda.is_available", return_value=True),
+            patch(f"{BASE}.torch.cuda.device_count", return_value=2),
+        ):
+            self.assertEqual(self._device(_make(base_gpu_id=3)), "cuda:1")
+
+    def test_explicit_cpu_preprocess_device(self):
+        with patch.dict(
+            "os.environ", {"SGLANG_MM_PREPROCESS_DEVICE": "cpu"}, clear=False
+        ):
+            self.assertEqual(self._device(_make(base_gpu_id=3)), "cpu")
+
     def test_cpu_and_xpu_platforms_win_over_base_gpu_id(self):
         processor = _make(base_gpu_id=3)
         self.assertEqual(self._device(processor, _is_cpu=True), "cpu")
@@ -77,6 +204,33 @@ class TestFastImageProcessorDevice(CustomTestCase):
         with patch.multiple(BASE, _is_cpu=False, _is_xpu=False, _is_npu=True):
             device = processor._fast_image_processor_device(Glm4vProcessor())
         self.assertIsNone(device)
+
+    def test_preprocess_fingerprint_tracks_effective_device_and_decode_policy(self):
+        class WrappedProcessor:
+            pass
+
+        def payload(device, decode_mode):
+            processor = _make(base_gpu_id=0)
+            processor._processor = WrappedProcessor()
+            processor.mm_preprocess_device = device
+            processor.gpu_image_decode = decode_mode
+            processor.image_processor_backend = "torchvision"
+            processor.mm_feature_transport = "cpu"
+            processor.image_config = {}
+            processor.video_config = {}
+            processor.audio_config = {}
+            return processor.preprocess_fingerprint_payload()
+
+        for decode_mode in (True, "nvjpeg_fancy"):
+            with self.subTest(decode_mode=decode_mode):
+                automatic = payload(None, decode_mode)
+                cpu = payload("cpu", decode_mode)
+                cuda = payload("cuda:1", decode_mode)
+                self.assertNotIn("mm_preprocess_device", automatic)
+                self.assertEqual(cpu["gpu_image_decode"], False)
+                self.assertEqual(cuda["gpu_image_decode"], decode_mode)
+                self.assertNotEqual(automatic, cpu)
+                self.assertNotEqual(cpu, cuda)
 
 
 class TestFastImageProcessorMemoryPool(CustomTestCase):

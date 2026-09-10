@@ -122,6 +122,13 @@ class EncoderPreprocessor:
             model_config.hf_config, "model_type", "unknown"
         ).lower()
 
+        if envs.SGLANG_MM_PREPROCESS_DEVICE.get() is not None:
+            raise ValueError(
+                "SGLANG_MM_PREPROCESS_DEVICE is not supported by the separate "
+                "encoder preprocessing service; use its existing encoder-specific "
+                "preprocessing configuration instead."
+            )
+
         self.device = get_device().device
 
         use_image_processor_gpu = envs.SGLANG_ENCODER_IMAGE_PROCESSOR_USE_GPU.get()

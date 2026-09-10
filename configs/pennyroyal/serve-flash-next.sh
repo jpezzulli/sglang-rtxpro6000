@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Avoid synchronous RAM compaction for transient NumPy image arrays.
+# Operators can opt back into NumPy huge-page advice; this is not a kernel policy.
+export NUMPY_MADVISE_HUGEPAGE="${NUMPY_MADVISE_HUGEPAGE:-0}"
+export SGLANG_MM_PREPROCESS_DEVICE="${SGLANG_MM_PREPROCESS_DEVICE:-cpu}"
+case "$SGLANG_MM_PREPROCESS_DEVICE" in
+  cpu) IMAGE_PROCESSOR_BACKEND=pil ;;
+  cuda:*) IMAGE_PROCESSOR_BACKEND=torchvision ;;
+  *) echo "Choose SGLANG_MM_PREPROCESS_DEVICE=cpu or cuda:N" >&2; exit 1 ;;
+esac
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
@@ -38,9 +47,11 @@ export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export CUDACXX="${CUDACXX:-$CUDA_HOME/bin/nvcc}"
 export CC="${CC:-/usr/bin/gcc-15}" CXX="${CXX:-/usr/bin/g++-15}"
 export CUDAHOSTCXX="${CUDAHOSTCXX:-$CXX}" TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0}"
-export MAX_JOBS="${MAX_JOBS:-24}" CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-24}"
-export FLASHINFER_NINJA_JOBS="${FLASHINFER_NINJA_JOBS:-24}" FLASHINFER_NVCC_THREADS="${FLASHINFER_NVCC_THREADS:-4}"
-export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-24}"
+export PENNY_BUILD_JOBS="${PENNY_BUILD_JOBS:-4}"
+export MAX_JOBS="${MAX_JOBS:-$PENNY_BUILD_JOBS}" CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$PENNY_BUILD_JOBS}"
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$PENNY_BUILD_JOBS}"
+export FLASHINFER_NINJA_JOBS="${FLASHINFER_NINJA_JOBS:-$PENNY_BUILD_JOBS}" FLASHINFER_NVCC_THREADS="${FLASHINFER_NVCC_THREADS:-1}"
+export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-$PENNY_BUILD_JOBS}"
 export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 export HF_HOME="$CACHE_BASE/huggingface" XDG_CACHE_HOME="$CACHE_BASE"
@@ -51,18 +62,24 @@ export SGLANG_CACHE_DIR="$CACHE_BASE/sglang" SGLANG_JIT_CACHE_DIR="$CACHE_BASE/s
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export SGLANG_NUMA_BIND_V2=false SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
 export SGLANG_MAMBA_CONV_DTYPE="$MAMBA_CONV_DTYPE"
-export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 TOKENIZERS_PARALLELISM=false
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}" MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
+export TOKENIZERS_PARALLELISM=false
 
 TARGET_OVERRIDES='{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":2.0,"original_max_position_embeddings":262144}}}'
 SGLANG_REV="$(git -C "$REPO_ROOT" rev-parse --short=10 HEAD)"
-TORCH_VERSION="$("$PYTHON" -c 'import torch; print(torch.__version__)')"
-NIXL_STORAGE="$($NAMESPACE_HELPER \
+TORCH_VERSION="$("$PYTHON" -c 'import torch; from sglang.srt.utils import resolve_mm_preprocess_device; resolve_mm_preprocess_device(); print(torch.__version__)')"
+echo "Media preprocessing: $SGLANG_MM_PREPROCESS_DEVICE ($IMAGE_PROCESSOR_BACKEND); model GPU: cuda:0"
+printf 'Pennyroyal profile: Flash-Next (native NEXTN, no FR-Spec)\n  runtime: %s\n  target: %s\n  cache root: %s\n  NIXL root: %s\n' \
+  "$SGLANG_EXE" "$TARGET_MODEL" "$CACHE_BASE" "$NIXL_STORAGE_BASE"
+echo "Deriving NIXL namespace; checkpoint identity hashing may take time..."
+NIXL_STORAGE="$("$NAMESPACE_HELPER" \
   --base-root "$NIXL_STORAGE_BASE" \
   --slug "qwen3_8_flash_next_524k_nextn_${SGLANG_REV}" \
   --git-repo "$REPO_ROOT" \
   --model "target=$TARGET_MODEL" \
   --field "chat_template_sha256=$CHAT_TEMPLATE_SHA" \
-  --field "image_processor_backend=pil" \
+  --field "image_processor_backend=$IMAGE_PROCESSOR_BACKEND" \
+  --field "mm_preprocess_device=$SGLANG_MM_PREPROCESS_DEVICE" \
   --field "context_length=$CONTEXT_LENGTH" \
   --field "tp_size=$TP_SIZE" \
   --field "page_size=$PAGE_SIZE" \
@@ -112,7 +129,7 @@ exec "$SGLANG_EXE" serve \
   --hicache-storage-prefetch-policy timeout \
   --hicache-storage-backend-extra-config "@$NIXL_CONFIG" \
   --ple-offload-embedding --trust-remote-code \
-  --chat-template "$CHAT_TEMPLATE" --image-processor-backend pil \
+  --chat-template "$CHAT_TEMPLATE" --image-processor-backend "$IMAGE_PROCESSOR_BACKEND" \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \
   --default-chat-template-kwargs '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}' \
