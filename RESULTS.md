@@ -305,6 +305,33 @@ It is useful upstream evidence that the integration is not confined to
 Penny's exact TP=1 shape. It is not a controlled TP=1-versus-TP=2 comparison,
 and the third-party result has not been reproduced locally.
 
+## Qwen3.8-27B/DFlash2 September 10 qualification
+
+Measured September 10, 2026, during v2.4.1 maintenance qualification at source
+`1048ef671ff9`. The FP8 target and DFlash2 ran on one RTX PRO 6000, TP1, with
+524,288-token context, 1,118,784-token target and draft KV pools, 24 Mamba
+slots, and HiCache/NIXL enabled. Requests explicitly used medium reasoning
+effort. These are observations, not a new performance-improvement claim.
+
+| Workload | Speed | Timing / result |
+|---|---:|---|
+| 64K cold prefill — 63,888 input tokens | **6,570 tok/s** | 9.72427 s server prefill; 10.468 s client TTFT; exact READY |
+| 490K cold prefill — 489,903 input tokens | **1,646 tok/s** | 297.71330 s server prefill; 302.320 s client TTFT; all three needles found |
+| Single-request decode — 1,024 output tokens | **108.31 tok/s** | Median of three post-first-token rates |
+| Four simultaneous requests — 1,024 output tokens each | **374.98 tok/s aggregate** | Median of three synchronized batch makespan rates |
+
+Each prefill row is one cold request with zero cached input tokens, matched
+to its server request-time record. Rates divide authoritative input counts by
+the server's initial-prefill span, not client TTFT. The 490K request contained
+all three separated needles in one prompt.
+
+C1 samples were 108.93575, 105.57627 and 108.31228 tok/s; C4 aggregate samples
+were 371.35032, 374.98499 and 377.01625 tok/s. All three runs are retained.
+C1 divides 1,023 tokens by the post-first-token interval; C4 divides all
+4,096 completion tokens by synchronized batch makespan, including TTFT and
+the slowest response. The per-stream rates are not added together. The earlier
+dated 27B measurements below remain historical results, not comparison controls.
+
 ## Qwen3.8-27B/DFlash2 current-launcher confirmation
 
 This 2026-08-26 campaign qualified the current 24-slot, five-state path setting

@@ -85,6 +85,23 @@ the rate excludes prefill and time between requests. Short replies are excluded
 from this sustained-generation figure. This is an observed session, not a
 controlled benchmark. [Session details](RESULTS.md#flash-next-agentic-session--september-6-2026).
 
+### 27B FP8 / DFlash2 performance at a glance
+
+Measured September 10, 2026, during **v2.4.1 qualification on one RTX PRO 6000,
+TP1**, keeping 524,288-token context, 1,118,784-token target and draft KV pools,
+and HiCache/NIXL enabled. These are dated measurements, not guaranteed speeds.
+
+| Workload | Speed | Timing / result |
+|---|---:|---|
+| 64K cold prefill — 63,888 input tokens | **6,570 tok/s** | Server prefill rate; 10.468 s to first token; exact READY |
+| 490K cold prefill — 489,903 input tokens | **1,646 tok/s** | Server prefill rate; 302.320 s to first token; all three needles found |
+| Single-request decode — 1,024 output tokens | **108.31 tok/s** | Median of three runs; excludes time to first token |
+| Four simultaneous requests — 1,024 output tokens each | **374.98 tok/s aggregate** | Median of three runs; includes time to first token and the slowest response |
+
+Prefill uses the server's initial-prefill time, with one cold observation at
+each length. Decode medians retain all three runs. These measurements do not
+establish a speedup over an earlier release. [Results and timing details](RESULTS.md#qwen38-27bdflash2-september-10-qualification).
+
 ### Broader model support without HiCache/NIXL
 
 **Without HiCache and NIXL, many more SGLang-supported models and speculative
