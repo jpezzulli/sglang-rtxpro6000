@@ -206,6 +206,31 @@ def fused_qwen4_ngram_hash(
     return output
 
 
+def can_fuse_qwen4_ngram_gather(
+    contexts: torch.Tensor,
+    multipliers: torch.Tensor,
+    vocab_sizes: torch.Tensor,
+    offsets: torch.Tensor,
+    weight: torch.Tensor,
+    tp_size: int,
+) -> bool:
+    """Select only the measured one-warp pinned-FP8 gather shapes on SM120."""
+    # Four-warp fusion regresses these small host lookups. Keep unmeasured
+    # shapes, storage types and topologies on the original split path.
+    return (
+        can_fuse_qwen4_ngram_hash(contexts, multipliers, vocab_sizes, offsets)
+        and contexts.shape[0] in (4, 16)
+        and tp_size == 1
+        and weight.device.type == "cpu"
+        and weight.dtype == torch.float8_e4m3fn
+        and weight.ndim == 2
+        and weight.shape[1] == 160
+        and weight.is_contiguous()
+        and weight.is_pinned()
+        and torch.cuda.get_device_capability(contexts.device) == (12, 0)
+    )
+
+
 def fused_qwen4_ngram_gather(
     contexts: torch.Tensor,
     multipliers: torch.Tensor,
@@ -216,6 +241,8 @@ def fused_qwen4_ngram_gather(
     tp_vocab_start: int,
     tp_vocab_end: int,
     out: torch.Tensor,
+    *,
+    num_warps: int = 4,
 ) -> torch.Tensor:
     """Hash and gather unscaled BF16 rows directly from a pinned host table.
 
@@ -256,6 +283,7 @@ def fused_qwen4_ngram_gather(
             NGRAM_SIZE=_QWEN4_NGRAM_SIZE,
             HEADS_PER_NGRAM=_QWEN4_HEADS_PER_NGRAM,
             NGRAM_HEADS=_QWEN4_NGRAM_HEADS,
+            num_warps=num_warps,
         )
     return out
 

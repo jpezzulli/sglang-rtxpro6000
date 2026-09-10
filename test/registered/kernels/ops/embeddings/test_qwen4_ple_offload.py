@@ -2,6 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from torch import nn
+
 from sglang.kernels.ops import qwen4_ple
 from sglang.srt.layers.quantization.unquant import UnquantizedEmbeddingMethod
 from sglang.srt.layers.vocab_parallel_embedding import (
@@ -16,7 +18,6 @@ from sglang.srt.models.qwen4_exp import (
 )
 from sglang.srt.utils import set_weight_attrs
 from sglang.test.ci.ci_register import register_cuda_ci
-from torch import nn
 
 register_cuda_ci(est_time=45, stage="base-b", runner_config="1-gpu-small")
 
@@ -261,7 +262,7 @@ def _reference_ngram_ids(contexts, multipliers, sizes, offsets, eos_token_id=0):
 @pytest.mark.parametrize("vocab_start,vocab_end", [(0, 850), (100, 400)])
 @pytest.mark.parametrize("embedding_dim,eos_token_id", [(7, 0), (160, 42), (257, 0)])
 def test_qwen4_fused_ngram_gather(
-    dtype, num_tokens, vocab_start, vocab_end, embedding_dim, eos_token_id
+    dtype, num_tokens, vocab_start, vocab_end, embedding_dim, eos_token_id, num_warps=4
 ):
     contexts, multipliers, sizes, offsets = _make_ngram_inputs(num_tokens, eos_token_id)
     # Padded shard storage is legal, but only the unpadded vocabulary is owned.
@@ -284,6 +285,7 @@ def test_qwen4_fused_ngram_gather(
         vocab_start,
         vocab_end,
         output,
+        num_warps=num_warps,
     )
     ids = _reference_ngram_ids(contexts, multipliers, sizes, offsets, eos_token_id)
     in_range = (ids >= vocab_start) & (ids < vocab_end)
@@ -292,6 +294,13 @@ def test_qwen4_fused_ngram_gather(
     expected = torch.where(in_range[..., None], rows[local_ids], 0)
     assert actual.data_ptr() == output.data_ptr()
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("num_tokens", [4, 16])
+def test_qwen4_onewarp_ngram_gather(num_tokens):
+    test_qwen4_fused_ngram_gather(
+        torch.float8_e4m3fn, num_tokens, 0, 850, 160, 42, num_warps=1
+    )
 
 
 def test_qwen4_fused_ngram_gather_validates_output():
@@ -308,10 +317,16 @@ def test_qwen4_fused_ngram_gather_validates_output():
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize("gather_dp_tokens", [False, True])
 @pytest.mark.parametrize(
-    "mode", [ForwardMode.DECODE, ForwardMode.TARGET_VERIFY, ForwardMode.EXTEND]
+    "mode,num_tokens",
+    [
+        (ForwardMode.DECODE, 5),
+        (ForwardMode.TARGET_VERIFY, 4),
+        (ForwardMode.TARGET_VERIFY, 16),
+        (ForwardMode.EXTEND, 5),
+    ],
 )
 def test_qwen4_ple_prefetch_stream_and_graph(
-    monkeypatch, fusion, dtype, gather_dp_tokens, mode
+    monkeypatch, fusion, dtype, gather_dp_tokens, mode, num_tokens
 ):
     contexts, multipliers, sizes, offsets = _make_ngram_inputs(5)
     if mode == ForwardMode.DECODE:
@@ -323,9 +338,10 @@ def test_qwen4_ple_prefetch_stream_and_graph(
         # same windows with unequal request lengths; both carry graph padding.
         contexts = torch.tensor([[1, 2, 3, 0, 5, 6], [7, 8, 9, 0, 0, 0]], device="cuda")
         if mode == ForwardMode.TARGET_VERIFY:
-            positions = torch.arange(8, device="cuda")
+            contexts = contexts.repeat((num_tokens + 7) // 8, 1)[: num_tokens // 4]
+            positions = torch.arange(num_tokens, device="cuda")
             req_indices, token_offsets = positions // 4, positions % 4
-            physical_tokens = 12
+            physical_tokens = num_tokens + 4
         else:
             req_indices = torch.tensor([0, 0, 0, 0, 1], device="cuda")
             token_offsets = torch.tensor([0, 1, 2, 3, 0], device="cuda")
@@ -395,6 +411,7 @@ def test_qwen4_ple_prefetch_stream_and_graph(
     streams = []
 
     def checked_gather(*args, **kwargs):
+        assert kwargs["num_warps"] == 1
         streams.append(torch.cuda.current_stream())
         return original(*args, **kwargs)
 
@@ -438,7 +455,13 @@ def test_qwen4_ple_prefetch_stream_and_graph(
 
     actual = run()
     torch.testing.assert_close(actual, expected(), rtol=0, atol=0)
-    if fusion == "enabled" and not gather_dp_tokens:
+    if (
+        fusion == "enabled"
+        and not gather_dp_tokens
+        and mode == ForwardMode.TARGET_VERIFY
+        and dtype == torch.float8_e4m3fn
+        and torch.cuda.get_device_capability(contexts.device) == (12, 0)
+    ):
         assert streams == [layer._prefetch_stream]
         assert hash_streams == host_gather_streams == []
     else:
@@ -455,9 +478,14 @@ def test_qwen4_ple_prefetch_stream_and_graph(
     with torch.cuda.graph(graph):
         main_stream = torch.cuda.current_stream()
         graph_output = run()
-    contexts.copy_(contexts.flip(0).clone())
+    before = expected()
+    # C1 verify has only one context row, so flipping rows would be a no-op.
+    # Change token values in place while retaining the EOS positions.
+    contexts.copy_(torch.where(contexts == 0, contexts, contexts + 17))
+    after = expected()
+    assert not torch.equal(before, after)
     graph.replay()
-    torch.testing.assert_close(graph_output, expected(), rtol=0, atol=0)
+    torch.testing.assert_close(graph_output, after, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("fallback", ["disabled", "unsupported"])

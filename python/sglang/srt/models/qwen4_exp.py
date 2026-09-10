@@ -1117,6 +1117,7 @@ class Qwen4ExpPLELayer(nn.Module):
         if self._prefetch_state is not None:
             raise RuntimeError("PLE prefetch state was not consumed before reuse")
         embedding = self.ple_embedding
+        offloaded_embedding = embedding.ngram_embedding
         contexts = None
         if embedding.gather_dp_tokens:
             # Keep cross-DP collectives on the main stream in their original order.
@@ -1139,15 +1140,21 @@ class Qwen4ExpPLELayer(nn.Module):
             contexts = embedding.prepare_ngram_contexts(batch)
             semantic_tokens = contexts.shape[0]
             from sglang.kernels.ops.qwen4_ple import (
-                can_fuse_qwen4_ngram_hash,
+                can_fuse_qwen4_ngram_gather,
                 fused_qwen4_ngram_gather,
             )
 
-            if embedding.enable_ple_fusion and can_fuse_qwen4_ngram_hash(
-                contexts,
-                embedding.layer_multipliers,
-                embedding.ngram_heads_vocab_sizes,
-                embedding.ngram_heads_offsets,
+            if (
+                embedding.enable_ple_fusion
+                and batch.mode.is_target_verify()
+                and can_fuse_qwen4_ngram_gather(
+                    contexts,
+                    embedding.layer_multipliers,
+                    embedding.ngram_heads_vocab_sizes,
+                    embedding.ngram_heads_offsets,
+                    offloaded_embedding.weight,
+                    offloaded_embedding.tp_size,
+                )
             ):
                 prefetch_input = contexts
             else:
@@ -1156,7 +1163,8 @@ class Qwen4ExpPLELayer(nn.Module):
                 # prefetch is consumed, so their producer must stay on main.
                 lookup_ids = embedding._hash_contexts(
                     contexts,
-                    decode_sized=batch.mode.is_decode() or batch.mode.is_target_verify(),
+                    decode_sized=batch.mode.is_decode()
+                    or batch.mode.is_target_verify(),
                 )
                 prefetch_input = lookup_ids
                 contexts = None
@@ -1166,8 +1174,6 @@ class Qwen4ExpPLELayer(nn.Module):
             return
         prefetched = self._get_prefetch_buffer(lookup_tokens, prefetch_input)
         output_view = prefetched.view(lookup_tokens, embedding.ngram_heads, -1)
-        offloaded_embedding = embedding.ngram_embedding
-
         stream = self._prefetch_stream
         stream.wait_stream(torch.cuda.current_stream())
         # Context windows originate on the main stream and can lose their last
@@ -1188,6 +1194,7 @@ class Qwen4ExpPLELayer(nn.Module):
                     offloaded_embedding.shard_indices.org_vocab_start_index,
                     offloaded_embedding.shard_indices.org_vocab_end_index,
                     output_view,
+                    num_warps=1,
                 )
         self._prefetch_state = prefetched, semantic_tokens, physical_tokens
 
