@@ -2418,6 +2418,146 @@ class ServingChatTestCase(unittest.TestCase):
             chunks.append(chunk)
         return chunks
 
+    def test_multitoken_stream_preserves_top_logprob_rows(self):
+        content = {
+            "meta_info": {
+                "output_token_logprobs": [
+                    (-0.1, 10, "answer"),
+                    (-0.2, 11, '":'),
+                    (-0.3, 12, "42"),
+                ],
+                "output_top_logprobs": [
+                    [(-0.1, 10, "answer"), (-1.1, 20, "réponse")],
+                    [(-0.2, 11, '":'), (-1.2, 21, "=")],
+                    [(-0.3, 12, "42"), (-1.3, 22, "43")],
+                ],
+            },
+        }
+
+        streamed = self.chat._process_streaming_logprobs(content, 0, 3)
+        nonstreamed = self.chat._process_response_logprobs(content)
+
+        self.assertEqual(streamed, nonstreamed)
+        self.assertEqual(
+            [
+                [(top.token, top.logprob) for top in row.top_logprobs]
+                for row in streamed.content
+            ],
+            [
+                [("answer", -0.1), ("réponse", -1.1)],
+                [('":', -0.2), ("=", -1.2)],
+                [("42", -0.3), ("43", -1.3)],
+            ],
+        )
+
+    def test_partial_stream_chunks_preserve_each_top_logprob_row(self):
+        all_token_logprobs = [
+            (-0.1, 10, "zero"),
+            (-0.2, 11, "one"),
+            (-0.3, 12, "two"),
+            (-0.4, 13, "three"),
+        ]
+        all_top_logprobs = [
+            [(-1.0 - idx, 20 + idx, f"alt-{idx}")]
+            for idx in range(len(all_token_logprobs))
+        ]
+
+        for incremental, token_rows, top_rows, start, end in [
+            (False, all_token_logprobs, all_top_logprobs, 1, 3),
+            (True, all_token_logprobs[1:3], all_top_logprobs[1:3], 1, 3),
+        ]:
+            with self.subTest(incremental_streaming_output=incremental):
+                self.tm.server_args.incremental_streaming_output = incremental
+                content = {
+                    "meta_info": {
+                        "output_token_logprobs": token_rows,
+                        "output_top_logprobs": top_rows,
+                    }
+                }
+
+                streamed = self.chat._process_streaming_logprobs(content, start, end)
+
+                self.assertEqual(
+                    [row.token for row in streamed.content], ["one", "two"]
+                )
+                self.assertEqual(
+                    [row.top_logprobs[0].token for row in streamed.content],
+                    ["alt-1", "alt-2"],
+                )
+
+    def test_response_logprobs_without_alternatives_keep_empty_rows(self):
+        content = {
+            "meta_info": {
+                "output_token_logprobs": [
+                    (-0.1, 10, "answer"),
+                    (-0.2, 11, "done"),
+                ],
+                "output_top_logprobs": None,
+            }
+        }
+
+        nonstreamed = self.chat._process_response_logprobs(content)
+        streamed = self.chat._process_streaming_logprobs(content, 0, 2)
+
+        self.assertEqual([row.token for row in nonstreamed.content], ["answer", "done"])
+        self.assertEqual([row.top_logprobs for row in nonstreamed.content], [[], []])
+        self.assertEqual(streamed, nonstreamed)
+
+    def test_logprob_processors_are_skipped_when_not_requested(self):
+        result = {
+            "text": "answer done",
+            "meta_info": {
+                "id": "chatcmpl-no-logprobs",
+                "prompt_tokens": 5,
+                "completion_tokens": 2,
+                "cached_tokens": 0,
+                "weight_version": "default",
+                "finish_reason": {"type": "stop", "matched": None},
+                "output_token_logprobs": [
+                    (-0.1, 10, "answer"),
+                    (-0.2, 11, "done"),
+                ],
+                "output_top_logprobs": [[(-0.1, 10, "answer")]],
+                "output_token_logprobs_length": 2,
+            },
+            "index": 0,
+        }
+        nonstream_req = ChatCompletionRequest(
+            model="x",
+            messages=[{"role": "user", "content": "Hi?"}],
+            logprobs=False,
+        )
+        with patch.object(self.chat, "_process_response_logprobs") as process_mock:
+            response = self.chat._build_chat_response(nonstream_req, [result], 123)
+        process_mock.assert_not_called()
+        self.assertIsNone(response.choices[0].logprobs)
+
+        async def _mock_generate():
+            yield result
+
+        self.tm.generate_request.return_value = _mock_generate()
+        stream_req = ChatCompletionRequest(
+            model="x",
+            messages=[{"role": "user", "content": "Hi?"}],
+            stream=True,
+            logprobs=False,
+        )
+        with patch(
+            "sglang.srt.entrypoints.openai.serving_chat.generate_chat_conv"
+        ) as conv_mock:
+            conv_ins = Mock()
+            conv_ins.get_prompt.return_value = "Test prompt"
+            conv_mock.return_value = conv_ins
+            adapted_request, _ = self.chat._convert_to_internal_request(
+                stream_req, self.fastapi_request
+            )
+            with patch.object(self.chat, "_process_streaming_logprobs") as process_mock:
+                chunks = self._run_chat_stream(adapted_request, stream_req)
+        process_mock.assert_not_called()
+        for chunk in self._parse_chunks(chunks):
+            for choice in chunk.get("choices", []):
+                self.assertIsNone(choice.get("logprobs"))
+
     def test_streaming_logprobs_attached_with_reasoning_parser(self):
         """Logprobs must ride on the reasoning chunk when a reasoning parser is active."""
         self.chat.reasoning_parser = "qwen3"
