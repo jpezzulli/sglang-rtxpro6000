@@ -158,6 +158,65 @@ def test_next_recipes_expose_qualified_media_devices_without_gpu_access():
             assert "Choose SGLANG_MM_PREPROCESS_DEVICE" not in result.stderr
 
 
+def test_next_recipes_initialize_cache_environment_before_nvme_preflight(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    for filename in ("config.json", "model.safetensors.index.json", "tokenizer.json"):
+        (source / filename).write_text("{}")
+    plugin = tmp_path / "plugin" / "sglang_ssd_stream"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.py").touch()
+    cache = tmp_path / "cache"
+    nixl = tmp_path / "nixl"
+    home = tmp_path / "readonly-home"
+    home.mkdir(mode=0o500)
+    observed = tmp_path / "cache-observed"
+    fake_sglang = tmp_path / "sglang"
+    fake_sglang.write_text("#!/bin/sh\nexit 0\n")
+    fake_sglang.chmod(0o755)
+    python_wrapper = tmp_path / "python"
+    python_wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        '[[ "$HF_HOME" == "$CACHE_BASE/huggingface" ]]\n'
+        '[[ "$XDG_CACHE_HOME" == "$CACHE_BASE" ]]\n'
+        '[[ "$TORCH_HOME" == "$CACHE_BASE/torch" ]]\n'
+        '[[ "$TORCHINDUCTOR_CACHE_DIR" == "$CACHE_BASE/torchinductor" ]]\n'
+        '[[ "$TRITON_CACHE_DIR" == "$CACHE_BASE/triton" ]]\n'
+        '[[ "$CUDA_CACHE_PATH" == "$CACHE_BASE/cuda" ]]\n'
+        '[[ "$FLASHINFER_WORKSPACE_BASE" == "$CACHE_BASE/flashinfer" ]]\n'
+        '[[ "$SGLANG_CACHE_DIR" == "$CACHE_BASE/sglang" ]]\n'
+        '[[ "$SGLANG_JIT_CACHE_DIR" == "$CACHE_BASE/sglang/jit" ]]\n'
+        '[[ -d "$SGLANG_JIT_CACHE_DIR" ]]\n'
+        'printf ready > "$CACHE_OBSERVED"\n'
+        "printf '%064d\\n' 0\n"
+    )
+    python_wrapper.chmod(0o755)
+
+    for recipe in NEXT_RECIPES:
+        observed.unlink(missing_ok=True)
+        result = subprocess.run(
+            ["bash", str(recipe)],
+            env={
+                **os.environ,
+                "HOME": str(home),
+                "TARGET_MODEL": str(source),
+                "CACHE_BASE": str(cache),
+                "CACHE_OBSERVED": str(observed),
+                "NIXL_STORAGE_BASE": str(nixl),
+                "PENNY_PLE_BACKEND": "nvme",
+                "PENNY_PLE_NVME_MODEL": str(tmp_path / "prepared"),
+                "PENNY_PLE_PLUGIN_DIR": str(plugin.parent),
+                "SGLANG_EXE": str(fake_sglang),
+                "PYTHON": str(python_wrapper),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert observed.read_text() == "ready", (recipe, result.stderr)
+
+
 def test_source_guard_matches_every_hooked_publication_module():
     guard = json.loads(GUARD.read_text())
     assert guard["source"].startswith("Pennyroyal v2.5.0")

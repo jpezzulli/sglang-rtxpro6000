@@ -22,7 +22,6 @@ NIXL_STORAGE_BASE="${NIXL_STORAGE_BASE:?Set NIXL_STORAGE_BASE to the FILE cache 
 NIXL_CONFIG="${NIXL_CONFIG:-$SCRIPT_DIR/nixl-posix-frspec.toml}"
 NAMESPACE_HELPER="$REPO_ROOT/scripts/pennyroyal/derive_namespace.py"
 source "$SCRIPT_DIR/chat-template.sh"
-source "$SCRIPT_DIR/ple-backend.sh"
 
 # Pin the qualified map and tokenizer: a different ID mapping changes draft
 # proposals and must never silently reuse this representation's cache namespace.
@@ -37,8 +36,6 @@ MAMBA_SSM_DTYPE=bfloat16
 MAMBA_CONV_DTYPE=bfloat16
 MAMBA_TRACK_INTERVAL=64
 PREFILL_CHUNK_SIZE=4096
-configure_max_total_tokens 824384
-
 for path in "$SGLANG_EXE" "$PYTHON" "$NAMESPACE_HELPER"; do
   [[ -x "$path" ]] || { echo "Required executable missing: $path" >&2; exit 1; }
 done
@@ -77,6 +74,11 @@ export SGLANG_NUMA_BIND_V2=false SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
 export SGLANG_MAMBA_CONV_DTYPE="$MAMBA_CONV_DTYPE"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}" MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 export TOKENIZERS_PARALLELISM=false
+
+# NVMe preflight imports Torch, Triton, FlashInfer and SGLang. Activate their
+# durable cache locations before selecting the optional backend.
+source "$SCRIPT_DIR/ple-backend.sh"
+configure_max_total_tokens 824384
 
 TARGET_OVERRIDES='{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":2.0,"original_max_position_embeddings":262144}}}'
 printf 'Pennyroyal profile: Flash-Next FR-Spec\n  runtime: %s\n  target: %s\n  token map: %s\n  cache root: %s\n  NIXL root: %s\n' \

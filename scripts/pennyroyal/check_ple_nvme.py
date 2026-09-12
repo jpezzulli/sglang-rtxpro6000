@@ -41,27 +41,6 @@ def _load_ssd_stream_entrypoint(expected_register):
         )
 
 
-def _verify_optional_source_file(source: Path, prepared: Path, filename: str) -> None:
-    source_path = source / filename
-    prepared_path = prepared / filename
-    source_present = source_path.exists() or source_path.is_symlink()
-    prepared_present = prepared_path.exists() or prepared_path.is_symlink()
-    if source_present != prepared_present:
-        raise ValueError(
-            f"Prepared checkpoint presence differs for optional {filename}"
-        )
-    if not source_present:
-        return
-    if not source_path.is_file() or not prepared_path.is_file():
-        raise ValueError(f"Optional checkpoint file is invalid: {filename}")
-    if prepared_path.resolve(strict=True) != source_path.resolve(strict=True):
-        raise ValueError(
-            f"Prepared optional checkpoint file does not resolve to source: {filename}"
-        )
-    if sha256(prepared_path) != sha256(source_path):
-        raise ValueError(f"Prepared checkpoint changed {filename}")
-
-
 def _tensor_sha256(tensor: preparer.TensorLocation) -> str:
     digest = hashlib.sha256()
     remaining = tensor.nbytes
@@ -89,7 +68,7 @@ def _weight_map(index: dict, path: Path) -> dict[str, str]:
 
 def _verify_prepared_weights(
     source: Path, prepared: Path, manifest: dict
-) -> None:
+) -> tuple[set[Path], set[Path]]:
     source_index_path = source / preparer.INDEX_NAME
     prepared_index_path = prepared / preparer.INDEX_NAME
     source_index = preparer._read_json(source_index_path)
@@ -121,6 +100,8 @@ def _verify_prepared_weights(
     affected_relatives = {
         preparer._safe_relative_path(source_map[name]) for name in removed_names
     }
+    if any(relative.parent != Path(".") for relative in affected_relatives):
+        raise ValueError("Source PLE safetensors must be at the checkpoint root")
     provenance = manifest.get("source")
     if not isinstance(provenance, dict):
         raise ValueError("NVMe PLE manifest has no source provenance")
@@ -188,28 +169,14 @@ def _verify_prepared_weights(
     if prepared_index != expected_index:
         raise ValueError("Prepared weight index differs from deterministic output")
 
-    ordinary_relatives = {
-        preparer._safe_relative_path(raw_path)
-        for raw_path in expected_map.values()
-        if preparer._safe_relative_path(raw_path) not in affected_relatives
-    }
-    for relative in sorted(ordinary_relatives):
-        source_path = (source / relative).resolve(strict=True)
-        try:
-            prepared_path = (prepared / relative).resolve(strict=True)
-        except OSError as exc:
-            raise ValueError(f"Prepared ordinary shard is missing: {relative}") from exc
-        if prepared_path != source_path:
-            raise ValueError(
-                f"Prepared ordinary shard does not resolve to source: {relative}"
-            )
-
+    rewritten_relatives = set()
     for relative, source_header in source_headers.items():
         retained = tuple(
             tensor for tensor in source_header.tensors if tensor.name not in removed_names
         )
         if not retained:
             continue
+        rewritten_relatives.add(relative)
         prepared_path = prepared / relative
         prepared_header = preparer._read_safetensors_header(prepared_path)
         encoded_header = preparer._encoded_safetensors_header(source_header, retained)
@@ -244,6 +211,102 @@ def _verify_prepared_weights(
                     "Prepared retained tensor differs from source: "
                     f"{source_tensor.name}"
                 )
+    return affected_relatives, rewritten_relatives
+
+
+def _manifest_table_relatives(manifest: dict) -> set[Path]:
+    raw_tables = manifest.get("tables")
+    if not isinstance(raw_tables, list) or not raw_tables:
+        raise ValueError("NVMe PLE manifest has no tables")
+    relatives = set()
+    for table in raw_tables:
+        if not isinstance(table, dict):
+            raise ValueError("NVMe PLE table entry is not an object")
+        relative = preparer._safe_relative_path(table.get("path"))
+        if relative.parent != Path("ple"):
+            raise ValueError(f"NVMe PLE table must be directly inside ple/: {relative}")
+        if relative in relatives:
+            raise ValueError(f"duplicate NVMe PLE table path: {relative}")
+        relatives.add(relative)
+    return relatives
+
+
+def _verify_source_overlay(
+    source: Path,
+    prepared: Path,
+    affected_relatives: set[Path],
+    rewritten_relatives: set[Path],
+    table_relatives: set[Path],
+) -> None:
+    """Bind every ordinary asset as one unit, including future loader metadata.
+
+    The source checkpoint remains immutable by operator precondition while this
+    prepared overlay is used; only the preparer's explicit local outputs differ.
+    """
+    for reserved in (preparer.MANIFEST_NAME, "ple"):
+        path = source / reserved
+        if path.exists() or path.is_symlink():
+            raise ValueError(f"Source checkpoint contains reserved asset: {reserved}")
+
+    affected_names = {relative.name for relative in affected_relatives}
+    ordinary = {
+        entry.name: entry
+        for entry in source.iterdir()
+        if entry.name != preparer.INDEX_NAME
+        and entry.name not in affected_names
+    }
+    local_names = {
+        preparer.INDEX_NAME,
+        preparer.MANIFEST_NAME,
+        "ple",
+        *(relative.name for relative in rewritten_relatives),
+    }
+    expected_names = set(ordinary) | local_names
+    actual_names = {entry.name for entry in prepared.iterdir()}
+    if actual_names != expected_names:
+        missing = sorted(expected_names - actual_names)
+        unexpected = sorted(actual_names - expected_names)
+        raise ValueError(
+            "Prepared source overlay asset set differs from deterministic output; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+
+    for name, source_path in ordinary.items():
+        prepared_path = prepared / name
+        try:
+            source_target = source_path.resolve(strict=True)
+            prepared_target = prepared_path.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(f"Prepared source overlay asset is invalid: {name}") from exc
+        if not prepared_path.is_symlink() or prepared_target != source_target:
+            raise ValueError(
+                f"Prepared source overlay asset does not resolve to source: {name}"
+            )
+
+    for relative in {
+        Path(preparer.INDEX_NAME),
+        Path(preparer.MANIFEST_NAME),
+        *rewritten_relatives,
+    }:
+        path = prepared / relative
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"Prepared rewritten asset is invalid: {relative}")
+    ple_root = prepared / "ple"
+    if ple_root.is_symlink() or not ple_root.is_dir():
+        raise ValueError("Prepared rewritten asset is invalid: ple")
+    expected_tables = {relative.name for relative in table_relatives}
+    actual_tables = {entry.name for entry in ple_root.iterdir()}
+    if actual_tables != expected_tables:
+        missing = sorted(expected_tables - actual_tables)
+        unexpected = sorted(actual_tables - expected_tables)
+        raise ValueError(
+            "Prepared PLE table asset set differs from manifest; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    for relative in table_relatives:
+        table = prepared / relative
+        if table.is_symlink() or not table.is_file():
+            raise ValueError(f"Prepared PLE table asset is invalid: {relative}")
 
 
 def sha256(path):
@@ -280,15 +343,19 @@ def check(source: Path, prepared: Path) -> str:
             raise ValueError(
                 f"Source checkpoint changed: {filename}; prepare a new artifact"
             )
-    # The prepared snapshot must not change templates, model configuration or
-    # token IDs. The weight index is intentionally different; table bytes are
-    # checked by configure_cli before worker startup.
-    for filename in ("config.json", "tokenizer.json", "tokenizer_config.json"):
-        if sha256(source / filename) != sha256(prepared / filename):
-            raise ValueError(f"Prepared checkpoint changed {filename}")
-    _verify_optional_source_file(source, prepared, "hf_quant_config.json")
     load_manifest(manifest_path)
-    _verify_prepared_weights(source.resolve(), prepared.resolve(), manifest)
+    resolved_source = source.resolve()
+    resolved_prepared = prepared.resolve()
+    affected, rewritten = _verify_prepared_weights(
+        resolved_source, resolved_prepared, manifest
+    )
+    _verify_source_overlay(
+        resolved_source,
+        resolved_prepared,
+        affected,
+        rewritten,
+        _manifest_table_relatives(manifest),
+    )
     _load_ssd_stream_entrypoint(plugin.register)
     plugin._register_pennyroyal()  # Source-hash and native-extension import checks.
     return sha256(manifest_path)

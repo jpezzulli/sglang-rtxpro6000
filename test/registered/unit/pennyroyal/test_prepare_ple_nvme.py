@@ -75,6 +75,14 @@ class PreparePLENVMETest(unittest.TestCase):
         )
         (source / "tokenizer.json").write_text('{"unchanged":true}')
         (source / "tokenizer_config.json").write_text('{"unchanged":true}')
+        (source / "generation_config.json").write_text('{"temperature":0.6}')
+        (source / "preprocessor_config.json").write_text('{"patch_size":14}')
+        (source / "video_preprocessor_config.json").write_text('{"fps":2}')
+        (source / "processor_assets").mkdir()
+        (source / "processor_assets" / "schema.json").write_text('{"version":1}')
+        for bookkeeping in (".git", ".cache"):
+            (source / bookkeeping).mkdir()
+            (source / bookkeeping / "local-state").write_text("not a model asset")
         if quant_config:
             (source / "hf_quant_config.json").write_text(
                 '{"quantization":{"quant_algo":"NVFP4"}}'
@@ -116,7 +124,7 @@ class PreparePLENVMETest(unittest.TestCase):
             },
             8,
         )
-        output = self.root / "prepared"
+        output = self.root / f"prepared-{source.name}"
         MODULE._prepare(source, output)
         return source, output, ordinary, retained
 
@@ -152,6 +160,61 @@ class PreparePLENVMETest(unittest.TestCase):
         identity = self.check(source, output)
 
         self.assertEqual(len(identity), 64)
+        for filename in (
+            "generation_config.json",
+            "preprocessor_config.json",
+            "video_preprocessor_config.json",
+        ):
+            self.assertTrue((output / filename).is_symlink())
+        self.assertTrue((output / "processor_assets").is_symlink())
+        self.assertTrue((output / ".git").is_symlink())
+        self.assertTrue((output / ".cache").is_symlink())
+
+    def test_preflight_rejects_ordinary_file_link_replacement(self):
+        source, output, _, _ = self.integrity_checkpoint()
+        metadata = output / "generation_config.json"
+        metadata.unlink()
+        metadata.write_bytes((source / metadata.name).read_bytes())
+
+        with self.assertRaisesRegex(ValueError, "source overlay"):
+            self.check(source, output)
+
+    def test_preflight_rejects_ordinary_directory_link_replacement(self):
+        source, output, _, _ = self.integrity_checkpoint()
+        assets = output / "processor_assets"
+        assets.unlink()
+        assets.mkdir()
+        (assets / "schema.json").write_bytes(
+            (source / "processor_assets" / "schema.json").read_bytes()
+        )
+
+        with self.assertRaisesRegex(ValueError, "source overlay"):
+            self.check(source, output)
+
+    def test_preflight_rejects_changed_metadata_variants(self):
+        for filename in (
+            "generation_config.json",
+            "preprocessor_config.json",
+            "video_preprocessor_config.json",
+        ):
+            with self.subTest(filename=filename):
+                source, output, _, _ = self.integrity_checkpoint()
+                metadata = output / filename
+                metadata.unlink()
+                metadata.write_text('{"changed":true}')
+                with self.assertRaisesRegex(ValueError, "source overlay"):
+                    self.check(source, output)
+
+    def test_preflight_rejects_missing_and_extra_ordinary_metadata(self):
+        source, output, _, _ = self.integrity_checkpoint()
+        (output / "generation_config.json").unlink()
+        with self.assertRaisesRegex(ValueError, "missing=.*generation_config.json"):
+            self.check(source, output)
+
+        source, output, _, _ = self.integrity_checkpoint()
+        (output / "unexpected-metadata.json").write_text('{"extra":true}')
+        with self.assertRaisesRegex(ValueError, "unexpected=.*unexpected-metadata.json"):
+            self.check(source, output)
 
     def test_preflight_rejects_missing_ssd_stream_entrypoint(self):
         source, output, _, _ = self.integrity_checkpoint()
@@ -345,7 +408,11 @@ class PreparePLENVMETest(unittest.TestCase):
             {name: "mixed.safetensors" for name in (shard, scale, ordinary)},
             8,
         )
-        before = {path.name: path.read_bytes() for path in source.iterdir()}
+        before = {
+            path.relative_to(source): path.read_bytes()
+            for path in source.rglob("*")
+            if path.is_file()
+        }
 
         output = self.root / "prepared"
         MODULE._prepare(source, output)
@@ -360,7 +427,12 @@ class PreparePLENVMETest(unittest.TestCase):
         self.assertEqual((output / "ple/layer-0.bin").read_bytes(), b"\x07\x08")
         self.assertTrue((output / "tokenizer.json").is_symlink())
         self.assertEqual(
-            before, {path.name: path.read_bytes() for path in source.iterdir()}
+            before,
+            {
+                path.relative_to(source): path.read_bytes()
+                for path in source.rglob("*")
+                if path.is_file()
+            },
         )
 
     def test_missing_unsupported_and_wrong_layer_fail_without_output(self):
