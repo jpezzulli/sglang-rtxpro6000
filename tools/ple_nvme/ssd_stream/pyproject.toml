@@ -1,0 +1,39 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "sglang-ssd-stream"
+version = "0.2.0+pennyroyal2"
+description = "Stream Qwen3.8 Flash-Next PLE tables from local NVMe storage"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+authors = [{ name = "Garner McCloud" }]
+dependencies = [
+  "huggingface-hub>=0.36,<2",
+  "numpy>=1.26",
+]
+
+[project.entry-points."sglang.srt.plugins"]
+ssd_stream = "sglang_ssd_stream.plugin:register"
+
+[project.scripts]
+# Pennyroyal owns the launcher; do not expose the upstream runtime installer.
+
+[tool.maturin]
+module-name = "sglang_ssd_stream._io"
+python-source = "src"
+python-packages = ["sglang_ssd_stream"]
+exclude = ["src/sglang_ssd_stream/__pycache__/**"]
+features = ["pyo3/extension-module"]
+strip = true
+
+[tool.uv]
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "Cargo.toml" },
+  { file = "Cargo.lock" },
+  { file = "src/**/*.rs" },
+  { file = "src/sglang_ssd_stream/**/*.py" },
+]

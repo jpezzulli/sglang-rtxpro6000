@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING
 
 import numpy as np
 import tqdm
-
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.managers.io_struct import GenerateReqInput
 
@@ -27,7 +27,7 @@ def warmup(name: str):
 
 async def execute_warmups(
     disaggregation_mode: str,
-    warmup_names: List[str],
+    warmup_names: list[str],
     tokenizer_manager: TokenizerManager,
 ):
     for warmup_name in warmup_names:
@@ -56,7 +56,6 @@ async def whisper_autodetect(
     import io
 
     import soundfile as sf
-
     from sglang.srt.entrypoints.openai.transcription_adapters.whisper import (
         FUSED_AUTODETECT_FLAG,
         WHISPER_AUTODETECT_REGEX,
@@ -159,3 +158,70 @@ async def prefill_shapes(disaggregation_mode: str, tokenizer_manager: TokenizerM
             generate_req_input.bootstrap_host = FAKE_BOOTSTRAP_HOST
 
         await tokenizer_manager.generate_request(generate_req_input, None).__anext__()
+
+
+# xgrammar caches compiled grammars by their exact serialized text. Keep this
+# schema stable so the warmup and matching requests can share the cache entry.
+_STRUCTURED_OUTPUT_WARMUP_SCHEMA = json.dumps(
+    {
+        "type": "object",
+        "properties": {
+            "topic": {"type": "string"},
+            "items": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["topic", "items"],
+    },
+    sort_keys=True,
+)
+
+
+def _raise_for_warmup_response_error(response) -> None:
+    if not isinstance(response, dict):
+        return
+
+    error = response.get("error")
+    if error:
+        message = error.get("message", error) if isinstance(error, dict) else error
+        raise RuntimeError(f"Structured-output warmup failed: {message}")
+
+    meta_info = response.get("meta_info")
+    finish_reason = (
+        meta_info.get("finish_reason") if isinstance(meta_info, dict) else None
+    )
+    if isinstance(finish_reason, dict) and finish_reason.get("type") in {
+        "abort",
+        "error",
+    }:
+        message = finish_reason.get("message", finish_reason)
+        raise RuntimeError(f"Structured-output warmup failed: {message}")
+
+
+@warmup("structured_output")
+async def structured_output(
+    disaggregation_mode: str, tokenizer_manager: TokenizerManager
+):
+    """Run one bounded JSON-schema request before serving client traffic.
+
+    This exercises the grammar compilation and token-mask path for one small,
+    exact schema. It does not precompile arbitrary schemas or warm long-prefill
+    or multi-request kernel shapes.
+    """
+    req = GenerateReqInput(
+        text="Name a topic and list one item in it.",
+        sampling_params={
+            "max_new_tokens": 32,
+            "temperature": 0.0,
+            "json_schema": _STRUCTURED_OUTPUT_WARMUP_SCHEMA,
+        },
+    )
+    if disaggregation_mode != "null":
+        req.bootstrap_room = 0
+        req.bootstrap_host = FAKE_BOOTSTRAP_HOST
+
+    # The generator owns request completion and error propagation. Drain every
+    # response, including a terminal structured error that a test double or a
+    # streaming implementation may yield instead of raising directly.
+    async for response in tokenizer_manager.generate_request(req, None):
+        _raise_for_warmup_response_error(response)
+
+    logger.info("Structured-output warmup completed for the built-in JSON schema.")

@@ -22,6 +22,7 @@ NIXL_STORAGE_BASE="${NIXL_STORAGE_BASE:?Set NIXL_STORAGE_BASE to the FILE cache 
 NIXL_CONFIG="${NIXL_CONFIG:-$SCRIPT_DIR/nixl-posix-frspec.toml}"
 NAMESPACE_HELPER="$REPO_ROOT/scripts/pennyroyal/derive_namespace.py"
 source "$SCRIPT_DIR/chat-template.sh"
+source "$SCRIPT_DIR/ple-backend.sh"
 
 # Pin the qualified map and tokenizer: a different ID mapping changes draft
 # proposals and must never silently reuse this representation's cache namespace.
@@ -36,6 +37,7 @@ MAMBA_SSM_DTYPE=bfloat16
 MAMBA_CONV_DTYPE=bfloat16
 MAMBA_TRACK_INTERVAL=64
 PREFILL_CHUNK_SIZE=4096
+configure_max_total_tokens 824384
 
 for path in "$SGLANG_EXE" "$PYTHON" "$NAMESPACE_HELPER"; do
   [[ -x "$path" ]] || { echo "Required executable missing: $path" >&2; exit 1; }
@@ -101,6 +103,7 @@ NIXL_STORAGE="$("$NAMESPACE_HELPER" \
   --field "image_processor_backend=$IMAGE_PROCESSOR_BACKEND" \
   --field "mm_preprocess_device=$SGLANG_MM_PREPROCESS_DEVICE" \
   --field "draft_token_map_sha256=$TOKEN_MAP_SHA" \
+  --field "online_mxfp8=$SGLANG_SM120_ONLINE_MXFP8" \
   --field "context_length=$CONTEXT_LENGTH" \
   --field "tp_size=$TP_SIZE" \
   --field "page_size=$PAGE_SIZE" \
@@ -121,7 +124,8 @@ NIXL_STORAGE="$("$NAMESPACE_HELPER" \
   --field "mamba_track_interval=$MAMBA_TRACK_INTERVAL" \
   --field "linear_attn_decode_backend=flashinfer" \
   --field "linear_attn_prefill_backend=flashinfer" \
-  --field "ple_offload_embedding=true" \
+  --field "ple_offload_embedding=$PLE_OFFLOAD_EMBEDDING" \
+  "${PLE_NAMESPACE_ARGS[@]}" \
   --field "qsa_compressed_hicache=true" \
   --field "chunked_prefill_size=$PREFILL_CHUNK_SIZE" \
   --field "target_model_overrides=$TARGET_OVERRIDES" \
@@ -137,6 +141,7 @@ exec "$SGLANG_EXE" serve \
   --host 0.0.0.0 --port 8001 --tp "$TP_SIZE" \
   --dtype "$COMPUTE_DTYPE" --quantization modelopt_fp4 --kv-cache-dtype "$KV_DTYPE" \
   --mem-fraction-static 0.981 \
+  "${TOKEN_CAP_ARGS[@]}" --warmups=structured_output \
   --context-length "$CONTEXT_LENGTH" --json-model-override-args "$TARGET_OVERRIDES" \
   --page-size "$PAGE_SIZE" --max-running-requests 4 --sleep-on-idle \
   --chunked-prefill-size "$PREFILL_CHUNK_SIZE" \
@@ -149,7 +154,7 @@ exec "$SGLANG_EXE" serve \
   --hicache-mem-layout page_first --hicache-storage-backend nixl \
   --hicache-storage-prefetch-policy timeout \
   --hicache-storage-backend-extra-config "@$NIXL_CONFIG" \
-  --ple-offload-embedding --trust-remote-code \
+  "${PLE_ARGS[@]}" --trust-remote-code \
   --chat-template "$CHAT_TEMPLATE" --image-processor-backend "$IMAGE_PROCESSOR_BACKEND" \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \

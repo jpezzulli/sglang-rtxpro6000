@@ -107,6 +107,7 @@ export SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR="$NIXL_STORAGE"
 echo "NIXL FILE namespace: $NIXL_STORAGE"
 
 exec "$SGLANG_EXE" serve \
+  --warmups=structured_output \
   --model-path "$TARGET_MODEL" --load-format safetensors \
   --served-model-name pennyroyal --host 0.0.0.0 --port 8001 --tp "$TP_SIZE" \
   --dtype "$COMPUTE_DTYPE" --kv-cache-dtype "$TARGET_KV_DTYPE" \

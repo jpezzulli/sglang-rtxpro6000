@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""CPU-only NVMe PLE launcher preflight; print its namespace identity."""
+# Malformed artifact values are consistently reported as ValueError.
+# ruff: noqa: TRY004
+
+import argparse
+import hashlib
+import importlib.metadata
+import json
+import struct
+from pathlib import Path
+
+import prepare_ple_nvme as preparer
+
+
+def _tensor_sha256(tensor: preparer.TensorLocation) -> str:
+    digest = hashlib.sha256()
+    remaining = tensor.nbytes
+    with tensor.path.open("rb") as stream:
+        stream.seek(tensor.offset)
+        while remaining:
+            chunk = stream.read(min(remaining, preparer._COPY_BYTES))
+            if not chunk:
+                raise ValueError(f"retained tensor ended early: {tensor.name}")
+            digest.update(chunk)
+            remaining -= len(chunk)
+    return digest.hexdigest()
+
+
+def _weight_map(index: dict, path: Path) -> dict[str, str]:
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise ValueError(f"{path} has no weight_map object")
+    for name, raw_path in weight_map.items():
+        if not isinstance(name, str):
+            raise ValueError(f"{path} weight_map tensor names must be strings")
+        preparer._safe_relative_path(raw_path)
+    return weight_map
+
+
+def _verify_prepared_weights(
+    source: Path, prepared: Path, manifest: dict
+) -> None:
+    source_index_path = source / preparer.INDEX_NAME
+    prepared_index_path = prepared / preparer.INDEX_NAME
+    source_index = preparer._read_json(source_index_path)
+    prepared_index = preparer._read_json(prepared_index_path)
+    source_map = _weight_map(source_index, source_index_path)
+    prepared_map = _weight_map(prepared_index, prepared_index_path)
+
+    removed_names = {
+        name for name in source_map if preparer._ple_coordinates(name) is not None
+    }
+    expected_map = {
+        name: raw_path
+        for name, raw_path in source_map.items()
+        if name not in removed_names
+    }
+    if prepared_map != expected_map:
+        missing = sorted(set(expected_map) - set(prepared_map))
+        unexpected = sorted(set(prepared_map) - set(expected_map))
+        changed = sorted(
+            name
+            for name in set(expected_map) & set(prepared_map)
+            if expected_map[name] != prepared_map[name]
+        )
+        raise ValueError(
+            "Prepared weight_map differs from source minus PLE tensors; "
+            f"missing={missing}, unexpected={unexpected}, changed={changed}"
+        )
+
+    affected_relatives = {
+        preparer._safe_relative_path(source_map[name]) for name in removed_names
+    }
+    provenance = manifest.get("source")
+    if not isinstance(provenance, dict):
+        raise ValueError("NVMe PLE manifest has no source provenance")
+    raw_affected = provenance.get("ple_safetensors")
+    if not isinstance(raw_affected, list):
+        raise ValueError("NVMe PLE manifest has no source PLE file list")
+    affected_provenance = {}
+    for entry in raw_affected:
+        if not isinstance(entry, dict):
+            raise ValueError("NVMe PLE source file entry is not an object")
+        relative = preparer._safe_relative_path(entry.get("path"))
+        if relative in affected_provenance:
+            raise ValueError(f"duplicate NVMe PLE source file entry: {relative}")
+        affected_provenance[relative] = entry
+    if set(affected_provenance) != affected_relatives:
+        raise ValueError("NVMe PLE source file list differs from source weight_map")
+
+    source_headers = {}
+    removed_bytes = 0
+    for relative in sorted(affected_relatives):
+        source_path = source / relative
+        header = preparer._read_safetensors_header(source_path)
+        source_headers[relative] = header
+        entry = affected_provenance[relative]
+        if (
+            entry.get("bytes") != source_path.stat().st_size
+            or entry.get("header_sha256") != header.header_sha256
+        ):
+            raise ValueError(f"Source PLE safetensors changed: {relative}")
+        locations = {tensor.name: tensor for tensor in header.tensors}
+        expected_removed = {
+            name
+            for name in removed_names
+            if preparer._safe_relative_path(source_map[name]) == relative
+        }
+        actual_removed = {
+            tensor.name
+            for tensor in header.tensors
+            if preparer._ple_coordinates(tensor.name) is not None
+        }
+        if actual_removed != expected_removed:
+            missing = sorted(expected_removed - actual_removed)
+            unexpected = sorted(actual_removed - expected_removed)
+            raise ValueError(
+                "Source PLE safetensors differs from its weight_map; "
+                f"missing={missing}, unexpected={unexpected}"
+            )
+        removed_bytes += sum(locations[name].nbytes for name in expected_removed)
+
+    expected_index = dict(source_index)
+    expected_index["weight_map"] = expected_map
+    metadata = source_index.get("metadata")
+    if isinstance(metadata, dict) and "total_size" in metadata:
+        total_size = metadata["total_size"]
+        if (
+            not isinstance(total_size, int)
+            or isinstance(total_size, bool)
+            or total_size < removed_bytes
+        ):
+            raise ValueError("Source index metadata.total_size is invalid")
+        expected_index["metadata"] = {
+            **metadata,
+            "total_size": total_size - removed_bytes,
+        }
+    if prepared_index != expected_index:
+        raise ValueError("Prepared weight index differs from deterministic output")
+
+    ordinary_relatives = {
+        preparer._safe_relative_path(raw_path)
+        for raw_path in expected_map.values()
+        if preparer._safe_relative_path(raw_path) not in affected_relatives
+    }
+    for relative in sorted(ordinary_relatives):
+        source_path = (source / relative).resolve(strict=True)
+        try:
+            prepared_path = (prepared / relative).resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(f"Prepared ordinary shard is missing: {relative}") from exc
+        if prepared_path != source_path:
+            raise ValueError(
+                f"Prepared ordinary shard does not resolve to source: {relative}"
+            )
+
+    for relative, source_header in source_headers.items():
+        retained = tuple(
+            tensor for tensor in source_header.tensors if tensor.name not in removed_names
+        )
+        if not retained:
+            continue
+        prepared_path = prepared / relative
+        prepared_header = preparer._read_safetensors_header(prepared_path)
+        encoded_header = preparer._encoded_safetensors_header(source_header, retained)
+        expected_header_sha = hashlib.sha256(
+            struct.pack("<Q", len(encoded_header)) + encoded_header
+        ).hexdigest()
+        if prepared_header.header_sha256 != expected_header_sha:
+            raise ValueError(
+                f"Prepared retained tensor header differs from source: {relative}"
+            )
+        if prepared_path.stat().st_size != (
+            8 + len(encoded_header) + sum(tensor.nbytes for tensor in retained)
+        ):
+            raise ValueError(
+                f"Prepared retained tensor file has wrong size: {relative}"
+            )
+        if len(prepared_header.tensors) != len(retained):
+            raise ValueError(
+                f"Prepared retained tensor set differs from source: {relative}"
+            )
+        for source_tensor, prepared_tensor in zip(
+            retained, prepared_header.tensors, strict=True
+        ):
+            if (
+                prepared_tensor.name != source_tensor.name
+                or prepared_tensor.dtype != source_tensor.dtype
+                or prepared_tensor.shape != source_tensor.shape
+                or prepared_tensor.nbytes != source_tensor.nbytes
+                or _tensor_sha256(prepared_tensor) != _tensor_sha256(source_tensor)
+            ):
+                raise ValueError(
+                    "Prepared retained tensor differs from source: "
+                    f"{source_tensor.name}"
+                )
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def check(source: Path, prepared: Path) -> str:
+    from sglang_ssd_stream import __version__ as loaded_version
+    from sglang_ssd_stream.config import load_manifest
+    from sglang_ssd_stream.plugin import _register_pennyroyal
+
+    version = importlib.metadata.version("sglang-ssd-stream")
+    expected_version = "0.2.0+pennyroyal2"
+    if version != expected_version or loaded_version != expected_version:
+        raise ValueError(
+            "Install Pennyroyal's optional reader "
+            f"{expected_version}, found distribution={version}, "
+            f"loaded_package={loaded_version}"
+        )
+    manifest_path = prepared / "ssd-stream.json"
+    manifest = json.loads(manifest_path.read_text())
+    provenance = manifest.get("source", {})
+    if Path(provenance.get("path", "")).resolve() != source.resolve():
+        raise ValueError("Prepared PLE artifact belongs to a different TARGET_MODEL")
+    for filename, field in (
+        ("config.json", "config_sha256"),
+        ("model.safetensors.index.json", "index_sha256"),
+    ):
+        if sha256(source / filename) != provenance.get(field):
+            raise ValueError(
+                f"Source checkpoint changed: {filename}; prepare a new artifact"
+            )
+    # The prepared snapshot must not change templates, model configuration or
+    # token IDs. The weight index is intentionally different; table bytes are
+    # checked by configure_cli before worker startup.
+    for filename in ("config.json", "tokenizer.json", "tokenizer_config.json"):
+        if sha256(source / filename) != sha256(prepared / filename):
+            raise ValueError(f"Prepared checkpoint changed {filename}")
+    load_manifest(manifest_path)
+    _verify_prepared_weights(source.resolve(), prepared.resolve(), manifest)
+    _register_pennyroyal()  # Source-hash and native-extension import checks.
+    return sha256(manifest_path)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--prepared", type=Path, required=True)
+    args = parser.parse_args()
+    try:
+        print(check(args.source, args.prepared))
+    except Exception as error:  # noqa: BLE001 -- CLI boundary, every error is fatal
+        parser.exit(1, f"NVMe PLE preflight failed: {error}\n")

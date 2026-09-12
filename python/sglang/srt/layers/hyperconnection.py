@@ -119,6 +119,7 @@ class GatedResidual(HyperConnectionBase):
         use_mix: bool = True,
         use_combine: bool = True,
         role: Optional[str] = None,
+        online_fp8: bool = False,
     ):
         super().__init__(config, use_mix, use_combine, role)
 
@@ -135,20 +136,33 @@ class GatedResidual(HyperConnectionBase):
         )
 
         if use_mix:
+            from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+                attach_rowwise_ingest,
+                online_fp8_enabled,
+            )
+
+            rowwise_mix = online_fp8 and online_fp8_enabled()
+            self._online_fp8_mix = rowwise_mix
             self.input_mix_weight_down = nn.Linear(
                 self.hidden_size * self.hc_count,
                 self.config.hc_lowrank,
                 bias=False,
-                device=torch.cuda.current_device(),
+                device="meta" if rowwise_mix else torch.cuda.current_device(),
                 dtype=config.params_dtype,
             )
             self.input_mix_weight_up = nn.Linear(
                 self.config.hc_lowrank,
                 self.hc_count * self.hidden_size,
                 bias=False,
-                device=torch.cuda.current_device(),
+                device="meta" if rowwise_mix else torch.cuda.current_device(),
                 dtype=config.params_dtype,
             )
+            if rowwise_mix:
+                # Quantize checkpoint shards before they enter device memory;
+                # the resident Parameter remains paired with its row scales.
+                attach_rowwise_ingest(
+                    [self.input_mix_weight_down, self.input_mix_weight_up]
+                )
             from sglang.srt.environ import envs
 
             lowrank = self.config.hc_lowrank
@@ -277,10 +291,28 @@ class GatedResidual(HyperConnectionBase):
                 self.hidden_size,
             ).to(self.params_dtype)
         else:
+            down_weight = self.input_mix_weight_down.weight
+            up_weight = self.input_mix_weight_up.weight
+            if (
+                down_weight.dtype == torch.float8_e4m3fn
+                or up_weight.dtype == torch.float8_e4m3fn
+            ):
+                from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+                    dequantize_rowwise_weight,
+                )
+
+                # Prefill/deterministic execution uses the compiled BF16 path.
+                # Materialize only transient BF16 operands from resident FP8.
+                down_weight = dequantize_rowwise_weight(
+                    down_weight, hyper_input_normed.dtype
+                )
+                up_weight = dequantize_rowwise_weight(
+                    up_weight, hyper_input_normed.dtype
+                )
             mixed_input = self._mix_compute(
                 hyper_input_normed,
-                self.input_mix_weight_down.weight,
-                self.input_mix_weight_up.weight,
+                down_weight,
+                up_weight,
                 self.hc_count,
                 self.hidden_size,
             ).to(self.params_dtype)

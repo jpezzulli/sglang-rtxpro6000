@@ -712,9 +712,27 @@ class LogitsProcessor(nn.Module):
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         quant_method = getattr(lm_head, "quant_method", None)
+        rowwise_scale = None
+        if hasattr(lm_head, "weight"):
+            from sglang.kernels.ops.gemm.sm120_online_fp8 import rowwise_scale_of
+
+            rowwise_scale = rowwise_scale_of(lm_head.weight)
         if hasattr(lm_head, "set_lora") and hasattr(lm_head, "apply_lora"):
             # This is a LoRA-wrapped module, use its forward method
             logits = lm_head(hidden_states)
+        elif rowwise_scale is not None:
+            if self.use_fp32_lm_head:
+                raise RuntimeError(
+                    "SM120 online FP8 lm_head is incompatible with "
+                    "--use-fp32-lm-head"
+                )
+            # Check before the module's quant_method: FR-Spec can share the
+            # target Parameter while retaining a stale draft quant method.
+            from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+                rowwise_fp8_lm_head_logits,
+            )
+
+            logits = rowwise_fp8_lm_head_logits(hidden_states, lm_head.weight)
         elif should_apply_lm_head_quant_method(lm_head, quant_method):
             logits = quant_method.apply(lm_head, hidden_states, embedding_bias)
         elif hasattr(lm_head, "weight"):

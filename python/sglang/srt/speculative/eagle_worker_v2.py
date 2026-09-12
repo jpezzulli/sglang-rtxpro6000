@@ -331,9 +331,19 @@ class EagleDraftWorker(EagleDraftWorkerBase):
 
         else:
             if self.hot_token_id is not None:
-                head = head.clone()
                 self.hot_token_id = self.hot_token_id.to(head.device)
-                head.data = head.data[self.hot_token_id]
+                from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+                    rowwise_scale_of,
+                    select_rowwise_weight_rows,
+                )
+
+                if rowwise_scale_of(head) is not None:
+                    # The target's per-row scales must undergo the identical
+                    # hot-vocabulary selection before installation in draft.
+                    head = select_rowwise_weight_rows(head, self.hot_token_id)
+                else:
+                    head = head.clone()
+                    head.data = head.data[self.hot_token_id]
 
             # Share the embedding and lm_head
             self.draft_runner.model.set_embed_and_head(embed, head)

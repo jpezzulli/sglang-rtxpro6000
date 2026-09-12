@@ -218,6 +218,23 @@ def initialize_bf16_gemm_config(server_args: ServerArgs) -> None:
         _enable_bf16_splitk_gemm = True
         _precompile_splitk_tactics()
 
+    if envs.SGLANG_SM120_ONLINE_MXFP8.get():
+        from sglang.kernels.ops.gemm.sm120_online_fp8 import configure_online_fp8
+
+        configure_online_fp8(
+            True,
+            cuda_available=torch.cuda.is_available(),
+            capability=(
+                torch.cuda.get_device_capability()
+                if torch.cuda.is_available()
+                else None
+            ),
+        )
+        logger.info(
+            "Flash-Next online FP8 enabled on SM120: eligible BF16 linears use "
+            "MXFP8; HyperConnection mix and lm_head use rowwise FP8"
+        )
+
     _BF16_GEMM_BACKEND = backend
 
 
