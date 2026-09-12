@@ -63,11 +63,29 @@ and default to CPU image decoding/preprocessing; model inference stays on GPU.
 The template hash, preprocessing device and backend are included in the NIXL namespace, so these
 launchers start a separate cache identity without deleting older caches.
 
-### CPU or secondary-GPU media preprocessing
+### CPU, model-GPU, or secondary-GPU media preprocessing
 
 The recipes default to `SGLANG_MM_PREPROCESS_DEVICE=cpu` with the PIL backend.
 This keeps JPEG decoding off the model GPU too; `--image-processor-backend pil`
 alone does not do that. No second GPU is required.
+
+To use the model GPU for JPEG decoding, image resize, normalization and patch
+assembly, choose `cuda:0`:
+
+```bash
+export CUDA_VISIBLE_DEVICES=0
+export SGLANG_MM_PREPROCESS_DEVICE=cuda:0
+```
+
+This is simple but spends some of the model GPU's serving headroom. In v2.5.0
+qualification with online FP8 and only the RTX PRO 6000 visible, `cuda:0`
+retained the 824,384-token pool and passed ten selected media scenarios:
+ordinary and large JPEGs, ten images, two concurrent ten-image requests, a
+static MP4 frame path, and three successive image-history turns around 208K
+context. Minimum sampled free GPU memory was 1,897 MiB. That sample is not a
+promise for arbitrary image dimensions or concurrency. Do not combine this
+placement with a larger experimental `MAX_TOTAL_TOKENS` value without a new
+headroom and workload check.
 
 To use a second CUDA GPU for JPEG decoding, image resize, normalization and
 patch assembly:
@@ -77,12 +95,13 @@ export CUDA_VISIBLE_DEVICES=0,1
 export SGLANG_MM_PREPROCESS_DEVICE=cuda:1
 ```
 
-The recipe then selects the Torchvision backend. Indices refer to the visible
-list: `cuda:1` is its second GPU. The model and vision encoder remain on
-`cuda:0` at TP1; this does not split the model or reduce context/token pools.
-Features pass through host memory using the default CPU feature transport;
-cross-device CUDA IPC/VMM is not supported by this option. A GPU UUID list
-can be used in `CUDA_VISIBLE_DEVICES` for stable placement.
+Either CUDA choice selects the Torchvision backend. Indices refer to the
+visible list: `cuda:0` is the model GPU and `cuda:1` is the second visible GPU.
+With `cuda:1`, the model and vision encoder remain on `cuda:0` at TP1; this
+does not split the model. Features pass through host memory using the default
+CPU feature transport; cross-device CUDA IPC/VMM is not supported by this
+option. A GPU UUID list can be used in `CUDA_VISIBLE_DEVICES` for stable
+placement.
 
 For direct `sglang serve` use, also specify the matching
 `--image-processor-backend pil` or `torchvision`. With the environment option
@@ -132,10 +151,63 @@ unchanged. Direct credit for the reduced draft-vocabulary work belongs to
 Gabriel's
 [`gabrielolympie/sglang-flashnext-sm120`](https://github.com/gabrielolympie/sglang-flashnext-sm120).
 
-The extra BF16 draft head uses 320 MiB. The measured configuration retains
-824,384 KV tokens, 524,288-token context, four concurrent requests, and
-24 Mamba slots. Confirm `speculative_token_map` in the resolved server
-arguments, the reduced draft head, and the normal graph/state-pool checks below.
+The extra BF16 draft head uses 320 MiB. The primary qualified recipe defaults
+to a cap of 824,384 KV tokens while retaining 524,288-token context, four
+concurrent requests, and 24 Mamba slots. Confirm `speculative_token_map` in the
+resolved server arguments, the reduced draft head, and the normal graph/state-
+pool checks below.
+
+`MAX_TOTAL_TOKENS` accepts a positive page-64-aligned override for experiments:
+
+```bash
+export MAX_TOTAL_TOKENS=1000000
+```
+
+The 1,000,000-token option was qualified with online FP8, RAM PLE, CPU media
+preprocessing and only the RTX PRO 6000 visible. It retained 524,288-token
+context, captured the normal graphs, and passed warmup/schema/tools, 64K/490K
+retrieval, fixed-output C1/C4, ordinary/large/concurrent image checks, static
+MP4 frames and three successive image-history turns around 208K context.
+Post-graph free memory was 5.21 GiB; the minimum sampled during media work was
+1,187 MiB. This is a capacity option, not a larger-context or speedup claim.
+It has not been qualified with model-GPU media preprocessing. Unset the
+variable to return to the 824,384-token FR-Spec default. The non-FR recipe
+retains automatic sizing when unset and also accepts an explicit positive
+page-aligned override. Detailed timing is in
+[RESULTS.md](RESULTS.md#explicit-1000000-token-capacity-option).
+
+### Optional Flash-Next precision and PLE placement
+
+The two v2.5.0 options are independent. The ordinary recipe uses the original
+checkpoint precision and RAM-backed PLE:
+
+```bash
+unset SGLANG_SM120_ONLINE_MXFP8
+export PENNY_PLE_BACKEND=ram
+```
+
+Enable exact-SM120 online FP8 with a literal `true`:
+
+```bash
+export SGLANG_SM120_ONLINE_MXFP8=true
+```
+
+This converts eligible otherwise-BF16 transformer projections, HC mix weights
+and the output head during loading. It preserves NVFP4 experts/routers/PLE,
+BF16 GDN state, FP8 KV and FR-Spec alignment. Read [FP8.md](FP8.md) before
+selecting it.
+
+To stream the PLE table from a prepared local SSD overlay:
+
+```bash
+export PENNY_PLE_BACKEND=nvme
+export PENNY_PLE_NVME_MODEL=/path/on/local-nvme/flash-next-ple
+```
+
+NVMe mode requires the isolated reader and prepared overlay described in
+[NVME-PLE.md](NVME-PLE.md). RAM remains the default; explicit NVMe errors fail
+startup rather than falling back. Either PLE placement can be combined with
+online FP8.
 
 `nixl-posix-frspec.toml` uses 85%/80% cleaner watermarks for a dedicated cache
 filesystem. Review those thresholds for your storage. The non-FR and 27B
@@ -184,15 +256,19 @@ The qualified Flash-Next shape uses ModelOpt NVFP4 weights and input
 activations on selected Linear modules, BF16 for excluded/unquantized tensors
 and recurrent state, FP8 E4M3 target/native-MTP KV, native NEXTN, 524K YaRN,
 24 Mamba slots, RecoverSSM `none`, explicit FlashInfer GDN decode/prefill,
-32 GiB HiCache, and NIXL POSIX persistence. This is not a claim that every
-kernel computes in BF16.
+32 GiB HiCache, and NIXL POSIX persistence. The v2.5.0 online-FP8 and PLE-
+placement options above apply to this recipe too. This is not a claim that
+every kernel computes in BF16.
 
 ## Host memory and first start
 
 The configured HiCache tier consumes host memory: 32 GiB for Flash-Next and
-96 GiB for 27B. Flash-Next also uses host RAM for PLE embedding offload, and
-both profiles need additional process and driver overhead. Those are measured
-configurations, not minimum-host-RAM specifications.
+96 GiB for 27B. RAM-backed Flash-Next additionally pins an approximately
+47.68 GiB PLE table. Optional NVMe PLE removes that fixed table residency but
+uses SSD I/O and reclaimable filesystem cache; observed available-memory gains
+are not entirely attributable to the table. Both profiles need additional
+process and driver overhead. These are measured configurations, not minimum-
+host-RAM specifications.
 
 On first use, allow disk for model weights, the 27B draft when selected,
 compiler/JIT caches, and NIXL objects. The launcher prints its selected profile,
@@ -201,6 +277,10 @@ that lack usable Hugging Face download metadata, namespace derivation hashes
 the weight files and may be quiet for a while. Kernel JIT compilation and CUDA
 graph capture follow and can also take substantial time. A server is ready only
 after the startup log reports readiness and the API smoke below succeeds.
+
+The launchers run one bounded built-in JSON-schema warmup before announcing API
+readiness. This verifies one structured-output grammar/mask path; it does not
+precompile arbitrary schemas or warm every long-prefill or concurrency shape.
 
 These launchers document the qualified native build. Docker files inherited
 from upstream are not a qualified Pennyroyal deployment recipe.
@@ -227,6 +307,13 @@ For Flash-Next, confirm log lines for:
 - target and native-MTP MoE resolved to FlashInfer CUTLASS;
 - recovery graphs for batch sizes 1-4;
 - attached KV, Mamba/PLE, and QSA HiCache pools.
+
+When online FP8 is selected, also confirm that the option is enabled, eligible
+projection signatures resolved to the MXFP8 backend, and the expected row-wise
+HC mix and output-head weights were installed. When NVMe PLE is selected,
+confirm the prepared-table checksum, plugin registration, SSD reader and
+separate NIXL namespace. In every case verify the **actual** KV capacity; a
+requested cap alone is not evidence that it was retained.
 
 For 27B, confirm:
 

@@ -5,6 +5,22 @@ confirmed in this source. “Explicit” means the launcher selected a narrow
 phase-specific backend; “source” means local dispatch enabled an already
 available path. Requested flags alone were not treated as resolution evidence.
 
+## v2.5.0 optional Flash-Next paths
+
+The default Flash-Next backend resolution remains the v2.4.1 layout described
+below. Two independent options change bounded parts of that profile:
+
+| Option | Resolved implementation | What remains unchanged |
+|---|---|---|
+| `SGLANG_SM120_ONLINE_MXFP8=true` | Eligible otherwise-unquantized transformer projections use FlashInfer CUTLASS MXFP8 weights and dynamic activations. HyperConnection mix and `lm_head` use row-wise FP8 weights with per-output-row scales. | Checkpoint NVFP4 experts and routers, PLE, QSA, BF16 GDN/convolution state, FP8 KV, native NEXTN and FR-Spec mapping/scale alignment. This is not a new QSA or GDN state format. |
+| `PENNY_PLE_BACKEND=nvme` | The attributed SSD Stream reader and existing PLE graph adapter stage rows from a prepared immutable local-NVMe table. | PLE values and precision, hash calculation, QSA, native MTP, attention, MoE and recurrent-state backends. RAM PLE remains the default. |
+
+Online FP8 is gated to exact SM120 and recognized Flash-Next modules.
+Unsupported hardware or selected-module shapes fail startup instead of
+silently returning to BF16. NVMe PLE is a storage-placement choice, not a new
+mathematical PLE backend; its plugin is imported only when explicitly selected.
+See [FP8.md](FP8.md) and [NVME-PLE.md](NVME-PLE.md).
+
 ## v2.3 FR-Spec
 
 A 65,536-row BF16 draft head proposes tokens through SGLang's native-MTP
@@ -38,12 +54,14 @@ dense and does not select Flash-Next's QSA or MoE-router paths.
 | Target MoE | FlashInfer CUTLASS | Automatic | SM120 modelopt-FP4 resolution in startup log |
 | Native-MTP MoE | FlashInfer CUTLASS | Automatic | resolved speculative MoE backend |
 | HyperConnection Mix | persistent Triton Mix | Automatic fallback | FlashInfer/CuTe path remains SM100-only |
+| Optional online-FP8 projections | FlashInfer CUTLASS MXFP8 plus row-wise FP8 HC mix and output head | Exact-SM120 environment opt-in | real-kernel numerics, changed-input graph replay and live decode |
 | HyperConnection Combine | fused SGLang CUDA | Model path | imported Qwen4 kernel tests |
 | Multimodal attention | `triton_attn` | Automatic | vision qualification |
 | Sampling | FlashInfer | Automatic | startup args |
 | Grammar | XGrammar | Automatic | startup args and tool suite |
 | HiCache transfer | NIXL POSIX | Explicit | restart restoration |
 | Persistent state | packed target/native-MTP KV, full GDN/PLE siblings, compressed QSA keys | Local integration | `516e42a2ee` through `7b5cfb728d` |
+| Optional PLE storage | attributed SSD Stream v0.2.0 reader with existing graph adapter | Explicit `PENNY_PLE_BACKEND=nvme` | full pool/graphs, long prefill, media/tools and NIXL restart restoration |
 
 ### How the SM120 gates were handled
 

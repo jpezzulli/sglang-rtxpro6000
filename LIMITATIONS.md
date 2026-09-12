@@ -13,6 +13,74 @@
   approximately 490K. This is not proof for every possible 524K prompt,
   modality, sampling configuration, or concurrent schedule.
 
+## v2.5.0 scope
+
+### Online FP8
+
+- The short C1 comparison has three samples per arm. The 128K and 490K C1
+  values are single observations. Their post-first-token rates improved, but
+  cold TTFT did not improve in the matching long samples.
+- Post-graph available VRAM was 7.52 GiB versus 3.66 GiB in an earlier matching
+  option-off boot. The difference is about 3.86 GiB; 7.52 GiB is not the amount
+  newly freed. The result does not qualify a larger KV pool.
+- The primary FR-Spec recipe retains an 824,384-token default cap. The explicit
+  1,000,000-token option passed startup, graph, long-context, concurrency and
+  CPU-media checks with online FP8 and one visible GPU. Other cap values and
+  combinations require their own evidence.
+- The 1,000,000-token option changes KV capacity, not the 524,288-token served-
+  context limit. Its warmed C1 median was close to the earlier standard-pool
+  observation, but the runs were not a matched A/B and establish no speed gain.
+  Post-graph free memory was 5.21 GiB and minimum sampled media-window free
+  memory was 1,187 MiB; neither is a universal headroom guarantee.
+- The public RadixArk reference checkpoint passed one 64/64 exact long-recall
+  request with online FP8. The performance, reasoning, ordinary-tool and vision
+  results were not rerun on that checkpoint and must not be attributed to it.
+- The ordinary tool suite was 29/30 semantically correct. More importantly, a
+  separate quoted-markup probe executed three of six fully wrapped examples
+  that should have remained text. Parser code was unchanged, so neither a clean
+  all-tools pass nor online-FP8 causality is claimed.
+- The option preserves BF16 GDN state and the checkpoint's existing NVFP4
+  expert, router and FP8 PLE-table formats. It does not establish a new FP8 QSA
+  or recurrent-state format, bit-for-bit output parity, or portability beyond
+  exact SM120.
+
+### NVMe PLE
+
+- The table is 47.68 GiB on SSD. Host `MemAvailable` was about 54–56 GiB higher
+  in separate NVMe snapshots, but filesystem cache, process state and other host
+  activity prevent attributing that full difference to the table.
+- RAM and NVMe PLE retained the same 824,384-token pool and 524,288 context.
+  Their repeated C4 medians were 428.90 and 369.73 tok/s respectively in a
+  separate operational comparison. Different cache/JIT history and a slow
+  second run in both arms prevent a universal performance ratio or no-cost
+  claim.
+- NVMe mode requires a prepared immutable overlay and the matching isolated
+  reader. It fails startup on source, model, manifest or table mismatch and has
+  no automatic RAM fallback.
+- NVMe PLE and online FP8 can be selected together. The combined configuration
+  passed direct live functional checks and repeated warmed C1/C4 observations,
+  but this was not a fresh controlled RAM-versus-NVMe A/B. Its throughput and
+  the separately collected option-specific gains/costs must not be treated as
+  one causal comparison.
+- Sharing a device with NIXL can introduce I/O contention. Evidence covers
+  local SSD, Linux x86-64, Python 3.12, TP1 Flash-Next only—not TP2, network
+  storage, CPU expert offload, or alternate speculative modes.
+- Short host-wide observations do not prove that NVMe eliminates memory
+  compaction or that PLE caused all prior host-memory pressure.
+
+### Startup and media controls
+
+- The built-in startup warmup compiles one stable JSON schema and exercises one
+  grammar/mask path. It does not warm arbitrary schemas, long prefill,
+  multimodal input or every concurrency shape.
+- CPU, `cuda:0` model-GPU, and `cuda:1` secondary-GPU preprocessing have direct
+  qualified evidence. The v2.5.0 `cuda:0` check used only the RTX PRO 6000,
+  retained the 824,384-token pool with online FP8, and passed ten selected
+  image/video scenarios. Minimum sampled free GPU memory was 1,897 MiB; this is
+  not a guarantee for every image shape or concurrency level.
+- Model-GPU media preprocessing and an experimental larger
+  `MAX_TOTAL_TOKENS` value have not been qualified together.
+
 ## v2.4.1 scope
 
 This maintenance update makes no additional serving-speed or model-quality

@@ -11,25 +11,44 @@ not two builds: both model configurations run from the same patched source.
 [Update an existing install](BUILD.md#update-an-existing-install) ·
 [Choose a model](#models-and-launch-recipes) · [Launch](RUN.md).
 
-**v2.4.1** is optional maintenance: more efficient grammar-history handling,
-correct streaming logprobs, pinned metadata transfers, and clearer setup.
-Image decoding/preprocessing defaults to CPU, with an optional secondary GPU;
-[configuration and tradeoffs](RUN.md#cpu-or-secondary-gpu-media-preprocessing).
-The separate NumPy huge-page-advice default is also overridable.
-If v2.4.0 works well for you, there is no urgent need to update. No additional
-serving-speed gain is claimed. [Changes and upstream credits](CHANGES.md#v241--maintenance-and-easier-setup).
+**v2.5.0** adds two substantial, optional Flash-Next capabilities while keeping
+the existing behavior as the default:
 
-The preceding v2.4.0 release reduced Flash-Next prefill overhead, with
-approximately **4–10% higher throughput observed in cold-prefill tests at 64K
-and 490K**. Cached-prefix extension and NIXL restart restoration remained
-verified. Both profiles retained their full context, token pools, speculative
-decoding, and HiCache/NIXL configurations.
+- **Online FP8** converts selected otherwise-BF16 projections, HyperConnection
+  mix weights and the output head during model load. The measured C1 decode
+  improvement was **15.8–28.3%**, with about **3.86 GiB more post-graph
+  available VRAM**. Enable it with `SGLANG_SM120_ONLINE_MXFP8=true`.
+- **NVMe-backed PLE** streams the approximately **47.68 GiB** FP8 PLE table
+  from a prepared local SSD snapshot instead of pinning it in host RAM. Select
+  it with `PENNY_PLE_BACKEND=nvme`; RAM remains the default.
 
-That v2.4.0 update also corrected disconnected-request cleanup, explicit Chat
-reasoning-effort overrides, and bare/undeclared tool-markup handling. It was an
-optional update, not an urgent upgrade or a new decode-speedup claim.
-[Changes and upstream credits](CHANGES.md#v240--maintenance-and-faster-flash-next-prefill) ·
-[Build/update instructions](BUILD.md).
+Both options retain the qualified 524,288-token context and 824,384-token
+Flash-Next pool in their tested configurations. Online FP8 and NVMe PLE are
+independent choices: either, both, or neither can be selected. Read
+[Online FP8](FP8.md), [NVMe PLE](NVME-PLE.md), and
+[v2.5.0 changes and credits](CHANGES.md#v250--optional-online-fp8-and-nvme-ple)
+before enabling them.
+
+The FR-Spec recipe keeps 824,384 as its default. An explicit
+`MAX_TOTAL_TOKENS=1000000` capacity option was also qualified with online FP8,
+RAM PLE, CPU media preprocessing and one visible GPU; it is not a larger-
+context or speedup claim.
+
+This release also performs one bounded structured-output warmup before the API
+becomes ready and releases a temporary Flash-Next PLE loader reference at the
+end of model loading.
+
+Media preprocessing still defaults to CPU. The public recipes also accept
+`cuda:0` on the model GPU or `cuda:1` on a second visible GPU. The v2.5.0
+single-GPU `cuda:0` check retained the 824,384-token pool and passed all ten
+selected image/video scenarios with online FP8; see
+[RUN.md](RUN.md#cpu-model-gpu-or-secondary-gpu-media-preprocessing) for the
+headroom tradeoff.
+
+Earlier v2.4.1/v2.4.0 maintenance—including grammar, streaming-logprob,
+metadata-transfer, prefill, cancellation, reasoning-effort and tool-markup
+changes—remains documented in [CHANGES.md](CHANGES.md). The dated performance
+tables below and in [RESULTS.md](RESULTS.md) preserve those measurements.
 
 ## Models and launch recipes
 
@@ -40,7 +59,7 @@ this section was separately benchmarked.
 
 | Recipe | Reference target | Speculative decoding and launcher |
 |---|---|---|
-| **Flash-Next NVFP4** | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) | Native NEXTN MTP is included. Start with the recommended [FR-Spec launcher](configs/pennyroyal/serve-flash-next-frspec.sh); the [non-FR launcher](configs/pennyroyal/serve-flash-next.sh) remains available. No separate draft download. |
+| **Flash-Next NVFP4** | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) | Native NEXTN MTP is included. Start with the recommended [FR-Spec launcher](configs/pennyroyal/serve-flash-next-frspec.sh); the [non-FR launcher](configs/pennyroyal/serve-flash-next.sh) remains available. No separate draft download. [Online FP8](FP8.md) and [NVMe PLE](NVME-PLE.md) are independent opt-ins. |
 | **27B FP8** | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | Use the [27B launcher](configs/pennyroyal/serve-qwen38-27b-dflash2.sh) with the separate [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2) draft checkpoint. |
 
 The retained public 27B measurements used
@@ -55,7 +74,45 @@ FR-Spec credit goes directly to Gabriel's
 Both recipes pin the unmodified
 [Froggeric v22.5 template](configs/pennyroyal/templates/README.md).
 
-### Flash-Next performance at a glance
+The v2.5.0 online-FP8 implementation is directly inspired by
+[`mratsim/sglang-qwen38fn-sm120-turbo`](https://github.com/mratsim/sglang-qwen38fn-sm120-turbo/tree/94a68214b77514bc26ef78cee4c01f128162d09b)
+at commit `94a68214b77514bc26ef78cee4c01f128162d09b`, especially patches
+`0003`, `0007`, and `0008`. Optional NVMe PLE adapts Garner McCloud's
+[SSD Stream v0.2.0](https://github.com/garnermccloud/sglang-ssd-stream/tree/176a522ef9d6dbb5056ae1f467fe49af0f1258a5),
+with the upstream license and NOTICE retained. Detailed boundaries and credit
+are in [FP8.md](FP8.md#credit) and [NVME-PLE.md](NVME-PLE.md#source-and-credit).
+
+### Flash-Next v2.5.0 online-FP8 performance at a glance
+
+Measured September 11, 2026, on one RTX PRO 6000, TP1, with FR-Spec,
+524,288-token context, 824,384 KV tokens, RAM-backed PLE and HiCache/NIXL
+retained. Online FP8 was compared with a fresh immediately preceding option-off
+reference using the same serving shape and compatible checkpoint artifact.
+The v2.5.0 source also includes startup-only grammar warmup and loader-lifetime
+maintenance, so the comparison is not attribution of every difference to one
+precision mechanism.
+
+| Single-request workload | Option off | Online FP8 | Observed change |
+|---|---:|---:|---:|
+| Short, 1,024 output tokens | 161.47 tok/s | **207.12 tok/s** | **+28.3%** |
+| 128K context, 1,024 output tokens | 154.70 tok/s | **195.63 tok/s** | **+26.5%** |
+| 490K context, 1,024 output tokens | 149.14 tok/s | **172.64 tok/s** | **+15.8%** |
+
+Rates are client-observed post-first-token decode. The short values are
+three-run medians; 128K and 490K are single observations. Cold TTFT did not
+improve in the long samples. Online FP8 also left 7.52 GiB available after
+graph capture versus 3.66 GiB in the earlier matching boot—about 3.86 GiB more,
+not 7 GiB newly added capacity. Full precision boundaries and caveats are in
+[FP8.md](FP8.md); detailed timings are in
+[RESULTS.md](RESULTS.md#pennyroyal-v250--optional-online-fp8).
+
+The public RadixArk reference checkpoint passed a focused **64/64 exact**
+opaque-record recall request with this runtime. The full performance and
+quality work used a separately qualified compatible checkpoint format; its
+results are not attributed to RadixArk. Format requirements are in
+[FP8.md](FP8.md#qualified-scope).
+
+### Retained v2.4.0 Flash-Next prefill measurements
 
 Measured September 9, 2026, with **v2.4.0 and FR-Spec on one RTX PRO 6000, TP1**,
 keeping 524,288-token context, 824,384 KV tokens, and HiCache/NIXL enabled.
@@ -130,10 +187,12 @@ still contain rough edges or hardware/model-specific assumptions.
 ### Hardware, storage, and first-start expectations
 
 The qualified launchers use a 96 GB GPU, but they also need substantial host
-RAM and disk. Flash-Next offloads PLE embeddings to the host in addition to its
-configured 32 GiB HiCache tier; 27B configures a 96 GiB HiCache tier. Process,
-filesystem, and driver overhead are additional. These are measured settings,
-not minimum-RAM claims.
+RAM and disk. Flash-Next uses a 47.68 GiB PLE table in addition to its
+configured 32 GiB HiCache tier; RAM placement is the default and the optional
+[NVMe PLE mode](NVME-PLE.md) trades lower fixed host residency for SSD I/O.
+The 27B recipe configures a 96 GiB HiCache tier. Process, filesystem, driver
+and page-cache overhead are additional. These are measured settings, not
+minimum-RAM claims.
 
 Allow disk space for the target checkpoint, the 27B draft when applicable,
 compiler/JIT caches, and persistent NIXL namespaces. NIXL cleaner percentages
@@ -168,8 +227,8 @@ baseline run. The baselines were on separate boots, so the range reflects
 observed variation, not a guaranteed speedup. Cold 64K/490K prefill was
 essentially unchanged by FR-Spec.
 
-The [performance table above](#flash-next-performance-at-a-glance) gives the
-later v2.4.0 observations. [RESULTS.md](RESULTS.md#pennyroyal-v23--flash-next-fr-spec)
+The [retained v2.4.0 table above](#retained-v240-flash-next-prefill-measurements)
+gives the later observations. [RESULTS.md](RESULTS.md#pennyroyal-v23--flash-next-fr-spec)
 preserves the v2.3 baseline comparison and measurement definitions.
 
 Reasoning, tools, vision, agent workflows, long-context continuation, and
@@ -219,6 +278,10 @@ The important work is architectural, not merely a collection of launch flags:
 - QSA sparse attention: Triton sparse-GQA prefill, the FlashInfer QSA wrapper
   resolving to XQA on SM120, and `sgl-kernel` top-k.
 - FlashInfer CUTLASS MoE for the Flash-Next target and native-MTP layer.
+- Optional exact-SM120 online FP8 for otherwise-BF16 Flash-Next projections,
+  with explicit precision boundaries and fail-loud validation.
+- Optional NVMe-backed PLE for operators who prefer lower fixed host-RAM
+  residency and accept the measured storage-performance tradeoff.
 - Correct three-axis multimodal mRoPE in the fused QK RMSNorm+RoPE kernel.
 - Target, draft, verify, prefill, and accepted-state recovery CUDA graphs.
 - FP8 KV and 524,288-token factor-2 YaRN for both launch configurations.
@@ -234,22 +297,22 @@ The important work is architectural, not merely a collection of launch flags:
 | Item | Value |
 |---|---|
 | Canonical branch | `pennyroyal-main-sm120-final` |
-| Current executable source | `cf811a8c5988dc87941c1442fdc8ba574a0400f7` |
-| Current release | **v2.4.1** |
-| Git tag | `pennyroyal-v2.4.1` |
+| Current executable source | `23931293183417e750a8e41f715c52230c231c25` |
+| Current release | **v2.5.0** |
+| Git tag | `pennyroyal-v2.5.0` |
 | Initial unified dated tag | `sglang-rtxpro6000-20260827` |
 | Earlier 27B dated tag | `qwen38-dflash2-pro6000-20260824` |
 | Upstream integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Qualification dependency base | `0.5.19.dev492+g836206a0a` with the updated v2.4.1 Python/JIT source |
+| Qualification dependency base | `0.5.19.dev492+g836206a0a`; exact updated Python/JIT source in [PROVENANCE.md](PROVENANCE.md) |
 | Python / PyTorch | `3.12.13` / `2.13.0+cu130` |
 | CUDA / compiler | CUDA `13.3` (NVCC `13.3.73`) / GCC `15.3.1` |
 | FlashInfer / NIXL | `0.6.17` / `1.4.0` |
 | GPU / driver | RTX PRO 6000 96 GB, SM120 / `610.57.04` |
 
-Install v2.4.1 from the updated source using [BUILD.md](BUILD.md); retaining
-an older wheel alone does not apply these changes. Dependency versions and
-model settings are unchanged. Source lineage and upstream relationships are in
-[CHANGES.md](CHANGES.md) and [PROVENANCE.md](PROVENANCE.md).
+Install v2.5.0 from the updated source using [BUILD.md](BUILD.md); retaining
+an older wheel alone does not apply these changes. The exact v2.5.0 source
+identity and upstream relationships are in [PROVENANCE.md](PROVENANCE.md) and
+[CHANGES.md](CHANGES.md).
 
 ## Qualified configuration matrix
 
@@ -262,7 +325,7 @@ executes or accumulates entirely in BF16.
 | Target checkpoint | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) recipe reference; retained measurements used the [orcarouter derivative](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8) | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) |
 | Target weight format | block FP8 E4M3, 128x128 blocks | ModelOpt NVFP4, group size 16 on selected Linear modules |
 | Quantized-path activations | dynamic FP8 E4M3 | NVFP4 input activations on selected Linear modules |
-| Runtime dtype for unquantized tensors | BF16; includes excluded layers and BF16 `lm_head` | BF16; includes ignored layers, native MTP, PLE, QSA/GDN state-facing tensors, and vision |
+| Runtime dtype for unquantized tensors | BF16; includes excluded layers and BF16 `lm_head` | Default: BF16 for otherwise-unquantized tensors. Optional online FP8 converts eligible transformer linears, HC mix weights and `lm_head`; BF16 GDN state and the existing NVFP4 expert, router and FP8 PLE-table formats remain unchanged. |
 | Target KV datatype | FP8 E4M3 | FP8 E4M3 |
 | Speculative KV datatype | DFlash2 draft: FP8 E4M3 | native-MTP: FP8 E4M3 |
 | Recurrent/GDN SSM state | FP32 | BF16 |
@@ -276,7 +339,7 @@ executes or accumulates entirely in BF16.
 | KV page size | 64 | 64 |
 | Current GPU KV capacity | 1,118,784 target and draft tokens | 824,384 target and native-MTP tokens |
 | Mamba capacity | 24 slots; maximum 5 retained states/path | 24 slots; `extra_buffer`, tracking interval 64 |
-| HiCache/NIXL | 96 GB configured host tier; target KV + Mamba/GDN + DFlash2 state | 32 GB configured host tier; packed target/native-MTP KV + GDN + PLE + QSA keys |
+| HiCache/NIXL | 96 GB configured host tier; target KV + Mamba/GDN + DFlash2 state | 32 GB configured host tier; packed target/native-MTP KV + GDN + PLE + QSA keys. PLE table placement is RAM by default or optional NVMe. |
 | Maximum active requests | 4 | 4 |
 
 The current 27B launcher uses the 24-slot/five-state setting qualified on
@@ -326,6 +389,7 @@ corrections do not apply to it. No separate local DeepGEMM SM120 patch is claime
 | Target MoE | FlashInfer CUTLASS | automatic ModelOpt-NVFP4 resolution | startup resolution and live tests |
 | Native-MTP MoE | FlashInfer CUTLASS | automatic speculative resolution | startup resolution and live tests |
 | HyperConnection Mix | persistent Triton Mix | automatic SM120 fallback | HC numerical tests; FlashInfer gate retained |
+| Optional online-FP8 linears | FlashInfer CUTLASS MXFP8 for eligible transformer projections; row-wise FP8 for HC mix and output head | `SGLANG_SM120_ONLINE_MXFP8=true`, exact SM120 only | real-kernel numerics, graph replay, load invariants and live C1/C4 checks |
 | HyperConnection Combine | fused SGLang CUDA | Qwen4 model path | kernel tests and full suite |
 | Multimodal attention | `triton_attn` | automatic | full 1,024-token vision validation |
 | Sampling / grammar | FlashInfer / XGrammar | automatic | startup log; reasoning and tool suite |
@@ -407,8 +471,11 @@ real and documented.
 
 ## Performance and qualification
 
-The [Flash-Next table above](#flash-next-performance-at-a-glance) shows the
-v2.4.0 observations. The [earlier Flash-Next campaign](RESULTS.md#earlier-flash-next-campaign),
+The [v2.5.0 table above](#flash-next-v250-online-fp8-performance-at-a-glance)
+shows the online-FP8 C1 observations; the
+[retained v2.4.0 table](#retained-v240-flash-next-prefill-measurements) preserves
+the earlier prefill measurements. The
+[earlier Flash-Next campaign](RESULTS.md#earlier-flash-next-campaign),
 including its source, clock settings, and quality results, remains in
 RESULTS.md as historical evidence. The separate 27B and third-party results
 below are not a matched A/B comparison with Flash-Next.
@@ -487,7 +554,7 @@ There is one native build procedure and two supported model profiles. Flash-Next
 provides FR-Spec and non-FR launchers:
 
 ```bash
-git clone --branch pennyroyal-v2.4.1 --single-branch \
+git clone --branch pennyroyal-v2.5.0 --single-branch \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
 cd pennyroyal
 # Follow BUILD.md for the fresh or existing-environment native install.
@@ -510,9 +577,9 @@ OpenAI-compatible smoke requests, and cold/radix/NIXL cache distinctions.
 ## Source changes and upstream work
 
 The cumulative history starts with the 2026-08-24 27B release, then layers the
-unified runtime and Flash-Next work on the same source line. The current active
-stack contains 35 runtime commits above its integration base, excluding
-documentation and recipe-only commits. Major groups are:
+unified runtime and Flash-Next work on the same source line. v2.5.0 extends the
+35-runtime-commit v2.4.1 stack; [PROVENANCE.md](PROVENANCE.md) records the exact
+release source. Major groups are:
 
 - Qwen3.8-27B/DFlash2: independent target/draft overrides, fixed-width XQA mask,
   NVCC host-compiler identity, request-span observability, and NIXL correctness.
@@ -536,6 +603,9 @@ documentation and recipe-only commits. Major groups are:
 - v2.4.0: reduce Flash-Next prefill preparation, bound short QSA extensions,
   correct routing dependency order, and improve shared request cancellation,
   explicit reasoning-effort handling, and tool-markup parsing.
+- v2.5.0: add exact-SM120 opt-in online FP8 for selected Flash-Next weights,
+  optional NVMe-backed PLE, structured-output startup warmup, and bounded
+  Flash-Next loader-lifetime cleanup. The 27B path remains option-off.
 - Project upstream submissions include #36520, #36524, and #35584; dated
   status records are in CHANGES.md.
 - Closed project submissions retained in runtime history: #35583; transient
@@ -573,6 +643,12 @@ coverage.
   No 27B speed improvement is claimed.
 - NIXL cleaner thresholds are whole-filesystem occupancy percentages, not an
   absolute directory byte quota.
+- Online FP8 did not improve cold long-context TTFT in the matching samples.
+  Tool validation also retained real quoted-markup misses; no clean-all-tools
+  or parser-causality claim is made.
+- NVMe PLE reduced fixed host residency but was slower than RAM PLE in the
+  separate repeated C4 comparison. It is an explicit memory/performance
+  tradeoff, not a universal no-cost option.
 
 See [LIMITATIONS.md](LIMITATIONS.md) for measurement and reproducibility detail.
 
@@ -580,6 +656,10 @@ See [LIMITATIONS.md](LIMITATIONS.md) for measurement and reproducibility detail.
 
 - [BUILD.md](BUILD.md) — one native build and dependency identity.
 - [RUN.md](RUN.md) — the two canonical launch configurations.
+- [FP8.md](FP8.md) — online-FP8 precision boundary, activation, evidence and
+  limits.
+- [NVME-PLE.md](NVME-PLE.md) — optional reader installation, overlay
+  preparation, launch settings and measured RAM/speed tradeoff.
 - [BACKENDS.md](BACKENDS.md) — source-backed resolved backend and SM120 tables.
 - [RESULTS.md](RESULTS.md) — controlled, reasoning, tools, context, agentic, and
   persistence measurements for both models.

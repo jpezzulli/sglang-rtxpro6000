@@ -6,16 +6,16 @@
 |---|---|
 | Upstream | `https://github.com/sgl-project/sglang.git` |
 | Canonical branch | `pennyroyal-main-sm120-final` |
-| Executable source HEAD | `cf811a8c5988dc87941c1442fdc8ba574a0400f7` |
+| Executable source HEAD | `23931293183417e750a8e41f715c52230c231c25` |
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Latest runtime additions | Seven commits above v2.4.0 source, listed below; prior history is retained |
-| Qualification dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.4.1 Python/JIT source |
-| Release | v2.4.1 |
-| Git tag | `pennyroyal-v2.4.1` |
+| Latest runtime additions | Optional online FP8 and NVMe PLE, grammar startup warmup, and loader-reference cleanup; prior history is retained |
+| Qualification dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.5.0 Python/JIT source |
+| Release | v2.5.0 |
+| Git tag | `pennyroyal-v2.5.0` |
 
 The release includes launch recipes, documentation, and measurement summaries.
-v2.4.1 updates runtime source and setup guidance while retaining the dependency
-stack, model settings, CPU image preprocessing by default and the pinned
+v2.5.0 adds optional Flash-Next acceleration and SSD-backed PLE while retaining
+the dependency stack, CPU image preprocessing and RAM PLE by default, and the pinned
 [Froggeric v22.5 template](configs/pennyroyal/templates/README.md).
 The earlier 27B dated release
 remains reachable through `qwen38-dflash2-pro6000-20260824`; its useful results
@@ -35,6 +35,27 @@ graph-lifetime trial remains in history with its complete revert; it contributes
 no change to the released graph implementation. Dependencies and launch
 settings are unchanged. [CHANGES.md](CHANGES.md) records the focused
 two-profile regression scope; existing performance results are not refreshed.
+
+## v2.5.0 source provenance
+
+This release builds on public source `1c7392a09b9938c2626c53d2524b3fb7dfac0cae`
+without an upstream rebase or dependency refresh.
+
+- Online FP8, structured-output startup warmup and loader-reference cleanup
+  are adapted from [mratsim/sglang-qwen38fn-sm120-turbo](https://github.com/mratsim/sglang-qwen38fn-sm120-turbo/tree/94a68214b77514bc26ef78cee4c01f128162d09b),
+  patches `0003`, `0007` and `0008`. [FP8.md](FP8.md) identifies the converted
+  modules, unchanged state formats, measured gains and qualification limits.
+- Optional NVMe PLE incorporates [Garner McCloud's SSD Stream v0.2.0](https://github.com/garnermccloud/sglang-ssd-stream/tree/176a522ef9d6dbb5056ae1f467fe49af0f1258a5),
+  with its Apache-2.0 license and NOTICE retained. Pennyroyal's adapter is
+  `0.2.0+pennyroyal2`: explicit opt-in, source/artifact checks, complete hook
+  application enforcement, an exact-byte overlay preparer and portable
+  launcher integration. [NVME-PLE.md](NVME-PLE.md) documents installation,
+  memory savings and the measured performance tradeoff.
+
+The default-off 27B path retains its prior behavior. The published runtime
+files are the qualified source; the dependency-base package listed above is
+not a prebuilt wheel containing this release. Install the selected release
+source using [BUILD.md](BUILD.md).
 
 ## v2.4.1 source provenance
 

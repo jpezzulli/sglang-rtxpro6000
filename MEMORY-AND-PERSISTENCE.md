@@ -16,6 +16,38 @@ The FR-Spec recipe uses 85%/80% filesystem-usage thresholds for the NIXL
 cleaner. Review these thresholds for your storage. The existing non-FR and
 27B sample configurations are unchanged.
 
+## v2.5.0 Flash-Next precision and PLE placement
+
+The two v2.5.0 options affect different memory surfaces:
+
+| Option | GPU effect | Host/storage effect | Cache identity |
+|---|---|---|---|
+| Online FP8 | Selected otherwise-BF16 transformer projections, HyperConnection mix weights and `lm_head` occupy less resident GPU memory. A measured boot left 7.52 GiB available after graphs versus 3.66 GiB in the earlier matching option-off boot. | PLE placement and HiCache are unchanged. | `online_mxfp8` is part of the NIXL namespace. |
+| NVMe PLE | The qualified 824,384-token KV pool and CUDA graphs were retained. | The 47.68 GiB FP8 PLE table lives in a prepared immutable SSD overlay instead of fixed pinned RAM; bounded staging buffers and reclaimable filesystem cache remain. | Backend and overlay-manifest identity select a separate NIXL namespace. |
+
+The online-FP8 difference is about 3.86 GiB of post-graph available VRAM; the
+7.52 GiB value is the total remaining, not the amount newly freed. The primary
+FR-Spec recipe keeps 824,384 as its default cap. A separate
+`MAX_TOTAL_TOKENS=1000000` run allocated the full requested pool, retained
+524,288-token context and graphs, and passed the selected long-context,
+concurrency and CPU-media checks. It left 5.21 GiB after graphs and a minimum
+sampled 1,187 MiB during media work. This qualifies that explicit capacity
+shape, not a larger context or speed gain. Other overrides and combining the
+1,000,000-token pool with model-GPU media preprocessing remain unqualified.
+
+NVMe PLE's structural change removes the fixed 51,200,245,760-byte table from
+pinned host residency, less its bounded reader buffers. Separate snapshots
+showed about 54–56 GiB more host memory available with NVMe, but process state,
+filesystem cache and other host activity also changed; do not attribute the
+entire observed delta to PLE. The original checkpoint and prepared table must
+remain immutable while serving.
+
+Online FP8 does not introduce a new persisted QSA or recurrent-state format.
+The NVFP4 expert, router and FP8 PLE-table formats remain unchanged; GDN
+recurrent state remains BF16, KV remains FP8 E4M3, and FR-Spec target/draft
+scale alignment is preserved. See [FP8.md](FP8.md) and
+[NVME-PLE.md](NVME-PLE.md).
+
 ## Flash-Next GPU allocation
 
 | Configuration | Intermediate SSM | Mamba slots | GPU KV capacity |
@@ -89,6 +121,10 @@ GPU radix state
   -> NIXL POSIX FILE storage (io_uring + O_DIRECT)
 ```
 
+Optional NVMe-backed PLE is parallel to this cache hierarchy: it is the
+read-only source for embedding rows, not a replacement for HiCache or the NIXL
+prefix store.
+
 Flash-Next uses a 32 GB configured host tier. Its hybrid pool persists packed
 target/native-MTP KV, complete GDN state, Qwen4 PLE accepted/pending/ngram
 siblings, and compressed QSA index keys. The 27B configuration uses a 96 GB
@@ -120,6 +156,12 @@ derives a readable directory plus a 12-character SHA-256 suffix from:
   recurrent-state modes;
 - PyTorch version and CUDA architecture.
 
+The v2.5.0 Flash-Next launchers also distinguish online-FP8 state, PLE backend,
+and prepared-overlay manifest identity when applicable. An explicit KV-token
+cap is not part of the identity because it changes capacity rather than the
+stored page representation. Representation-relevant changes must not reuse an
+incompatible namespace.
+
 An exact manifest inside the root must match the derived identity. Identical
 configuration after restart selects the existing directory. A representation-
 relevant change selects another directory; switching back selects and reuses
@@ -137,3 +179,10 @@ provides the clearest semantics.
 ```text
 490K restart: 489,856 / 489,879 input tokens restored; 23 recomputed; 3/3 needles exact
 ```
+
+With v2.5.0 online FP8 selected, an identical saved 490K request prefetched and
+loaded back 489,984 KV tokens plus two Mamba states, recomputing only a five-
+token suffix, and returned all three keys. With NVMe PLE selected and online
+FP8 off, four concurrent saved 64K/490K requests restored 553,728 KV tokens and
+four Mamba states. These are service-restart checks; they do not make the cache
+transactional or prove every configuration across a full-machine reboot.

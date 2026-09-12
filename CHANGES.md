@@ -1,9 +1,10 @@
 # Cumulative changes and upstream status
 
-The current runtime is the ordered range
-`e7e78940168f..cf811a8c5988`. All prior runtime commits remain in source history,
-including the graph-lifetime trial and its full revert. The integration base
-is unchanged. The v2.1.1 upstream check fetched `main` at
+The exact v2.5.0 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
+Its lineage extends the v2.4.1 ordered range
+`e7e78940168f..cf811a8c5988`; all prior runtime commits remain in source
+history, including the graph-lifetime trial and its full revert. The integration
+base is unchanged. The v2.1.1 upstream check fetched `main` at
 `cdbfe90b4a31079859817c148ef4498240ec2580` on 2026-08-29; older PR-status
 tables below retain their stated observation dates. Version 2.1.2 added the
 two maintenance corrections below, without a rebase. v2.3 adds the
@@ -11,11 +12,61 @@ FR-Spec launch configuration using the same executable. v2.3.1 adds only the
 GDN rounding correction described below. v2.4.0 adds prefill and maintenance
 corrections while retaining the same dependency stack and launch settings.
 v2.4.1 adds the bounded maintenance and setup changes below without a rebase.
+v2.5.0 adds the two opt-in Flash-Next capabilities and bounded startup/lifetime
+maintenance below, again without changing the integration base.
 
 “Local” does not mean a permanent fork requirement. It means the exact active
 commit has not merged upstream. Where a PR has a later refined head, that is
 shown separately rather than pretending the local commit and PR head are
 identical.
+
+## v2.5.0 — Optional online FP8 and NVMe PLE
+
+This release keeps the two existing qualified profiles and makes the following
+Flash-Next changes optional unless stated otherwise.
+
+| Affected profile | What changed in normal terms | Credit / lineage |
+|---|---|---|
+| **Flash-Next, opt-in** | Convert eligible otherwise-BF16 transformer projections to MXFP8 while loading, and store HyperConnection mix weights and the output head in row-wise FP8. Existing NVFP4 expert, router and FP8 PLE-table formats, FP8 KV, BF16 GDN state and FR-Spec alignment remain unchanged. The exact-SM120 path is selected only by `SGLANG_SM120_ONLINE_MXFP8=true` and fails loudly if its contracts are unavailable. | Directly inspired by [`mratsim/sglang-qwen38fn-sm120-turbo`](https://github.com/mratsim/sglang-qwen38fn-sm120-turbo/tree/94a68214b77514bc26ef78cee4c01f128162d09b) commit `94a68214b77514bc26ef78cee4c01f128162d09b`, especially patches `0003`, `0007`, and `0008`; adapted to Pennyroyal's FR-Spec, persistence and fail-loud boundaries. |
+| **Flash-Next, opt-in** | Stream the approximately 47.68 GiB FP8 PLE table from a prepared immutable local-NVMe overlay instead of pinning it in RAM. RAM remains the default, plugin registration is isolated, source/model/table identities are checked, and NVMe selects a separate NIXL namespace. | Attributed adaptation of Garner McCloud's [SSD Stream v0.2.0](https://github.com/garnermccloud/sglang-ssd-stream/tree/176a522ef9d6dbb5056ae1f467fe49af0f1258a5), commit `176a522ef9d6dbb5056ae1f467fe49af0f1258a5`, Apache-2.0 with license/NOTICE retained. Also acknowledges AntigravityAI's [field report](https://github.com/jpezzulli/sglang-rtxpro6000/issues/2). |
+| Both qualified launch profiles | Run one bounded built-in JSON-schema request before announcing API readiness. This exercises one structured-output grammar/mask path; it does not precompile arbitrary schemas or warm all request shapes. | Local startup integration with focused error-propagation and request-shape tests. |
+| **Flash-Next** | Stop a nested PLE loader warning closure from retaining a checkpoint parameter snapshot until cyclic garbage collection. The loader's warning and weight semantics are unchanged. | Local lifecycle correction with base-red/green lifetime coverage. |
+| **Flash-Next recipes** | Accept explicit `MAX_TOTAL_TOKENS` overrides after positive/page-alignment validation. The primary FR-Spec recipe retains 824,384 as its default. A 1,000,000-token option is qualified with online FP8, RAM PLE, CPU media preprocessing and one visible GPU. | Public recipe usability; the larger pool is a capacity option, not a context or speedup claim. |
+
+Online FP8 kept the 524,288-token context, 824,384-token pool, native NEXTN,
+FR-Spec, CUDA graphs, RAM PLE and HiCache/NIXL in the measured comparison.
+Single-request post-first-token decode changed from 161.465 to 207.124 tok/s
+for the three-run short median, from 154.703 to 195.634 tok/s at 128K, and
+from 149.135 to 172.644 tok/s at 490K. Cold TTFT did not improve in the
+matching long samples. Post-graph available VRAM was 7.52 GiB versus 3.66 GiB
+in the earlier matching boot—about 3.86 GiB more, not 7 GiB newly added
+capacity. The public RadixArk reference checkpoint separately passed a focused
+64/64 exact long-recall check; the full performance and quality suite was not
+rerun on that checkpoint.
+
+NVMe PLE, measured with online FP8 off, retained the same 824,384-token pool
+and 524,288 context, passed CUDA-graph capture, long prefill/retrieval,
+schema/tools, image workflows and
+identical-restart NIXL restoration. Host-available-memory snapshots were about
+54–56 GiB higher, but that full difference is not attributed to the 47.68 GiB
+table. In a separate repeated C4 comparison, RAM PLE's aggregate median was
+428.90 tok/s and NVMe PLE's was 369.73 tok/s; both contained a slow second run.
+This supports a useful RAM-saving option, not a universal no-speed-cost claim.
+
+Online FP8 and NVMe PLE also passed together, including identical-restart
+restoration of four saved 64K/490K requests with confirmed storage reuse and
+hybrid-state load-back. [NVME-PLE.md](NVME-PLE.md) separates those results from
+the earlier RAM/NVMe timing comparison.
+
+The option-off 27B/DFlash2 profile retained its 1,118,784-token pools,
+524,288-token context, graphs, structured output, tools, decode, vision and
+long-prefill checks. Online FP8 and the optional reader remain outside its
+runtime path. Flash-Next with online FP8 and model-GPU `cuda:0` preprocessing
+also retained the 824,384-token pool and passed ten selected image/video
+scenarios, including concurrent images and successive 208K-context history.
+See [FP8.md](FP8.md), [NVME-PLE.md](NVME-PLE.md), and
+[RESULTS.md](RESULTS.md#pennyroyal-v250--optional-online-fp8) for scope and
+measurement boundaries.
 
 ## v2.4.1 — Maintenance and easier setup
 
@@ -205,8 +256,8 @@ Validation for this maintenance release:
   prompt, single-request and four-request decode, and actual NIXL restart
   restoration. Original graph coverage and cache capacity were retained.
 
-The runtime checks used Orca 27B FP8 and a source-specific local ModelOpt NVFP4
-conversion of Orca Flash-Next, not a new Radix checkpoint campaign. Full
+The runtime checks used the identified 27B FP8 alternative and a compatible
+Flash-Next ModelOpt NVFP4 artifact, not a new Radix checkpoint campaign. Full
 reasoning, vision, the complete 30-case tool suite, external translators, and
 multi-GPU execution were not rerun. Arbitrary prose/tool coalescing in an
 external translator is not claimed fixed or qualified. This release does not

@@ -22,7 +22,7 @@ Run this sequence in Bash. It creates a new checkout and Python environment,
 installs the build tools, then installs SGLang and its dependencies once:
 
 ```bash
-git clone --branch pennyroyal-v2.4.1 --single-branch \
+git clone --branch pennyroyal-v2.5.0 --single-branch \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
 cd pennyroyal
 
@@ -57,7 +57,7 @@ Next, complete [NIXL POSIX](#nixl-posix) if it is not already installed,
 
 ## Update an existing install
 
-Use this path for an existing qualified environment, such as v2.4.0.
+Use this path for an existing qualified environment, such as v2.4.1.
 Stop any server using the checkout first. Start with a clean checkout:
 `git status --short` must be empty; save your own changes before switching tags.
 Replace the path below with your checkout. The public remote is assumed to be
@@ -65,8 +65,8 @@ named `origin`.
 
 ```bash
 cd /path/to/pennyroyal
-git fetch origin tag pennyroyal-v2.4.1
-git switch --detach pennyroyal-v2.4.1
+git fetch origin tag pennyroyal-v2.5.0
+git switch --detach pennyroyal-v2.5.0
 source .venv/bin/activate
 
 export CUDA_HOME=/usr/local/cuda CUDACXX=/usr/local/cuda/bin/nvcc
@@ -84,8 +84,8 @@ uv pip install --no-build-isolation --no-deps -e python
 ```
 
 This updates SGLang without re-resolving the existing dependencies. There is
-no need to rebuild PyTorch, `sglang-kernel`, FlashInfer or NIXL for this
-maintenance release. If build tools are missing, install only the bootstrap
+no need to rebuild PyTorch, `sglang-kernel`, FlashInfer or NIXL for the core
+v2.5.0 update. If build tools are missing, install only the bootstrap
 packages shown in the fresh-install sequence, then retry the final command.
 
 Restart using your existing model paths and the [launch guide](RUN.md).
@@ -131,6 +131,35 @@ O_DIRECT/io_uring configuration.
 
 The recorded `nixl-cu13==1.4.0` wheel SHA-256 was
 `b2d618bc9593bf78120b44f9d573af8807e83716ae8c539b0f1532cc55a55ad8`.
+
+## Optional NVMe PLE reader
+
+Skip this section when using the default RAM-backed PLE. NVMe-backed PLE needs
+an additional isolated reader and a prepared local-SSD model overlay:
+
+```bash
+cd /path/to/pennyroyal
+PYTHON="$PWD/.venv/bin/python" bash tools/ple_nvme/install.sh
+
+.venv/bin/python scripts/pennyroyal/prepare_ple_nvme.py \
+  --source /path/to/original-flash-next-checkpoint \
+  --output /path/on/local-nvme/flash-next-ple
+```
+
+The reader installs under `.ple-nvme` by default and does not alter the main
+environment. It requires Rust/Cargo and `uv`; build tools may download
+dependencies. The prepared overlay requires approximately 48 GiB plus
+filesystem overhead and retains links to the original immutable checkpoint.
+The installer refuses to overwrite an existing reader directory. When replacing
+an earlier optional-reader test install, set `PENNY_PLE_PLUGIN_DIR` to a new
+empty location for both installation and launch. v2.5.0 rejects earlier reader
+builds that lack complete hook-application enforcement; an existing prepared
+overlay can still be reused when the v2.5.0 integrity preflight accepts it.
+
+See [NVME-PLE.md](NVME-PLE.md) for overrides, launch variables, integrity
+checks, upstream license/NOTICE credit and the measured memory/performance
+tradeoff. Online FP8 needs no separate package; it is a runtime opt-in described
+in [FP8.md](FP8.md).
 
 ## Reference and measured checkpoints
 
@@ -221,9 +250,10 @@ bundled in this wheel.
 
 ### Source and earlier wheels
 
-Executable source: `cf811a8c5988dc87941c1442fdc8ba574a0400f7`.
+The exact v2.5.0 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
 This release uses updated Python/JIT sources on the existing dependency stack;
-no new prebuilt wheel is distributed.
+no new prebuilt wheel is distributed. The optional NVMe reader is a separate
+isolated install and is not included in the main SGLang wheel.
 
 The earlier v2.1.2/v2.3 wheel from source `836206a0ad` has SHA-256
 `96cb28701ac6f2ad1523e5607218f4fa68d9f9bb26041d6f36f36e2a39362542`.

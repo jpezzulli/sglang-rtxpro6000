@@ -25,6 +25,193 @@ interchangeable throughput number.
 - **Restored-prefix effective prefill:** input tokens divided by TTFT after
   NIXL restoration. It is not cold model prefill.
 
+## Pennyroyal v2.5.0 — Optional online FP8
+
+Measured September 11, 2026, on one RTX PRO 6000, TP1. The fresh immediately
+preceding option-off reference and v2.5.0 online-FP8 arm used the same compatible
+Flash-Next checkpoint artifact with RAM PLE, FR-Spec, native NEXTN, 524,288-
+token context, 824,384 KV tokens, page size 64, 24 Mamba slots, CUDA graphs and
+32 GiB HiCache/NIXL. The v2.5.0 source also includes startup-only structured-
+output warmup and loader-lifetime maintenance, so the measurements do not
+attribute every difference solely to online FP8. The precision option itself
+changes selected projection storage and compute; it does not change the
+checkpoint's NVFP4 expert, router or FP8 PLE-table formats, BF16 GDN state,
+FP8 KV, or FR-Spec map and scale alignment.
+
+### Short single-request decode
+
+All six requests returned HTTP 200 and exactly 1,024 completion tokens. Rates
+are client-observed generation after the first token, excluding TTFT.
+
+| Precision option | Three post-first-token samples | Median | Median TTFT | Median whole-request rate |
+|---|---|---:|---:|---:|
+| Off | 161.465, 163.069, 155.835 tok/s | **161.465 tok/s** | 0.341 s | 153.066 tok/s |
+| Online FP8 | 212.808, 193.004, 207.124 tok/s | **207.124 tok/s** | 0.428 s | 187.777 tok/s |
+
+Observed median change was **+28.28%** post-first-token and **+22.68%** over
+whole-request makespan. Median TTFT was 0.087 seconds higher. Three samples per
+arm are not a distribution estimate.
+
+### 128K and 490K decode
+
+The C1 rows used exactly 1,024 output tokens. All retrieval checks found the
+three expected keys in every C1 and C4 response.
+
+| Context/test | Option off | Online FP8 | Observed change | Timing detail |
+|---|---:|---:|---:|---|
+| 128K C1 post-first-token | 154.703 tok/s | **195.634 tok/s** | **+26.46%** | TTFT 10.111 → 12.906 s; whole request 16.755 → 18.145 s |
+| 490K C1 post-first-token | 149.135 tok/s | **172.644 tok/s** | **+15.76%** | TTFT 61.747 → 63.296 s; whole request 68.640 → 69.254 s |
+| 128K C4 concurrent aggregate | 367.127 tok/s | **422.037 tok/s** | **+14.96%** | 15,725 vs 15,898 output tokens; 42.833 vs 37.670 s batch wall |
+| 490K C4 concurrent aggregate | 236.678 tok/s | **329.010 tok/s** | **+39.01%** | 15,455 vs 15,127 output tokens; 65.300 vs 45.977 s batch wall |
+
+The long C1 results are single observations. The C4 requests ended naturally
+at either `stop` or a 4,096-token cap, so their differing total output counts
+make them contextual throughput observations, not fixed-output matched decode
+rates. All four streams overlapped for 30.152 seconds at 128K and 24.850
+seconds at 490K in the online-FP8 arm. Most importantly, **cold TTFT did not
+improve** in the matching long samples.
+
+### VRAM, compatibility, and functional checks
+
+The online-FP8 boot reported **7.52 GiB available after CUDA-graph capture**;
+the earlier matching option-off boot reported **3.66 GiB**. The observed
+difference is about 3.86 GiB. The 7.52 GiB value is the total left after graphs,
+not a claim that 7 GiB was newly freed, and it does not qualify a larger token
+pool. Both measured arms retained the same 824,384-token pool.
+
+Representative checks covered real SM120 FP8 kernels and graph replay,
+reasoning, schema/tool use, vision, a sealed agent workflow, long-context
+retrieval, and identical-restart NIXL restoration. The saved 490K request
+restored/prefetched 489,984 tokens, loaded two Mamba states, and returned all
+three expected keys.
+
+The fully exercised compatible artifact scored **95.75/100** in one blinded
+reasoning review, with no fatal cap. This is one local validation-suite sample,
+not an independently preregistered benchmark or evidence of improvement over
+an older precision. It was not a RadixArk result.
+
+With online FP8, the model GPU was also selected for media preprocessing as
+logical `cuda:0`, with no second GPU visible. The 824,384-token pool and graphs
+were retained, and all ten selected media checks passed: ordinary/large JPEG,
+ten images, two concurrent ten-image requests, static MP4 frames, and three
+successive image-history turns at 208,021, 208,078 and 208,135 input tokens.
+Minimum sampled free GPU memory was 1,897 MiB. This is direct coverage for those
+shapes, not a universal media/concurrency headroom guarantee.
+
+One cold synthetic request with 393,223 input tokens recovered **64/64 opaque
+records exactly**, with no missing, wrong, duplicate, or unexpected keys. It
+used 2,754 completion tokens, reached first token in 44.523 seconds, and
+completed in 53.491 seconds. This uniform synthetic archive tests dense exact
+recall, not ordinary agentic work.
+
+The public
+[RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4)
+checkpoint separately passed the identical 64/64 exact-recall check. Its client
+TTFT was 47.296 seconds and whole wall time 55.086 seconds. Only this focused
+compatibility check was run on RadixArk; the performance, reasoning, tools and
+vision results above must not be attributed to that checkpoint.
+
+The ordinary tool suite produced semantically correct/exact call lists in
+29/30 workflows; one workflow added a redundant delegation and unsupported
+cross-check claims. A separate quoted-markup probe had 10/10 transport success
+but only 7/10 correct behavior: three of six quoted fully wrapped examples
+became unwanted calls. Parser code was unchanged, so these observations do not
+establish online-FP8 causality. This is not a clean-all-tools claim.
+
+### Explicit 1,000,000-token capacity option
+
+The FR-Spec launcher's `MAX_TOTAL_TOKENS=1000000` option was qualified with
+online FP8, RAM PLE, CPU media preprocessing and only the RTX PRO 6000 visible.
+The runtime allocated the requested 1,000,000-token pool, retained 524,288-
+token context and captured target-verify, draft-decode and draft-extend graphs.
+Available GPU memory after graph capture was 5.21 GiB, compared with 7.52 GiB
+for the standard 824,384-token online-FP8 boot.
+
+Nine warmup/schema/tool requests passed, as did exact 64K READY and 490K
+three-needle retrieval, one fixed-1,024-output C1 request, and four concurrent
+fixed-1,024-output C4 streams with four requests observed running together.
+All ten selected CPU-media checks also passed: ordinary/large JPEG, ten images,
+two concurrent ten-image requests, static MP4 frames, and three successive
+image-history turns at 208,021, 208,078 and 208,135 input tokens. Minimum
+sampled free GPU memory during the media window was 1,187 MiB.
+
+The first C1 sample measured 147.41 tok/s post-first-token; the first C4 sample
+measured 303.73 tok/s aggregate. Three subsequent warmed C1 samples were
+200.2128, 207.2144 and 206.8993 tok/s, for a **206.90 tok/s median**; their TTFT
+values were 0.475, 0.345 and 0.338 seconds. The warmed median is close to the
+earlier 207.12 tok/s standard-pool observation, but these runs are not a new
+matched A/B and establish no speed benefit from the larger pool.
+
+The option increases GPU KV capacity, not the 524,288-token served-context
+limit. It was not qualified with media preprocessing on the model GPU, and the
+minimum sampled headroom is not a guarantee for arbitrary inputs.
+
+## Pennyroyal v2.5.0 — Optional NVMe PLE
+
+Measured September 10–11, 2026, with the same qualified Flash-Next shape:
+524,288-token context, 824,384 KV tokens, page size 64, FR-Spec/native NEXTN,
+graphs and 32 GiB HiCache/NIXL. This comparison predates the online-FP8 arm;
+do not combine their rates as if they were one matched experiment.
+
+The external FP8 table was 51,200,245,760 bytes (47.683944702 GiB). NVMe mode
+replaced that fixed pinned-table residency with bounded reader buffers and
+reclaimable filesystem cache. Host `MemAvailable` was about 121–123 GiB after
+NVMe workload checks versus about 67 GiB after the separate RAM comparison—a
+54–56 GiB observed difference, not a claim that all of it came from PLE.
+
+Three four-request runs used exactly 1,024 completion tokens per stream:
+
+| PLE placement | Run 1 | Run 2 | Run 3 | Median aggregate |
+|---|---:|---:|---:|---:|
+| RAM | 428.90 tok/s | 286.16 tok/s | 434.92 tok/s | **428.90 tok/s** |
+| NVMe | 369.73 tok/s | 259.86 tok/s | 391.95 tok/s | **369.73 tok/s** |
+
+Aggregate throughput includes TTFT and synchronized makespan. All 24 streams
+returned HTTP 200 and exactly 1,024 completion tokens. Both modes had a slower
+second sample with roughly five-second TTFT. The runs occurred in separate
+operational comparisons with different cache/JIT histories; they were not a
+randomized or fully controlled A/B. The data does not support a universal
+no-speed-cost claim for NVMe PLE.
+
+NVMe mode passed cold 63,888-token prefill at 14,749.59 server tok/s and cold
+489,903-token prefill at 8,644.77 server tok/s, with exact READY and all three
+needles respectively. It also passed warmups, schema/tools, image and long
+image-history requests, CUDA-graph capture, and identical-restart NIXL reuse.
+Four concurrent saved 64K/490K requests restored 553,728 storage/prefetch/KV
+tokens and four Mamba states. These checks establish function on the exercised
+configuration; short host-wide samples do not establish that NVMe eliminates
+memory compaction.
+
+### Combined online FP8 and NVMe PLE
+
+A later run selected both options with the standard 824,384-token pool,
+524,288-token context, CPU media preprocessing and one visible RTX PRO 6000.
+Post-graph free GPU memory was 7.64 GiB. Nine warmup/schema/tool requests,
+64K READY, 490K three-needle retrieval, fixed-output C1/C4, and all ten selected
+image/video checks passed.
+
+The final source also passed identical-restart restoration of four saved
+64K/490K requests: 553,728 storage-hit, prefetched and KV load-back tokens,
+four Mamba states, and 8,068,005,952 load-back bytes. All four replies were
+correct, with 9.90 seconds synchronized makespan. Logs recorded 63,872- and
+489,856-token storage-prefetch completions. These are aggregate counters
+across two prefixes, not a single request exceeding the context limit.
+
+| Combined-option sample | Run 1 | Run 2 | Run 3 | Median |
+|---|---:|---:|---:|---:|
+| Warmed C1 post-first-token, 1,024 outputs | 172.3843 | 175.7067 | 171.5150 | **172.38 tok/s** |
+| Warmed C4 synchronized aggregate, four × 1,024 outputs | 448.3009 | 442.1500 | 438.2573 | **442.15 tok/s** |
+
+Each C4 run reached four simultaneously running requests; TTFT was about
+0.67–0.71 seconds. Before those warmups, the first basic C1 sample was
+123.08 tok/s post-first-token, and the first C4 aggregate was 254.35 tok/s with
+roughly 7.6-second TTFT. The first-use values are retained because startup/JIT/
+cache state materially affected observed throughput.
+
+This is not a fresh controlled RAM-versus-NVMe A/B. In particular, the earlier
+207.12 tok/s online-FP8/RAM-PLE C1 result was collected in a different window;
+the numbers do not establish a causal speed ratio between PLE placements.
+
 ## Pennyroyal v2.4.0 — Prefill and maintenance
 
 Measured September 9, 2026, on one RTX PRO 6000, TP1, with the same Flash-Next
