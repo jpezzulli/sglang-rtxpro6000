@@ -6,6 +6,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 SCRIPT = Path(__file__).parents[4] / "scripts" / "pennyroyal" / "prepare_ple_nvme.py"
 SPEC = importlib.util.spec_from_file_location("prepare_ple_nvme", SCRIPT)
@@ -58,7 +60,7 @@ class PreparePLENVMETest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def checkpoint(self, layer_ids=(2,), split_parts=1):
+    def checkpoint(self, layer_ids=(2,), split_parts=1, quant_config=False):
         source = self.root / f"source-{len(list(self.root.iterdir()))}"
         source.mkdir()
         (source / "config.json").write_text(
@@ -73,6 +75,10 @@ class PreparePLENVMETest(unittest.TestCase):
         )
         (source / "tokenizer.json").write_text('{"unchanged":true}')
         (source / "tokenizer_config.json").write_text('{"unchanged":true}')
+        if quant_config:
+            (source / "hf_quant_config.json").write_text(
+                '{"quantization":{"quant_algo":"NVFP4"}}'
+            )
         return source
 
     def write_index(self, source: Path, weight_map: dict[str, str], total_size: int):
@@ -82,8 +88,8 @@ class PreparePLENVMETest(unittest.TestCase):
             )
         )
 
-    def integrity_checkpoint(self):
-        source = self.checkpoint()
+    def integrity_checkpoint(self, *, quant_config=False):
+        source = self.checkpoint(quant_config=quant_config)
         ple = (
             "model.language_model.layers.1.ple.ple_embedding."
             "ngram_embedding.shard_0.weight"
@@ -114,6 +120,29 @@ class PreparePLENVMETest(unittest.TestCase):
         MODULE._prepare(source, output)
         return source, output, ordinary, retained
 
+    @staticmethod
+    def entrypoint(
+        *,
+        name="ssd_stream",
+        value="sglang_ssd_stream.plugin:register",
+        distribution="sglang-ssd-stream",
+        loaded=None,
+        error=None,
+    ):
+        from sglang_ssd_stream import plugin
+
+        def load():
+            if error is not None:
+                raise error
+            return plugin.register if loaded is None else loaded
+
+        return SimpleNamespace(
+            name=name,
+            value=value,
+            dist=SimpleNamespace(name=distribution),
+            load=load,
+        )
+
     def check(self, source: Path, output: Path):
         return CHECK.check(source, output)
 
@@ -123,6 +152,93 @@ class PreparePLENVMETest(unittest.TestCase):
         identity = self.check(source, output)
 
         self.assertEqual(len(identity), 64)
+
+    def test_preflight_rejects_missing_ssd_stream_entrypoint(self):
+        source, output, _, _ = self.integrity_checkpoint()
+        with (
+            mock.patch.object(
+                CHECK.importlib.metadata, "entry_points", return_value=()
+            ),
+            self.assertRaisesRegex(ValueError, "entry point"),
+        ):
+            self.check(source, output)
+
+    def test_preflight_rejects_duplicate_ssd_stream_entrypoint(self):
+        source, output, _, _ = self.integrity_checkpoint()
+        entries = (self.entrypoint(), self.entrypoint())
+        with (
+            mock.patch.object(
+                CHECK.importlib.metadata, "entry_points", return_value=entries
+            ),
+            self.assertRaisesRegex(ValueError, "exactly one"),
+        ):
+            self.check(source, output)
+
+    def test_preflight_rejects_wrong_ssd_stream_entrypoint_identity(self):
+        source, output, _, _ = self.integrity_checkpoint()
+        cases = (
+            self.entrypoint(distribution="wrong-distribution"),
+            self.entrypoint(value="wrong.module:register"),
+            self.entrypoint(loaded=lambda: None),
+        )
+        for entrypoint in cases:
+            with (
+                self.subTest(entrypoint=entrypoint),
+                mock.patch.object(
+                    CHECK.importlib.metadata,
+                    "entry_points",
+                    return_value=(entrypoint,),
+                ),
+                self.assertRaisesRegex(ValueError, "entry point"),
+            ):
+                self.check(source, output)
+
+    def test_preflight_rejects_entrypoint_load_failure(self):
+        source, output, _, _ = self.integrity_checkpoint()
+        entrypoint = self.entrypoint(error=ImportError("broken entry point"))
+        with (
+            mock.patch.object(
+                CHECK.importlib.metadata,
+                "entry_points",
+                return_value=(entrypoint,),
+            ),
+            self.assertRaisesRegex(ValueError, "cannot load"),
+        ):
+            self.check(source, output)
+
+    def test_preflight_accepts_source_bound_optional_quant_config(self):
+        source, output, _, _ = self.integrity_checkpoint(quant_config=True)
+
+        identity = self.check(source, output)
+
+        self.assertEqual(len(identity), 64)
+
+    def test_preflight_rejects_missing_optional_quant_config(self):
+        source, output, _, _ = self.integrity_checkpoint(quant_config=True)
+        (output / "hf_quant_config.json").unlink()
+
+        with self.assertRaisesRegex(ValueError, "hf_quant_config.json"):
+            self.check(source, output)
+
+    def test_preflight_rejects_extra_optional_quant_config(self):
+        source, output, _, _ = self.integrity_checkpoint()
+        (output / "hf_quant_config.json").write_text(
+            '{"quantization":{"quant_algo":"NVFP4"}}'
+        )
+
+        with self.assertRaisesRegex(ValueError, "hf_quant_config.json"):
+            self.check(source, output)
+
+    def test_preflight_rejects_relinked_optional_quant_config(self):
+        source, output, _, _ = self.integrity_checkpoint(quant_config=True)
+        prepared_config = output / "hf_quant_config.json"
+        decoy = self.root / "hf_quant_config-copy.json"
+        decoy.write_bytes((source / "hf_quant_config.json").read_bytes())
+        prepared_config.unlink()
+        prepared_config.symlink_to(decoy)
+
+        with self.assertRaisesRegex(ValueError, "hf_quant_config.json"):
+            self.check(source, output)
 
     def test_preflight_rejects_ordinary_weight_map_omission(self):
         source, output, ordinary, _ = self.integrity_checkpoint()

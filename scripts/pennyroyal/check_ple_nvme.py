@@ -13,6 +13,55 @@ from pathlib import Path
 import prepare_ple_nvme as preparer
 
 
+def _load_ssd_stream_entrypoint(expected_register):
+    entries = importlib.metadata.entry_points(group="sglang.srt.plugins")
+    matches = [entry for entry in entries if entry.name == "ssd_stream"]
+    if len(matches) != 1:
+        raise ValueError(
+            "Expected exactly one ssd_stream entry point in sglang.srt.plugins, "
+            f"found {len(matches)}"
+        )
+    entry = matches[0]
+    distribution = entry.dist.name if entry.dist is not None else None
+    if (
+        distribution != "sglang-ssd-stream"
+        or entry.value != "sglang_ssd_stream.plugin:register"
+    ):
+        raise ValueError(
+            "ssd_stream entry point has wrong identity: "
+            f"distribution={distribution}, value={entry.value}"
+        )
+    try:
+        loaded = entry.load()
+    except Exception as exc:
+        raise ValueError(f"cannot load ssd_stream entry point: {exc}") from exc
+    if loaded is not expected_register:
+        raise ValueError(
+            "ssd_stream entry point did not load sglang_ssd_stream.plugin.register"
+        )
+
+
+def _verify_optional_source_file(source: Path, prepared: Path, filename: str) -> None:
+    source_path = source / filename
+    prepared_path = prepared / filename
+    source_present = source_path.exists() or source_path.is_symlink()
+    prepared_present = prepared_path.exists() or prepared_path.is_symlink()
+    if source_present != prepared_present:
+        raise ValueError(
+            f"Prepared checkpoint presence differs for optional {filename}"
+        )
+    if not source_present:
+        return
+    if not source_path.is_file() or not prepared_path.is_file():
+        raise ValueError(f"Optional checkpoint file is invalid: {filename}")
+    if prepared_path.resolve(strict=True) != source_path.resolve(strict=True):
+        raise ValueError(
+            f"Prepared optional checkpoint file does not resolve to source: {filename}"
+        )
+    if sha256(prepared_path) != sha256(source_path):
+        raise ValueError(f"Prepared checkpoint changed {filename}")
+
+
 def _tensor_sha256(tensor: preparer.TensorLocation) -> str:
     digest = hashlib.sha256()
     remaining = tensor.nbytes
@@ -207,8 +256,8 @@ def sha256(path):
 
 def check(source: Path, prepared: Path) -> str:
     from sglang_ssd_stream import __version__ as loaded_version
+    from sglang_ssd_stream import plugin
     from sglang_ssd_stream.config import load_manifest
-    from sglang_ssd_stream.plugin import _register_pennyroyal
 
     version = importlib.metadata.version("sglang-ssd-stream")
     expected_version = "0.2.0+pennyroyal2"
@@ -237,9 +286,11 @@ def check(source: Path, prepared: Path) -> str:
     for filename in ("config.json", "tokenizer.json", "tokenizer_config.json"):
         if sha256(source / filename) != sha256(prepared / filename):
             raise ValueError(f"Prepared checkpoint changed {filename}")
+    _verify_optional_source_file(source, prepared, "hf_quant_config.json")
     load_manifest(manifest_path)
     _verify_prepared_weights(source.resolve(), prepared.resolve(), manifest)
-    _register_pennyroyal()  # Source-hash and native-extension import checks.
+    _load_ssd_stream_entrypoint(plugin.register)
+    plugin._register_pennyroyal()  # Source-hash and native-extension import checks.
     return sha256(manifest_path)
 
 
