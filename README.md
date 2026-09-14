@@ -1,7 +1,7 @@
 # GitHub traffic archive
 
 Repository: `jpezzulli/sglang-rtxpro6000`. Launch: **2026-08-24**.
-Collected: **2026-09-14T00:17:11Z**. Coverage through **2026-09-12** (UTC).
+Collected: **2026-09-14T04:56:13Z**. Coverage through **2026-09-12** (UTC).
 
 Counts are exact sums of GitHub-reported daily counts for the covered dates; the newest dates may be partial and GitHub can revise the overlapping window.
 
@@ -76,7 +76,7 @@ Not yet exposed: 2026-09-13, 2026-09-14.
 | /jpezzulli/sglang-rtxpro6000/tree/pennyroyal-main-sm120-final/configs/pennyroyal | 57 | 32 |
 | /jpezzulli/sglang-rtxpro6000/tree/pennyroyal-main-sm120-final/docker | 53 | 37 |
 
-[Latest full snapshot](snapshots/2026-09-14/2026-09-14T001711Z-34792213810-1.json) · [Daily JSON](daily.json) · [Immutable first-run raw responses](raw/first-run/)
+[Latest full snapshot](snapshots/2026-09-14/2026-09-14T045613Z-34807818743-1.json) · [Daily JSON](daily.json) · [Immutable first-run raw responses](raw/first-run/)
 
 Snapshots retain the aggregate totals, daily arrays, referrers and popular paths as reported together in each collection. They overlap and must not be added together.
 
