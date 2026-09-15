@@ -182,3 +182,20 @@ ALLOC_MEMORY_FUNCS = defaultdict(
         "musa": alloc_with_pin_memory,
     },
 )
+
+# ---------------------------------------------------------------------------
+# WSL2 opt-in: torch-pinned host-pool allocation (default off).
+#
+# alloc_with_host_register() backs CUDA host pools with mmap +
+# cudaHostRegister. On Windows/WSL2 the GPU paravirtualization layer does
+# not honor cudaHostRegister for raw-pointer kernel access: every HiCache
+# host-tier transfer kernel faults with "CUDA error: an illegal memory
+# access" at the first device-to-host write. Reproduced on drivers 595.71
+# and 616.92, CUDA 13.0.3 and 13.3.0 toolchains, io_backend "kernel"
+# (JIT transfer_mamba) and "direct" (prebuilt sgl-kernel transfers) alike.
+#
+# torch's pin_memory allocator (cudaHostAlloc) IS honored by WSL2; kernels
+# access torch-pinned host memory on this platform routinely (the
+# Flash-Next RAM-PLE table is the in-tree example). Setting
+# SGLANG_HICACHE_TORCH_PINNED_ALLOC=1 routes all CUDA host-pool
+# allocations (MHA KV, Mamba, QSA compressed) through
