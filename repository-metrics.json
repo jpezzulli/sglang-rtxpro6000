@@ -1,0 +1,15 @@
+{
+  "api_version": "2022-11-28",
+  "collected_at": "2026-09-19T12:56:39Z",
+  "days": {
+    "2026-09-19": {
+      "collected_at": "2026-09-19T12:56:39Z",
+      "forks": 12,
+      "stars": 90
+    }
+  },
+  "first_collected_at": "2026-09-19T12:56:39Z",
+  "launch_date": "2026-08-24",
+  "repository": "jpezzulli/sglang-rtxpro6000",
+  "schema_version": 1
+}
