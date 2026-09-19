@@ -27,7 +27,11 @@ itself is retrieved using Contents API at the workflow's exact commit SHA.
 - `raw/first-run/metadata.json`: first capture provenance, SHA-256 checksums,
   endpoint query strings and exact coverage/missing dates.
 - `README.md`: cumulative daily counts, daily table, current rolling uniques,
-  and current referrer/path tables. Previous snapshots remain in the archive.
+  current stars/forks, and current referrer/path tables. Previous snapshots remain
+  in the archive.
+- `repository-metrics.json`: date-keyed daily observations of public star and
+  fork counts, beginning **2026-09-19** when this metric was added. Existing
+  traffic history is not backfilled with invented repository-metric values.
 - `package-downloads.json`: date-keyed observations of the public GHCR package
   total and every discovered version's download counter.
 - `package-snapshots/YYYY-MM-DD/<UTC timestamp>-<run ID>-<attempt>.json`:
@@ -49,6 +53,11 @@ preserved. Exact cumulative counts apply only through the latest exposed date
 when every date since launch is present. Missing dates are listed without zero
 filling; recent unexposed dates are labeled separately. Counts are GitHub-reported
 activity, including any bots GitHub counts, not verified human activity.
+
+Stars and forks are collected from the repository REST response using the same
+run timestamp as the traffic snapshot. The canonical daily record is replaced
+only by a later successful collection on that same UTC day; each traffic snapshot
+retains its own timestamped observed star/fork values.
 
 The public GitHub Packages page reports cumulative package and version download
 counters. They are not unique users or successful installations: OCI clients can

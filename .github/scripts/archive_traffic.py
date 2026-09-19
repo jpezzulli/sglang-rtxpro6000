@@ -19,6 +19,7 @@ BRANCH = 'traffic-history'
 LAUNCH = '2026-08-24'
 API_VERSION = '2022-11-28'
 SCHEMA_VERSION = 1
+REPOSITORY_METRICS_EARLIEST_DATE = '2026-09-19'
 ENDPOINTS = {'views': 'views?per=day', 'clones': 'clones?per=day',
              'referrers': 'popular/referrers?per=day', 'paths': 'popular/paths?per=day'}
 
@@ -145,6 +146,80 @@ def validate_history(history):
         require(isinstance(row.get('last_collected_at'), str), 'Missing historical timestamp')
 
 
+def normalized_repository_metrics(raw):
+    """Validate the archive representation of public adoption counters."""
+    require(isinstance(raw, dict), 'Malformed repository metrics')
+    result = {}
+    for name in ('stars', 'forks'):
+        value = raw.get(name)
+        require(type(value) is int and value >= 0, f'Invalid repository {name} count')
+        result[name] = value
+    return result
+
+
+def repository_metrics(raw):
+    """Keep the public adoption counters separate from traffic measurements."""
+    require(isinstance(raw, dict), 'Malformed repository metrics response')
+    return normalized_repository_metrics({'stars': raw.get('stargazers_count'),
+                                          'forks': raw.get('forks_count')})
+
+
+def metric_timestamp(value, label):
+    require(isinstance(value, str) and
+            re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', value),
+            f'Invalid repository metrics {label}')
+    try:
+        dt.datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ')
+    except ValueError:
+        raise ArchiveError(f'Invalid repository metrics {label}') from None
+    return value
+
+
+def validate_repository_metrics_history(history):
+    require(isinstance(history, dict), 'Malformed repository metrics history')
+    require(history.get('schema_version') == SCHEMA_VERSION, 'Repository metrics schema mismatch')
+    require(history.get('repository') == REPOSITORY, 'Repository metrics repository mismatch')
+    require(history.get('launch_date') == LAUNCH, 'Repository metrics launch date mismatch')
+    require(history.get('api_version') == API_VERSION, 'Repository metrics API version mismatch')
+    for field in ('first_collected_at', 'collected_at'):
+        metric_timestamp(history.get(field), field)
+    require(history['first_collected_at'][:10] >= REPOSITORY_METRICS_EARLIEST_DATE,
+            'Repository metrics history predates this collector')
+    require(history['first_collected_at'] <= history['collected_at'],
+            'Repository metrics timestamps are out of order')
+    require(isinstance(history.get('days'), dict) and history['days'],
+            'Empty repository metrics history')
+    for day, row in history['days'].items():
+        require(dt.date.fromisoformat(day).isoformat() == day and
+                day >= REPOSITORY_METRICS_EARLIEST_DATE,
+                'Invalid repository metrics date')
+        normalized_repository_metrics(row)
+        metric_timestamp(row.get('collected_at'), 'row collection timestamp')
+        require(row['collected_at'][:10] == day and
+                history['first_collected_at'] <= row['collected_at'] <= history['collected_at'],
+                'Repository metrics row timestamp is inconsistent')
+
+
+def merge_repository_metrics(previous, current, stamp):
+    metric_timestamp(stamp, 'collection timestamp')
+    require(stamp[:10] >= REPOSITORY_METRICS_EARLIEST_DATE,
+            'Repository metrics collection predates this collector')
+    current = normalized_repository_metrics(current)
+    if previous is not None:
+        validate_repository_metrics_history(previous)
+        require(stamp >= previous['collected_at'],
+                'Repository metrics collection is older than latest archive')
+        days = copy.deepcopy(previous['days'])
+        first_collected_at = previous['first_collected_at']
+    else:
+        days = {}
+        first_collected_at = stamp
+    days[stamp[:10]] = {**current, 'collected_at': stamp}
+    return {'schema_version': SCHEMA_VERSION, 'repository': REPOSITORY, 'launch_date': LAUNCH,
+            'api_version': API_VERSION, 'first_collected_at': first_collected_at,
+            'collected_at': stamp, 'days': dict(sorted(days.items()))}
+
+
 def merge(history, raw, stamp):
     series = validate(raw)
     if history is not None:
@@ -174,7 +249,7 @@ def merge(history, raw, stamp):
     return result
 
 
-def render(history, raw, snapshot_path):
+def render(history, raw, snapshot_path, current_metrics=None):
     c = history['coverage']
     exact = c['complete_through_latest_exposed']
     lines = ['# GitHub traffic archive', '', f'Repository: `{REPOSITORY}`. Launch: **{LAUNCH}**.',
@@ -191,6 +266,9 @@ def render(history, raw, snapshot_path):
         lines.append(f'| Current rolling-window {label} | {raw[kind]["uniques"]:,} |')
         su = sum(row[kind]['uniques'] for row in history['days'].values())
         lines.append(f'| {kind}: `sum_of_daily_uniques` | {su:,} |')
+    if current_metrics is not None:
+        lines.append(f'| Current stars | {current_metrics["stars"]:,} |')
+        lines.append(f'| Current forks | {current_metrics["forks"]:,} |')
     lines += ['', '**No exact lifetime unique-person count is available.** Daily unique values '
               'and rolling-window unique values are GitHub metrics. Summing daily uniques does '
               'not deduplicate people across days or windows.', '',
@@ -208,7 +286,8 @@ def render(history, raw, snapshot_path):
             lines.append(f'| {label} | {row["count"]} | {row["uniques"]} |')
         if not raw[kind]:
             lines.append('| No entries returned by GitHub | — | — |')
-    lines += ['', f'[Latest full snapshot]({snapshot_path}) · [Daily JSON](daily.json) · '
+    metrics_link = ' · [Repository stars and forks](repository-metrics.json)' if current_metrics is not None else ''
+    lines += ['', f'[Latest full snapshot]({snapshot_path}) · [Daily JSON](daily.json){metrics_link} · '
               '[GHCR package downloads](PACKAGE-DOWNLOADS.md) · '
               '[Immutable first-run raw responses](raw/first-run/)', '',
               'Snapshots retain the aggregate totals, daily arrays, referrers and popular paths as '
@@ -228,6 +307,10 @@ def collect(api):
     raw = {kind: json.loads(body) for kind, body in bodies.items()}
     validate(raw)
     return raw, bodies
+
+
+def collect_repository_metrics(api):
+    return repository_metrics(api.request(''))
 
 
 def read_history(api, allow_create=False):
@@ -251,6 +334,23 @@ def read_history(api, allow_create=False):
     return head, tree_sha, history
 
 
+def read_repository_metrics_history(api, tree_sha):
+    tree = api.request(f'git/trees/{tree_sha}')
+    require(not tree.get('truncated'), 'Truncated history root tree')
+    roots = {entry['path']: entry for entry in tree['tree']}
+    entry = roots.get('repository-metrics.json')
+    if entry is None:
+        return None
+    blob = api.request('git/blobs/' + entry['sha'])
+    require(blob['encoding'] == 'base64', 'Unsupported repository metrics blob encoding')
+    try:
+        history = json.loads(base64.b64decode(blob['content'], validate=False))
+    except (ValueError, UnicodeError):
+        raise ArchiveError('Malformed repository metrics history JSON') from None
+    validate_repository_metrics_history(history)
+    return history
+
+
 def publish(api, head, tree_sha, files, message):
     entries = [{'path': path, 'mode': '100644', 'type': 'blob', 'content': content}
                for path, content in files.items()]
@@ -271,18 +371,26 @@ def publish(api, head, tree_sha, files, message):
     return commit
 
 
-def archive(api, raw, bodies, stamp, auth, seed=False, original_metadata=None):
+def archive(api, raw, bodies, stamp, auth, current_metrics=None, seed=False, original_metadata=None):
     head, tree_sha, previous = read_history(api, allow_create=seed)
     require(not seed or head is None, 'Seed is only allowed for a new history branch')
     history = merge(previous, raw, stamp)
+    metrics_history = None
+    if current_metrics is not None:
+        previous_metrics = None if head is None else read_repository_metrics_history(api, tree_sha)
+        metrics_history = merge_repository_metrics(previous_metrics, current_metrics, stamp)
     run_id = os.environ.get('GITHUB_RUN_ID', 'seed')
     attempt = os.environ.get('GITHUB_RUN_ATTEMPT', '1')
     snapshot_path = f'snapshots/{stamp[:10]}/{stamp.replace(":", "")}-{run_id}-{attempt}.json'
     snapshot = metadata(stamp)
     snapshot.update({'authentication': auth, 'run_id': run_id, 'run_attempt': attempt,
                      'endpoints': ENDPOINTS, 'traffic': raw, 'coverage': history['coverage']})
-    summary = render(history, raw, snapshot_path)
+    if current_metrics is not None:
+        snapshot['repository_metrics'] = current_metrics
+    summary = render(history, raw, snapshot_path, current_metrics)
     files = {'daily.json': encode(history), 'README.md': summary, snapshot_path: encode(snapshot)}
+    if metrics_history is not None:
+        files['repository-metrics.json'] = encode(metrics_history)
     if seed:
         meta = metadata(stamp)
         meta.update({'endpoints': ENDPOINTS, 'coverage': history['coverage'],
@@ -312,7 +420,8 @@ def main():
         meta = json.loads((args.seed_directory / 'capture-metadata.json').read_text())
         require(not meta['errors'], 'Initial capture contains API failures')
         stamp = dt.datetime.strptime(meta['collected_at'], '%Y%m%dT%H%M%SZ').strftime('%Y-%m-%dT%H:%M:%SZ')
-        archive(api, raw, bodies, stamp, 'operator gh OAuth (initial seed only)', seed=True, original_metadata=meta)
+        archive(api, raw, bodies, stamp, 'operator gh OAuth (initial seed only)',
+                seed=True, original_metadata=meta)
         return
     require(os.environ.get('GITHUB_REPOSITORY') == REPOSITORY, 'Unexpected repository')
     api = API(os.environ.get('GITHUB_TOKEN'))
@@ -341,7 +450,7 @@ def main():
         raw = {kind: json.loads(body) for kind, body in bodies.items()}
         validate(raw)
     stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    archive(api, raw, bodies, stamp, auth)
+    archive(api, raw, bodies, stamp, auth, collect_repository_metrics(api))
 
 
 if __name__ == '__main__':
