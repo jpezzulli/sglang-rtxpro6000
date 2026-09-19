@@ -49,6 +49,10 @@ exact checkpoints used for each benchmark campaign.
 For Flash-Next, our [OrcaRouter Uncensored ModelOpt NVFP4 conversion](https://huggingface.co/jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4)
 is also available by community request and works with the same Pennyroyal launch recipe.
 
+**Swift 27B FP8 is preliminarily validated** with DFlash2: it passed reasoning
+validation and used fewer tokens overall in our comparison.
+See [Swift 27B validation and per-case timings](SWIFT-27B.md).
+
 [Online FP8](FP8.md) and [NVMe-backed PLE](NVME-PLE.md) are independent
 Flash-Next options.
 
