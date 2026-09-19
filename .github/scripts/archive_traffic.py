@@ -41,8 +41,11 @@ class API:
         self.token = token
 
     def request(self, path, method='GET', data=None, raw=False):
+        url = f'https://api.github.com/repos/{REPOSITORY}'
+        if path:
+            url += '/' + path
         req = urllib.request.Request(
-            f'https://api.github.com/repos/{REPOSITORY}/{path}',
+            url,
             data=None if data is None else json.dumps(data).encode(), method=method,
             headers={'Authorization': f'Bearer {self.token}',
                      'Accept': 'application/vnd.github+json',

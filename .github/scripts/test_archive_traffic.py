@@ -20,6 +20,20 @@ def sample(start='2026-08-24', end='2026-08-26', count=10):
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_repository_metrics_request_uses_repository_root_without_trailing_slash(self):
+        seen = []
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return b'{"stargazers_count":12,"forks_count":3}'
+        original = a.urllib.request.urlopen
+        a.urllib.request.urlopen = lambda request, timeout: seen.append(request.full_url) or Response()
+        try:
+            self.assertEqual(a.collect_repository_metrics(a.API('test')), {'stars': 12, 'forks': 3})
+        finally:
+            a.urllib.request.urlopen = original
+        self.assertEqual(seen, [f'https://api.github.com/repos/{a.REPOSITORY}'])
+
     def test_overlap_corrections_preserve_older_days_and_uniques(self):
         old = a.merge(None, sample(), '2026-08-27T01:00:00Z')
         untouched = copy.deepcopy(old)
