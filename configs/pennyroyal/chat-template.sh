@@ -6,3 +6,12 @@ if [[ "$CHAT_TEMPLATE_SHA" != e57684bae4156211a55473c5a63be976a405a37ab5be5ae0e5
   echo "Froggeric v22.5 template checksum mismatch: $CHAT_TEMPLATE" >&2
   exit 1
 fi
+
+PENNY_REASONING_EFFORT="${PENNY_REASONING_EFFORT:-medium}"
+case "$PENNY_REASONING_EFFORT" in
+  none|minimal|low|medium|high|xhigh|max) ;;
+  *) echo "Choose PENNY_REASONING_EFFORT=none, minimal, low, medium, high, xhigh, or max" >&2; exit 1 ;;
+esac
+printf -v DEFAULT_CHAT_TEMPLATE_KWARGS \
+  '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"%s"}' \
+  "$PENNY_REASONING_EFFORT"

@@ -411,8 +411,18 @@ restore NumPy's huge-page requests. NumPy reads the setting at import, so a
 change requires a server restart. A host-wide `always` policy can still supply
 huge pages.
 
-For Pennyroyal's thinking-enabled agentic use, the launcher defaults to medium
-reasoning effort. Chat Completions `reasoning_effort` takes precedence over
-that default. With Froggeric v22.5, `high`, `xhigh`, and `max` select the same
-xhigh instruction, which can change answer length relative to medium.
-Responses API precedence is unchanged.
+The launchers default to `PENNY_REASONING_EFFORT=medium`. Set it before a native
+launch, or in the Compose `.env`, to change the server's default reasoning
+effort for any profile:
+
+```bash
+export PENNY_REASONING_EFFORT=xhigh
+```
+
+Accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and
+`max`; an unset or empty value uses `medium`. Invalid values stop startup.
+Restart the server after changing the setting. Chat Completions
+`reasoning_effort` takes precedence over that default. With Froggeric v22.5,
+`none` disables thinking, `minimal` and `low` select the low instruction, and
+`high`, `xhigh`, and `max` select the same xhigh instruction, which can change
+answer length relative to medium. Responses API precedence is unchanged.

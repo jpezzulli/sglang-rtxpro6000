@@ -124,7 +124,7 @@ launch_args=(serve \
   --image-processor-backend "$IMAGE_PROCESSOR_BACKEND" \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \
-  --default-chat-template-kwargs '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}' \
+  --default-chat-template-kwargs "$DEFAULT_CHAT_TEMPLATE_KWARGS" \
   --enable-hierarchical-cache --hicache-size 96 --hicache-host-memory-mode cache \
   --hicache-write-policy write_through --hicache-io-backend kernel \
   --hicache-mem-layout page_first --hicache-storage-backend nixl \
