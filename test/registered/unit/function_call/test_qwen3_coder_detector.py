@@ -97,15 +97,10 @@ def test_explicit_forward_unknown_policy_still_requires_wrapper(width):
 
 
 @pytest.mark.parametrize("width", [None, 1, 7, 10000])
-def test_valid_parallel_and_fully_wrapped_declared_quotation_remain_calls(width):
-    # This correction validates syntax/name, not Markdown or the model's intent.
-    source = (
-        "Example:\n```xml\n"
-        + wrapped("run_commands")
-        + wrapped("run_commands", "second")
-    )
+def test_valid_parallel_declared_calls_remain_calls(width):
+    source = wrapped("run_commands") + wrapped("run_commands", "second")
     assert parse(source, width) == (
-        "Example:\n```xml\n",
+        "",
         [
             ("run_commands", {"command": "echo hi"}),
             ("run_commands", {"command": "second"}),

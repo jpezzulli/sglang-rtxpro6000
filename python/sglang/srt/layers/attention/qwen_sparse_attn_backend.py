@@ -554,16 +554,30 @@ class QwenSparseAttnBackend(AttentionBackend):
         ).to(torch.int32)
         group_end_positions = blocks * compress_ratio + (compress_ratio - 1)
         member_rows = None
+        prefix_members = None
         if row_token_starts is not None:
-            # Group members as token-row indices into this forward's packed
-            # tensors: the chunk is group-aligned, so the group's first
-            # member sits chunk-locally at (block * ratio - prefix).
+            # member_rows may precede this forward's packed rows when a
+            # private chunk-cache tail ends mid-group. prefix_members records
+            # exactly how many leading keys must come from the request ring.
+            group_starts = blocks * compress_ratio
             member_rows = torch.where(
                 valid,
-                row_token_starts[rows] + blocks * compress_ratio - prefix_lens[rows],
+                row_token_starts[rows] + group_starts - prefix_lens[rows],
                 torch.zeros_like(blocks),
             )
-        return write_locs, group_end_positions, rows, member_rows, valid
+            prefix_members = torch.where(
+                valid,
+                (prefix_lens[rows] - group_starts).clamp(min=0, max=compress_ratio - 1),
+                torch.zeros_like(blocks),
+            )
+        return (
+            write_locs,
+            group_end_positions,
+            rows,
+            member_rows,
+            valid,
+            prefix_members,
+        )
 
     def _qsa_build_write_plan(
         self,
@@ -576,8 +590,9 @@ class QwenSparseAttnBackend(AttentionBackend):
         """Plan the compressed writes for this forward, device-side only.
 
         Returns (write_locs, group_end_positions, sequence_ids, member_rows,
-        plan_valid). The only per-mode part is the block range each row owns,
-        which is device arithmetic over lengths the batch already carries.
+        plan_valid, prefix_members). The only per-mode part is the block range
+        each row owns, which is device arithmetic over lengths the batch
+        already carries.
         """
         ratio = self.token_to_kv_pool.qsa_compress_ratio
         lengths = sequence_lengths.long()
@@ -598,10 +613,6 @@ class QwenSparseAttnBackend(AttentionBackend):
             raise ValueError("QSA extend write plan requires extend_seq_lens")
         extend_lens = extend_lens.long()[: lengths.numel()]
         prefix_lens = (lengths - extend_lens).clamp_min(0)
-        # Prefix sharing is page-granular and the page is a ratio
-        # multiple, so a matched prefix always covers whole groups. A
-        # misaligned prefix would leave a shared group half-written.
-        torch._assert_async((prefix_lens % ratio == 0).all())
         # Each row spans at most ceil(extend_len / ratio) blocks, so the
         # token count and row count bound the plan without a sync.
         capacity = int(forward_batch.input_ids.numel()) // ratio + int(lengths.numel())
@@ -755,11 +766,14 @@ class QwenSparseAttnBackend(AttentionBackend):
         group_sequence_ids = None
         group_member_rows = None
         group_plan_valid = None
+        group_prefix_members = None
+        has_cross_prefix_group = False
         decode_page_table = None
         decode_lengths = None
         decode_logical_positions = None
         pending_ring_slots = None
         compress_group_ring_locs = None
+        cross_prefix_rope_positions = None
         extend_rope_matrix = None
         if (
             self.qsa_profile is None
@@ -771,12 +785,31 @@ class QwenSparseAttnBackend(AttentionBackend):
                 group_sequence_ids,
                 group_member_rows,
                 group_plan_valid,
+                group_prefix_members,
             ) = self._qsa_build_write_plan(
                 forward_batch=forward_batch,
                 speculative_paged=speculative_paged,
                 token_slot_table=token_slot_table,
                 sequence_lengths=sequence_lengths,
             )
+            if group_member_rows is not None:
+                prefix_lens_cpu = getattr(forward_batch, "extend_prefix_lens_cpu", None)
+                # Ordinary extend batches carry this scheduler-maintained host
+                # list. If a custom caller omits it, preserve correctness by
+                # taking the rare cross-prefix path conservatively; do not
+                # inspect the device plan with .item() and serialize prefill.
+                has_cross_prefix_group = prefix_lens_cpu is None
+                if prefix_lens_cpu is not None:
+                    if (
+                        isinstance(prefix_lens_cpu, torch.Tensor)
+                        and prefix_lens_cpu.device.type != "cpu"
+                    ):
+                        has_cross_prefix_group = True
+                    else:
+                        has_cross_prefix_group = any(
+                            int(length) % self.compress_ratio
+                            for length in prefix_lens_cpu
+                        )
             decode_like = speculative_paged or forward_batch.forward_mode.is_decode()
             if decode_like:
                 decode_logical_positions = (
@@ -811,6 +844,20 @@ class QwenSparseAttnBackend(AttentionBackend):
                 )
                 if write_locs.numel():
                     if group_member_rows is not None:
+                        if has_cross_prefix_group:
+                            compress_group_ring_locs = build_group_ring_slots(
+                                req_pool_indices=row_req_pool_indices,
+                                group_end_positions=group_positions.long(),
+                                sequence_ids=group_sequence_ids.long(),
+                                compress_ratio=self.compress_ratio,
+                            )
+                            # RoPE coordinates are shared across QSA layers,
+                            # while pending keys are per layer. Snapshot the
+                            # old group-start coordinates before layer 0 can
+                            # publish this chunk's tail into the shared ring.
+                            cross_prefix_rope_positions = self.token_to_kv_pool.qsa_rope_position_buffer.index_select(
+                                0, compress_group_ring_locs[:, 0].long()
+                            )
                         rope_source = (
                             forward_batch.mrope_positions
                             if forward_batch.mrope_positions is not None
@@ -896,11 +943,14 @@ class QwenSparseAttnBackend(AttentionBackend):
             compress_sequence_ids=group_sequence_ids,
             compress_member_rows=group_member_rows,
             compress_plan_valid=group_plan_valid,
+            compress_prefix_members=group_prefix_members,
+            has_cross_prefix_group=has_cross_prefix_group,
             decode_page_table=decode_page_table,
             decode_lengths=decode_lengths,
             decode_logical_positions=decode_logical_positions,
             pending_ring_slots=pending_ring_slots,
             compress_group_ring_locs=compress_group_ring_locs,
+            cross_prefix_rope_positions=cross_prefix_rope_positions,
             extend_rope_matrix=extend_rope_matrix,
             prefill_compressed_cu_seqlens=prefill_compressed_cu_seqlens,
             prefill_row_starts=prefill_row_starts,

@@ -20,6 +20,7 @@ NIXL_STORAGE_BASE="${NIXL_STORAGE_BASE:?Set NIXL_STORAGE_BASE to the FILE cache 
 NIXL_CONFIG="${NIXL_CONFIG:-$SCRIPT_DIR/nixl-posix.toml}"
 NAMESPACE_HELPER="$REPO_ROOT/scripts/pennyroyal/derive_namespace.py"
 source "$SCRIPT_DIR/chat-template.sh"
+source "$SCRIPT_DIR/request-capacity.sh"
 
 CONTEXT_LENGTH=524288
 PAGE_SIZE=64
@@ -100,7 +101,8 @@ NIXL_STORAGE="$("$NAMESPACE_HELPER" \
   --field "hicache_mem_layout=page_first" \
   --field "mamba_ssm_dtype=$MAMBA_SSM_DTYPE" \
   --field "mamba_conv_dtype=$MAMBA_CONV_DTYPE" \
-  --field "max_mamba_cache_size=24" \
+  --field "max_mamba_cache_size=$MAX_MAMBA_CACHE_SIZE" \
+  --field "max_running_requests=$MAX_RUNNING_REQUESTS" \
   --field "mamba_radix_cache_strategy=extra_buffer" \
   --field "mamba_track_interval=$MAMBA_TRACK_INTERVAL" \
   --field "linear_attn_decode_backend=flashinfer" \
@@ -125,10 +127,10 @@ launch_args=(serve \
   --mem-fraction-static 0.981 \
   "${TOKEN_CAP_ARGS[@]}" \
   --context-length "$CONTEXT_LENGTH" --json-model-override-args "$TARGET_OVERRIDES" \
-  --page-size "$PAGE_SIZE" --max-running-requests 4 --sleep-on-idle \
+  --page-size "$PAGE_SIZE" --max-running-requests "$MAX_RUNNING_REQUESTS" --sleep-on-idle \
   --chunked-prefill-size "$PREFILL_CHUNK_SIZE" \
   --mamba-radix-cache-strategy extra_buffer --mamba-ssm-dtype "$MAMBA_SSM_DTYPE" \
-  --max-mamba-cache-size 24 --gdn-mtp-cache-mode none \
+  --max-mamba-cache-size "$MAX_MAMBA_CACHE_SIZE" --gdn-mtp-cache-mode none \
   --linear-attn-decode-backend flashinfer --linear-attn-prefill-backend flashinfer \
   --mamba-track-interval "$MAMBA_TRACK_INTERVAL" \
   --enable-hierarchical-cache --hicache-size 32 --hicache-host-memory-mode cache \

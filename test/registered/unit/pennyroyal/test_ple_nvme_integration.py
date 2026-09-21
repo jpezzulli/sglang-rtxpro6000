@@ -4,6 +4,10 @@ import os
 import subprocess
 from pathlib import Path
 
+from sglang.test.ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=2, suite="base-a-test-cpu")
+
 REPO = Path(__file__).resolve().parents[4]
 HELPER = REPO / "configs" / "pennyroyal" / "ple-backend.sh"
 NEXT_RECIPES = (
@@ -219,7 +223,7 @@ def test_next_recipes_initialize_cache_environment_before_nvme_preflight(tmp_pat
 
 def test_source_guard_matches_every_hooked_publication_module():
     guard = json.loads(GUARD.read_text())
-    assert guard["source"].startswith("Pennyroyal v2.5.0")
+    assert guard["source"].startswith("Pennyroyal v2.5.1")
     assert "sglang.srt.models.qwen4_exp" in guard["modules"]
 
     for module, expected in guard["modules"].items():

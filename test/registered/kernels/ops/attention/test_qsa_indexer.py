@@ -21,7 +21,13 @@ from sglang.srt.layers.attention.qsa.kernel import (
     expand_qsa_block_indices,
     torch_expand_qsa_block_indices,
 )
+from sglang.srt.layers.attention.qsa.metadata import (
+    build_group_ring_slots,
+    build_pending_ring_slots,
+    build_rope_position_matrix,
+)
 from sglang.srt.layers.attention.qsa.qsa_indexer import QSAIndexer
+from sglang.srt.layers.attention.qwen_sparse_attn_backend import QwenSparseAttnBackend
 from sglang.srt.layers.rotary_embedding.mrope import MRotaryEmbedding
 
 # MRotaryEmbedding reads the exec config bag at init; publish a minimal
@@ -90,6 +96,7 @@ class FakePool:
     """Minimal stand-in for the QSA KV pool buffers used by the indexer."""
 
     def __init__(self, num_slots, num_compressed, device, dtype=torch.bfloat16):
+        self.index_state_dtype = dtype
         self.key_state = torch.zeros(num_slots, 1, HEAD_DIM, dtype=dtype, device=device)
         self.qsa_rope_position_buffer = torch.zeros(
             num_slots, 3, dtype=torch.int64, device=device
@@ -118,6 +125,48 @@ class FakePool:
 
     def set_qsa_compressed_k_buffer(self, layer_id, loc, compressed_k):
         self.compressed[loc.long()] = compressed_k.to(self.compressed.dtype)
+
+
+class MultiLayerFakePool:
+    """QSA keys/compressed outputs are per layer; RoPE positions are shared."""
+
+    def __init__(
+        self, num_layers, num_slots, num_compressed, device, dtype=torch.bfloat16
+    ):
+        self.index_state_dtype = dtype
+        self.key_states = [
+            torch.zeros(num_slots, 1, HEAD_DIM, dtype=dtype, device=device)
+            for _ in range(num_layers)
+        ]
+        self.qsa_rope_position_buffer = torch.zeros(
+            num_slots, 3, dtype=torch.int64, device=device
+        )
+        self.compressed_layers = [
+            torch.zeros(num_compressed, 1, HEAD_DIM, dtype=dtype, device=device)
+            for _ in range(num_layers)
+        ]
+
+    def get_qsa_key_state_buffer(self, layer_id):
+        return self.key_states[layer_id]
+
+    def set_qsa_key_state_buffer(self, layer_id, loc, token_k):
+        self.key_states[layer_id][loc.long()] = token_k.to(
+            self.key_states[layer_id].dtype
+        )
+
+    def set_qsa_rope_position_buffer(self, loc, positions):
+        positions = positions.long()
+        if positions.ndim == 1:
+            positions = positions.unsqueeze(0).expand(3, -1)
+        self.qsa_rope_position_buffer[loc.long()] = positions.transpose(0, 1)
+
+    def get_qsa_compressed_k_buffer(self, layer_id):
+        return self.compressed_layers[layer_id]
+
+    def set_qsa_compressed_k_buffer(self, layer_id, loc, compressed_k):
+        self.compressed_layers[layer_id][loc.long()] = compressed_k.to(
+            self.compressed_layers[layer_id].dtype
+        )
 
 
 def _make_metadata(pool, cache_loc, token_slot_table, write_locs):
@@ -282,6 +331,127 @@ def _eager_compress_reference(indexer, pool, group_locs, write_locs):
     rope_positions = indexer._get_group_rope_positions(pool, group_locs[:, 0])
     normalized = indexer.normalize_compressed_keys(pooled, rope_positions)
     pool.set_qsa_compressed_k_buffer(0, write_locs, normalized)
+
+
+@pytest.mark.parametrize("fused_main_pass", [False, True])
+def test_cross_prefix_multilayer_real_mrope_matches_uninterrupted_references(
+    fused_main_pass,
+):
+    """Every layer must use pre-forward coordinates with its own old keys."""
+
+    device, dtype = torch.device("cuda"), torch.bfloat16
+    torch.manual_seed(39575)
+    rotary = _make_rotary([24, 20, 20], True, device, dtype)
+    indexers = [_make_indexer(rotary, device, dtype) for _ in range(2)]
+    for layer_id, indexer in enumerate(indexers):
+        indexer.layer_id = layer_id
+    pool = MultiLayerFakePool(2, 64, 64, device, dtype)
+
+    prefix_len, extend_len, request_slot = 2, 7, 2
+    prefix_keys = torch.randn(2, prefix_len, 1, HEAD_DIM, device=device, dtype=dtype)
+    current_keys = torch.randn(2, extend_len, 1, HEAD_DIM, device=device, dtype=dtype)
+    prefix_rope = torch.tensor(
+        [[7, 8], [107, 108], [207, 208]], device=device, dtype=torch.long
+    )
+    current_positions = torch.arange(2, 9, device=device, dtype=torch.long)
+    current_rope = torch.stack(
+        (current_positions, current_positions + 100, current_positions + 200)
+    )
+
+    prefix_slots = request_slot * RATIO + torch.arange(prefix_len, device=device)
+    for layer_id in range(2):
+        pool.set_qsa_key_state_buffer(layer_id, prefix_slots, prefix_keys[layer_id])
+    pool.set_qsa_rope_position_buffer(prefix_slots, prefix_rope)
+
+    token_slot_table = torch.arange(64, 80, device=device, dtype=torch.int32).view(
+        1, -1
+    )
+    prefix_lens = torch.tensor([prefix_len], device=device)
+    sequence_lengths = torch.tensor([prefix_len + extend_len], device=device)
+    write_locs, group_positions, sequence_ids, member_rows, valid, prefix_members = (
+        QwenSparseAttnBackend._qsa_write_plan(
+            token_slot_table=token_slot_table,
+            start_blocks=prefix_lens // RATIO,
+            end_blocks=sequence_lengths // RATIO,
+            capacity=2,
+            compress_ratio=RATIO,
+            row_token_starts=torch.zeros(1, device=device, dtype=torch.long),
+            prefix_lens=prefix_lens,
+        )
+    )
+    req_pool_indices = torch.tensor([request_slot], device=device, dtype=torch.int32)
+    token_to_batch = torch.zeros(extend_len, device=device, dtype=torch.int32)
+    ring_group_locs = build_group_ring_slots(
+        req_pool_indices=req_pool_indices,
+        group_end_positions=group_positions,
+        sequence_ids=sequence_ids,
+        compress_ratio=RATIO,
+    )
+    state_slots = build_pending_ring_slots(
+        token_to_batch_idx=token_to_batch,
+        req_pool_indices=req_pool_indices,
+        sequence_lengths=sequence_lengths,
+        logical_positions=current_positions,
+        compress_ratio=RATIO,
+        is_extend=True,
+    )
+    metadata = SimpleNamespace(
+        token_to_kv_pool=pool,
+        token_to_batch_idx=token_to_batch,
+        req_pool_indices=req_pool_indices,
+        sequence_lengths=sequence_lengths,
+        compress_member_rows=member_rows,
+        compress_prefix_members=prefix_members,
+        compress_plan_valid=valid,
+        has_cross_prefix_group=True,
+        compress_group_ring_locs=ring_group_locs,
+        cross_prefix_rope_positions=pool.qsa_rope_position_buffer.index_select(
+            0, ring_group_locs[:, 0].long()
+        ),
+        compress_group_positions=group_positions,
+        compress_sequence_ids=sequence_ids,
+        write_locs=write_locs,
+        extend_rope_matrix=build_rope_position_matrix(current_rope, extend_len),
+        is_cuda_graph=False,
+    )
+
+    expected = []
+    for layer_id, indexer in enumerate(indexers):
+        uninterrupted_group = torch.cat(
+            (prefix_keys[layer_id], current_keys[layer_id, :2]), dim=0
+        )
+        expected.append(
+            indexer.normalize_compressed_keys(
+                uninterrupted_group.float().mean(dim=0, keepdim=True).to(dtype),
+                prefix_rope[:, :1],
+            )
+        )
+        if not fused_main_pass:
+            indexer._use_fused_compress = lambda pool: False
+        else:
+            assert indexer._use_fused_compress(pool)
+        indexer.update_key_state_and_compress(
+            current_keys[layer_id],
+            current_positions,
+            current_rope,
+            metadata,
+            state_slots=state_slots,
+        )
+
+    for layer_id in range(2):
+        assert_bit_comparable(
+            pool.compressed_layers[layer_id][write_locs[0].long()].unsqueeze(0),
+            expected[layer_id],
+        )
+    # Position 8 is the next pending tail and aliases the first old prefix
+    # slot. Both per-layer states update only after their crossed compression.
+    for layer_id in range(2):
+        torch.testing.assert_close(
+            pool.key_states[layer_id][prefix_slots[0]],
+            current_keys[layer_id, -1],
+            rtol=0,
+            atol=0,
+        )
 
 
 @pytest.mark.parametrize("num_groups", [1, 5, 2000])

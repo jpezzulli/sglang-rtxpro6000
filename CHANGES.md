@@ -1,6 +1,6 @@
 # Cumulative changes and upstream status
 
-The exact v2.5.0 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
+The exact v2.5.1 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
 Its lineage extends the v2.4.1 ordered range
 `e7e78940168f..cf811a8c5988`; all prior runtime commits remain in source
 history, including the graph-lifetime trial and its full revert. The integration
@@ -14,11 +14,45 @@ corrections while retaining the same dependency stack and launch settings.
 v2.4.1 adds the bounded maintenance and setup changes below without a rebase.
 v2.5.0 adds the two opt-in Flash-Next capabilities and bounded startup/lifetime
 maintenance below, again without changing the integration base.
+v2.5.1 adds cache and parser maintenance, optional C6 capacity settings, and
+automatic release-container builds on the same dependency stack.
 
-“Local” does not mean a permanent fork requirement. It means the exact active
-commit has not merged upstream. Where a PR has a later refined head, that is
-shown separately rather than pretending the local commit and PR head are
-identical.
+“Local” identifies changes maintained in this fork. Upstream status and PR
+heads are recorded with the release that used them.
+
+## v2.5.1 — Cache and parser maintenance
+
+This update keeps the v2.5.0 precision options and defaults while improving
+long-session behavior and cache reuse.
+
+| Affected profile | What changed | Credit / source |
+|---|---|---|
+| Both profiles | Mentioning a bare or malformed tool marker during reasoning no longer ends thinking early or leaks the closing thinking tag into the answer. Genuine calls, including zero-argument calls, still work. | Local correction for [community issue #6](https://github.com/jpezzulli/sglang-rtxpro6000/issues/6). |
+| Both profiles | Tool examples inside backtick or tilde code fences stay as text. Real calls outside the block and Markdown inside real tool arguments are preserved. | Local Qwen3 Coder parser correction and streaming regression tests. |
+| Both profiles | Host-cache eviction keeps useful recurrent-state endpoints when it can discard a redundant intermediate checkpoint instead. This restores prefix reuse under host-only write-through cache pressure. | Local correction for [community issue #3](https://github.com/jpezzulli/sglang-rtxpro6000/issues/3). |
+| Both profiles | If all recurrent-cache slots are temporarily busy, skip donating an optional unfinished-request checkpoint instead of aborting the request. | Adapted from SGLang [#37619](https://github.com/sgl-project/sglang/pull/37619). |
+| Flash-Next | Handle chunked-prefill prefixes that end partway through a QSA compression group, including the carried partial-page tail. | Adapted from SGLang [#39575](https://github.com/sgl-project/sglang/pull/39575), with per-layer key and rotary-coordinate lifetime corrections. |
+| Flash-Next launchers | Expose optional request and Mamba-slot limits in native scripts and Compose. The C6 example requests 1,048,576 shared KV tokens while retaining 524,288-token context per request. Defaults remain C4/24 slots. | Local capacity option; [setup](RUN.md#optional-six-request-flash-next-profile). |
+| Container delivery | Publishing a GitHub release builds and CPU-checks the matching image automatically. Manual rebuilds and checked-image tagging remain available. | Existing GitHub Actions pipeline, now release-triggered. |
+
+The reported host-only Flash-Next case went from **0/9 to 9/9 substantial prefix
+restores** on the same nine-conversation workload. Median revisit time fell
+from **9.04 s to 1.05 s**, with all answers correct. A focused 27B check restored
+4/4 prefixes. Write-through remains the selected policy.
+
+Both profiles passed focused regression covering 64K/490K prefill, decode,
+concurrency, vision and media, and NIXL reuse after restart. Flash-Next also
+ran six concurrent requests and six continuations sharing two 450K prefixes.
+Its C6 boot fitted **1,034,176 KV tokens** from the requested 1,048,576 with
+online FP8 and secondary-GPU preprocessing. The pool is shared across requests.
+
+Parser regressions cover fragmented streaming, quoted/malformed markers,
+fenced examples, real calls and literal delimiters in arguments. The supported
+agentic recipes use thinking mode.
+
+The CUDA/PyTorch/FlashInfer/NIXL stack and existing performance tables are
+unchanged. Native runtime regression supplies the GPU evidence for this patch;
+the automated container build checks packaging, dependencies and source identity.
 
 ## Container distribution for the v2.5.0 runtime
 

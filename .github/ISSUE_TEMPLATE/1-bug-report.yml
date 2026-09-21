@@ -4,15 +4,18 @@ title: "[Bug] "
 labels: ['Bug']
 
 body:
+- type: markdown
+  attributes:
+    value: |
+      Thanks for reporting a problem with Pennyroyal. Questions and field reports
+      are welcome in this repository too. Share what you ran and what happened;
+      you do not need a minimal reproducer to report an intermittent failure.
 - type: checkboxes
   attributes:
     label: Checklist
     options:
-      - label: I searched related issues but found no solution.
-      - label: The bug persists in the latest version.
-      - label: Issues without environment info and a minimal reproducible demo are hard to resolve and may receive no feedback.
-      - label: If this is not a bug report but a general question, please start a discussion at https://github.com/sgl-project/sglang/discussions. Otherwise, it will be closed.
-      - label: Please use English. Otherwise, it will be closed.
+      - label: I checked existing issues for the same problem.
+      - label: I included my Pennyroyal version or source commit and relevant launch settings below.
 - type: textarea
   attributes:
     label: Describe the bug
@@ -22,14 +25,14 @@ body:
 - type: textarea
   attributes:
     label: Reproduction
-    description: Command/script run and model used.
+    description: Model, launch command or profile, relevant settings, and steps or workload that triggered the problem. Include the error or log excerpt if available.
     placeholder: Paste the command here.
   validations:
     required: true
 - type: textarea
   attributes:
     label: Environment
-    description: Run `python3 -m sglang.check_env` and paste output here. Issues without this will be closed.
-    placeholder: Paste environment output here.
+    description: Include GPU(s), RAM, OS, Pennyroyal version or source commit, and whether you use the container or a native install. Output from `python3 -m sglang.check_env` is helpful if available.
+    placeholder: Describe your setup here.
   validations:
     required: true

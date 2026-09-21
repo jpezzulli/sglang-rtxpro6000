@@ -29,7 +29,7 @@ Run this sequence in Bash. It creates a new checkout and Python environment,
 installs the build tools, then installs SGLang and its dependencies once:
 
 ```bash
-git clone --branch pennyroyal-v2.5.0 --single-branch \
+git clone --branch pennyroyal-v2.5.1 --single-branch \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
 cd pennyroyal
 
@@ -64,7 +64,7 @@ Next, complete [NIXL POSIX](#nixl-posix) if it is not already installed,
 
 ## Update an existing install
 
-Use this path for an existing Pennyroyal environment, such as v2.4.1. Stop any
+Use this path for an existing Pennyroyal environment, such as v2.5.0. Stop any
 server using the checkout first. Start with a clean checkout:
 `git status --short` must be empty; save your own changes before switching tags.
 Replace the path below with your checkout. The public remote is assumed to be
@@ -72,8 +72,8 @@ named `origin`.
 
 ```bash
 cd /path/to/pennyroyal
-git fetch origin tag pennyroyal-v2.5.0
-git switch --detach pennyroyal-v2.5.0
+git fetch origin tag pennyroyal-v2.5.1
+git switch --detach pennyroyal-v2.5.1
 source .venv/bin/activate
 
 export CUDA_HOME=/usr/local/cuda CUDACXX=/usr/local/cuda/bin/nvcc
@@ -90,10 +90,13 @@ export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-$PENNY_BU
 uv pip install --no-build-isolation --no-deps -e python
 ```
 
-This updates SGLang without re-resolving the existing dependencies. The core
-v2.5.0 update reuses PyTorch, `sglang-kernel`, FlashInfer, and NIXL. If build
-tools are missing, install the bootstrap packages from the fresh-install
-sequence, then retry the final command.
+This updates SGLang without re-resolving the existing dependencies.
+v2.5.1 reuses the v2.5.0 PyTorch, `sglang-kernel`, FlashInfer, and NIXL
+dependencies. If build tools are missing, install the bootstrap packages from
+the fresh-install sequence, then retry the final command.
+
+If you use NVMe PLE, also refresh the [isolated reader](#optional-nvme-ple-reader)
+for the new source version. The prepared PLE overlay can be reused.
 
 Restart using your existing model paths and the [launch guide](RUN.md).
 The namespace helper chooses a fresh NIXL cache identity for changed source;
@@ -188,11 +191,19 @@ The reader installs under `.ple-nvme` by default and does not alter the main
 environment. It requires Rust/Cargo and `uv`; build tools may download
 dependencies. The prepared overlay requires approximately 48 GiB plus
 filesystem overhead and retains links to the original immutable checkpoint.
-The installer refuses to overwrite an existing reader directory. When replacing
-an earlier optional-reader test install, set `PENNY_PLE_PLUGIN_DIR` to a new
-empty location for both installation and launch. v2.5.0 rejects earlier reader
-builds that lack complete hook-application enforcement; an existing prepared
-overlay can still be reused when the v2.5.0 integrity preflight accepts it.
+The installer preserves existing reader directories. When upgrading from
+v2.5.0, install the reader from this checkout into a new location and use it
+for launch:
+
+```bash
+export PENNY_PLE_PLUGIN_DIR="$PWD/.ple-nvme-v251"
+PYTHON="$PWD/.venv/bin/python" bash tools/ple_nvme/install.sh
+```
+
+The reader checks Pennyroyal's source signatures, which changed with the QSA
+fix. The prepared overlay and table format are unchanged; reuse the existing
+overlay when its normal integrity checks pass. Container images already
+include the matching reader.
 
 See [NVME-PLE.md](NVME-PLE.md) for overrides, launch variables, integrity
 checks, upstream license/NOTICE credit and the measured memory/performance
@@ -276,7 +287,7 @@ bundled in this wheel.
 
 ### Source and earlier wheels
 
-The exact v2.5.0 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
+The exact v2.5.1 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
 This release uses updated Python/JIT sources on the existing dependency stack;
 no new prebuilt wheel is distributed. The optional NVMe reader is a separate
 isolated install and is not included in the main SGLang wheel.

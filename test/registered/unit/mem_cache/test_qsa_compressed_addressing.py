@@ -63,7 +63,7 @@ class TestQsaCompressedWritePlan(CustomTestCase):
         group floor-divides to the same compressed slot, so the plan can read
         the group's first slot and divide."""
         table = _page_aligned_table(2, 512)
-        write_locs, group_positions, sequence_ids, member_rows, valid = _plan(
+        write_locs, group_positions, sequence_ids, member_rows, valid, _ = _plan(
             lengths=[256, 260], table=table
         )
         self.assertIsNone(member_rows)  # paged rows source the pending ring
@@ -80,7 +80,7 @@ class TestQsaCompressedWritePlan(CustomTestCase):
         the shape-derived capacity is padded with writes to the reserved slot
         0, which the compression kernels treat as an inert dump."""
         table = _page_aligned_table(3, 512)
-        write_locs, _, _, _, valid = _plan(lengths=[253, 254, 255], table=table)
+        write_locs, _, _, _, valid, _ = _plan(lengths=[253, 254, 255], table=table)
         self.assertEqual(valid.tolist(), [False, False, False])
         self.assertEqual(write_locs.numel(), 3)  # capacity, not group count
         self.assertEqual(write_locs.tolist(), [0, 0, 0])
@@ -89,7 +89,7 @@ class TestQsaCompressedWritePlan(CustomTestCase):
         """Mixed rows compact to the front in row order so the compression
         kernels can consume the plan without a per-row boundary test."""
         table = _page_aligned_table(4, 512)
-        write_locs, group_positions, sequence_ids, _, valid = _plan(
+        write_locs, group_positions, sequence_ids, _, valid, _ = _plan(
             lengths=[255, 256, 257, 512], table=table
         )
         self.assertEqual(sequence_ids[:2].tolist(), [1, 3])
@@ -101,7 +101,7 @@ class TestQsaCompressedWritePlan(CustomTestCase):
         """Page-granular sharing makes every matched prefix a whole number of
         groups, so an extend row plans exactly its chunk's groups."""
         table = _page_aligned_table(1, 1024)
-        write_locs, group_positions, _, member_rows, valid = _plan(
+        write_locs, group_positions, _, member_rows, valid, _ = _plan(
             lengths=[600], table=table, extend_lens=[600 - 128]
         )
         # Extend groups are sourced from this forward's packed tensors: the

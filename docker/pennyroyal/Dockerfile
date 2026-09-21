@@ -81,7 +81,8 @@ ENV CACHE_BASE=/cache NIXL_STORAGE_BASE=/nixl \
     SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION=false
 WORKDIR /opt/pennyroyal
 USER penny
-RUN pennyroyal --check
+RUN PENNY_EXPECTED_SOURCE_REVISION="$SOURCE_REVISION" pennyroyal --check \
+    && pennyroyal --help
 EXPOSE 8001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20m --retries=3 \
   CMD ["/opt/pennyroyal/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3).close()"]

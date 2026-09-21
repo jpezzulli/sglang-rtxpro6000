@@ -13,20 +13,25 @@ model configurations run from the same patched source.
 [Choose a model](#qualified-model-profiles-and-launch-recipes) ·
 [Run Qwen3.8](RUN.md).
 
+Using an AI assistant to set this up? Give it [llms.txt](llms.txt)
+for the short setup map and links to the detailed instructions.
+
 **Evidence:** [Benchmarks and measurement definitions](RESULTS.md) ·
 [Community-reported results](COMMUNITY-RESULTS.md) ·
 [Validation suite and published reports](https://github.com/jpezzulli/pennyroyal-validation).
 
 ## Prebuilt Docker image for Qwen3.8 on RTX PRO 6000
 
-**Pennyroyal v2.5.0 is now available as a prebuilt Docker image** for both
+**Pennyroyal has a prebuilt Docker image** for both
 Qwen3.8 Flash-Next NVFP4/NEXTN and Qwen3.8-27B FP8/DFlash2, with HiCache and
 NIXL. No local SGLang build is required; model files and caches stay in mounted
 host directories. Native installation remains supported.
 
 **[Docker and Compose setup](docker/pennyroyal/README.md)** ·
-Image: `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.0` ·
-Approximately **8.43 GiB** to download, excluding models.
+Image: `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1` ·
+[Container build status](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml).
+Images build automatically when a release is published. Model weights are
+downloaded separately.
 
 <a id="models-and-launch-recipes"></a>
 
@@ -40,6 +45,13 @@ exact checkpoints used for each benchmark campaign.
 |---|---|---|---|---|
 | **Qwen3.8 Flash-Next** | NVFP4 target with FP8 KV | Native NEXTN MTP with FR-Spec | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4); no separate draft | [Recommended FR-Spec recipe](RUN.md#launch-flash-next-with-fr-spec) or [non-FR alternative](RUN.md#launch-flash-next-without-fr-spec-alternative) |
 | **Qwen3.8-27B** | FP8 target and KV | DFlash2 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) with [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2) | [27B/DFlash2 recipe](RUN.md#launch-27b-with-dflash2) |
+
+For Flash-Next, our [OrcaRouter Uncensored ModelOpt NVFP4 conversion](https://huggingface.co/jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4)
+is also available by community request and works with the same Pennyroyal launch recipe.
+
+**Swift 27B FP8 is preliminarily validated** with DFlash2: it passed reasoning
+validation and used fewer tokens overall in our comparison.
+See [Swift 27B validation and per-case timings](SWIFT-27B.md).
 
 [Online FP8](FP8.md) and [NVMe-backed PLE](NVME-PLE.md) are independent
 Flash-Next options.
@@ -64,7 +76,25 @@ at commit `94a68214b77514bc26ef78cee4c01f128162d09b`, especially patches
 with the upstream license and NOTICE retained. Detailed boundaries and credit
 are in [FP8.md](FP8.md#credit) and [NVME-PLE.md](NVME-PLE.md#source-and-credit).
 
-## Current release — Pennyroyal v2.5.0
+## Current release — Pennyroyal v2.5.1
+
+**v2.5.1 is a maintenance release for longer agent sessions and cache reuse.**
+It fixes quoted tool markers interrupting reasoning, preserves fenced tool
+examples as text, improves host-cache reuse, and handles two cache/prefill
+failure cases. Both Qwen profiles retain their existing defaults.
+
+Flash-Next also gets an optional **six-request configuration with roughly
+one million shared KV tokens**, keeping 524,288-token context per request.
+See the [C6 setup](RUN.md#optional-six-request-flash-next-profile) and
+[changes and credits](CHANGES.md#v251--cache-and-parser-maintenance).
+
+If you use long conversations, host-only HiCache or an agent client, this is
+worth updating. The performance tables below remain the dated v2.5.0/v2.4
+measurements; this update focuses on reliable reuse and tool handling.
+
+<a id="current-release--pennyroyal-v250"></a>
+
+## v2.5.0 options — online FP8 and NVMe PLE
 
 **v2.5.0** adds two optional Flash-Next capabilities. Existing precision and
 RAM-backed PLE remain the defaults:
@@ -333,7 +363,7 @@ If you publish work that uses or builds on Pennyroyal, please link the
 canonical repository and identify the release tag or commit you started from:
 
 - [jpezzulli/sglang-rtxpro6000](https://github.com/jpezzulli/sglang-rtxpro6000)
-- Current release: [`pennyroyal-v2.5.0`](https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v2.5.0)
+- Current release: [`pennyroyal-v2.5.1`](https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v2.5.1)
 
 A short note distinguishing the Pennyroyal source or technique from your own
 changes helps readers reproduce the lineage, understand what you improved, and
@@ -347,9 +377,9 @@ earlier name of this repository and uses the same source history.
 | Item | Value |
 |---|---|
 | Canonical branch | `pennyroyal-main-sm120-final` |
-| Current executable source | `23931293183417e750a8e41f715c52230c231c25` |
-| Current release | **v2.5.0** |
-| Git tag | `pennyroyal-v2.5.0` |
+| Current executable source | Recorded in [PROVENANCE.md](PROVENANCE.md#source-identity) |
+| Current release | **v2.5.1** |
+| Git tag | `pennyroyal-v2.5.1` |
 | Initial unified dated tag | `sglang-rtxpro6000-20260827` |
 | Earlier 27B dated tag | `qwen38-dflash2-pro6000-20260824` |
 | Upstream integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
@@ -359,7 +389,7 @@ earlier name of this repository and uses the same source history.
 | FlashInfer / NIXL | `0.6.17` / `1.4.0` |
 | GPU / driver | RTX PRO 6000 96 GB, SM120 / `610.57.04` |
 
-Install v2.5.0 from the updated source using [BUILD.md](BUILD.md). Older wheels
+Install v2.5.1 from the updated source using [BUILD.md](BUILD.md). Older wheels
 do not contain these changes. [PROVENANCE.md](PROVENANCE.md) records the exact
 source identity; [CHANGES.md](CHANGES.md) records release and upstream history.
 
@@ -387,9 +417,9 @@ listed in their own rows.
 | Served context | 524,288, factor-2 YaRN target and draft | 524,288, factor-2 YaRN |
 | KV page size | 64 | 64 |
 | Recipe default GPU KV capacity | 1,118,784 target and draft tokens | 824,384 target and native-MTP tokens |
-| Mamba capacity | 24 slots; maximum 5 retained states/path | 24 slots; `extra_buffer`, tracking interval 64 |
+| Mamba capacity | 24 slots; maximum 5 retained states/path | 24 slots by default; optional C6 uses 36; `extra_buffer`, tracking interval 64 |
 | HiCache/NIXL | 96 GB configured host tier; target KV + Mamba/GDN + DFlash2 state | 32 GB configured host tier; packed target/native-MTP KV + GDN + PLE + QSA keys. PLE table placement is RAM by default or optional NVMe. |
-| Maximum active requests | 4 | 4 |
+| Maximum active requests | 4 | 4 by default; [optional 6](RUN.md#optional-six-request-flash-next-profile) |
 
 The current 27B launcher uses the 24-slot/five-state setting qualified on
 2026-08-26. The 2026-08-24 performance release used 16 slots, a three-state
@@ -605,7 +635,7 @@ There is one native build procedure and two supported model profiles. Flash-Next
 provides FR-Spec and non-FR launchers:
 
 ```bash
-git clone --branch pennyroyal-v2.5.0 --single-branch \
+git clone --branch pennyroyal-v2.5.1 --single-branch \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
 cd pennyroyal
 # Follow BUILD.md for the fresh or existing-environment native install.
@@ -628,7 +658,7 @@ OpenAI-compatible smoke requests, and cold/radix/NIXL cache distinctions.
 ## Source changes and upstream work
 
 The source line starts with the 2026-08-24 27B release, then adds the unified
-runtime and Flash-Next work. v2.5.0 extends the 35-runtime-commit v2.4.1 stack;
+runtime and Flash-Next work. v2.5.1 builds on the v2.5.0/v2.4.1 stack;
 [PROVENANCE.md](PROVENANCE.md) records the exact release source. Major groups
 are:
 
@@ -657,6 +687,9 @@ are:
 - v2.5.0: add exact-SM120 opt-in online FP8 for selected Flash-Next weights,
   optional NVMe-backed PLE, structured-output startup warmup, and bounded
   Flash-Next loader-lifetime cleanup. The 27B path remains option-off.
+- v2.5.1: improve host-cache checkpoint retention, handle temporary Mamba-slot
+  exhaustion and unaligned QSA chunk prefixes, fix reasoning/tool-marker
+  handling, and expose optional C6 capacity settings.
 - Project upstream submissions include #36520, #36524, and #35584; dated
   status records are in CHANGES.md.
 - Closed project submission #35583 remains in runtime history. Transient
@@ -696,8 +729,8 @@ coverage.
 - NIXL cleaner thresholds use whole-filesystem occupancy percentages. They do
   not set a directory byte quota.
 - Online FP8 did not improve cold long-context TTFT in the matching samples.
-  Tool validation retained the observed quoted-markup misses; parser code was
-  unchanged.
+  The v2.5.0 tool campaign retained observed quoted-markup misses; v2.5.1 adds
+  the parser corrections described in [CHANGES.md](CHANGES.md#v251--cache-and-parser-maintenance).
 - NVMe PLE reduced fixed host residency but was slower than RAM PLE in the
   separate repeated C4 comparison. It trades fixed host residency for SSD I/O
   and lower measured throughput in that comparison.

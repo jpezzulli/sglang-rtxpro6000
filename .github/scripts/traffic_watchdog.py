@@ -85,21 +85,31 @@ class GitHub:
         tree = self.api('git/trees/' + head)
         if tree.get('truncated'):
             raise RuntimeError('Truncated history tree')
-        entries = [x for x in tree['tree'] if x['path'] == 'daily.json' and x['type'] == 'blob']
-        if len(entries) != 1:
-            raise RuntimeError('Canonical daily archive missing')
-        response = self.api('git/blobs/' + entries[0]['sha'])
-        if response.get('encoding') != 'base64' or not response.get('content'):
-            raise RuntimeError('Missing or malformed canonical archive')
-        data = json.loads(base64.b64decode(response['content']))
-        if (data.get('repository') != self.repository or data.get('schema_version') != 1
-                or not isinstance(data.get('days'), dict) or not data['days']):
-            raise RuntimeError('Canonical archive identity/schema/days invalid')
-        collected = timestamp(data['collected_at'])
-        if collected > now() + dt.timedelta(minutes=5):
+        entries = {x['path']: x for x in tree['tree'] if x['type'] == 'blob'}
+        required = ('daily.json', 'package-downloads.json')
+        if any(path not in entries for path in required):
+            raise RuntimeError('Canonical traffic or package archive missing')
+        decoded = {}
+        for path in required:
+            response = self.api('git/blobs/' + entries[path]['sha'])
+            if response.get('encoding') != 'base64' or not response.get('content'):
+                raise RuntimeError(f'Missing or malformed canonical archive: {path}')
+            decoded[path] = json.loads(base64.b64decode(response['content']))
+        traffic = decoded['daily.json']
+        package = decoded['package-downloads.json']
+        if (traffic.get('repository') != self.repository or traffic.get('schema_version') != 1
+                or not isinstance(traffic.get('days'), dict) or not traffic['days']):
+            raise RuntimeError('Canonical traffic archive identity/schema/days invalid')
+        if (package.get('repository') != self.repository or package.get('schema_version') != 1
+                or not isinstance(package.get('days'), dict) or not package['days']):
+            raise RuntimeError('Canonical package archive identity/schema/days invalid')
+        traffic_collected = timestamp(traffic['collected_at'])
+        package_collected = timestamp(package['collected_at'])
+        if max(traffic_collected, package_collected) > now() + dt.timedelta(minutes=5):
             raise RuntimeError('Archive collection timestamp is in the future')
-        return {'head': head, 'collected_at': collected.isoformat(),
-                'through_date': data['coverage']['through_date']}
+        return {'head': head, 'collected_at': traffic_collected.isoformat(),
+                'package_collected_at': package_collected.isoformat(),
+                'through_date': traffic['coverage']['through_date']}
 
     def runs(self):
         return self.api('actions/workflows/' + quote(self.workflow, safe='') +
@@ -122,8 +132,12 @@ def reconcile(github, state_dir, branch, wait_seconds=480, poll_seconds=15):
     archive = github.archive(branch)
     pending = load_json(pending_path)
     verified = load_json(verified_path)
-    if pending is None and verified is not None and timestamp(archive['collected_at']) >= required_cutoff(now()):
-        print(f'Current: archive collected {archive["collected_at"]}; through {archive["through_date"]}', flush=True)
+    cutoff = required_cutoff(now())
+    both_current = (timestamp(archive['collected_at']) >= cutoff and
+                    timestamp(archive['package_collected_at']) >= cutoff)
+    if pending is None and verified is not None and both_current:
+        print(f'Current: traffic collected {archive["collected_at"]}; package collected '
+              f'{archive["package_collected_at"]}; through {archive["through_date"]}', flush=True)
         return
 
     if pending is None:
@@ -172,14 +186,18 @@ def reconcile(github, state_dir, branch, wait_seconds=480, poll_seconds=15):
                 pending_path.unlink()
                 raise RuntimeError(f'Traffic run {run["id"]} ended {run["conclusion"]}; retry on next timer tick')
             archive = github.archive(branch)
-            if timestamp(archive['collected_at']) < max(timestamp(pending['requested_at']), required_cutoff(now())):
+            required = max(timestamp(pending['requested_at']), required_cutoff(now()))
+            if (timestamp(archive['collected_at']) < required or
+                    timestamp(archive['package_collected_at']) < required):
                 pending_path.unlink()
-                raise RuntimeError(f'Traffic run {run["id"]} succeeded without a fresh archive')
+                raise RuntimeError(
+                    f'Traffic run {run["id"]} succeeded without fresh traffic and package archives')
             write_json(verified_path, {'verified_at': now().isoformat(), 'run_id': run['id'],
                                       'run_url': run['html_url'], 'archive': archive})
             pending_path.unlink()
             print(f'Verified automatic collection: {run["html_url"]}; '
-                  f'history {archive["head"]}; collected {archive["collected_at"]}; '
+                  f'history {archive["head"]}; traffic {archive["collected_at"]}; '
+                  f'package {archive["package_collected_at"]}; '
                   f'through {archive["through_date"]}', flush=True)
             return
         if time.monotonic() >= deadline:

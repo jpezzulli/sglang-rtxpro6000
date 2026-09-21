@@ -1,9 +1,9 @@
 {
-  "source": "Pennyroyal v2.5.0",
+  "source": "Pennyroyal v2.5.1",
   "modules": {
     "sglang.srt.layers.attention.qsa.kernel": "4892126cf6dfbf1a528929764460b09ca18836362b7651b25423b444ebbb6e76",
     "sglang.srt.layers.attention.qsa.sparse_attn": "c7052125569f3c0fa9a0a4d62d2f57433faec636ad82a1d99c3b39e267b7904c",
-    "sglang.srt.layers.attention.qwen_sparse_attn_backend": "1897f7e924235ef2221523912b5bccf276c0ba26c2ee702e23bad21b8616b709",
+    "sglang.srt.layers.attention.qwen_sparse_attn_backend": "f0fddde2b9e2a85736015fb8955acd49ba88de3437432467105218b9f62d75d8",
     "sglang.srt.models.qwen4_exp": "409cec56dc0388d1c1f07242e2e090571889f8613e7599bfe2ce82296e50e2e0",
     "sglang.srt.models.qwen3_5": "a0d3cd208f54a089856d850ad22aa81a4c7a056c251a18aa9001f2aeed17cd17",
     "sglang.srt.model_executor.runner.decode_cuda_graph_runner": "18289f057eb92c5a12b3d55c8d0f524e918a6e4f8d72326e8b5581c4b05a6943",

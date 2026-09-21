@@ -1,15 +1,16 @@
 # Pennyroyal container
 
-This Compose service runs the same Pennyroyal v2.5.0 source and launch recipes
+This Compose service runs the same Pennyroyal v2.5.1 source and launch recipes
 as the native installation. The default is Flash-Next with FR-Spec. Native
 installation remains supported and is documented in [`BUILD.md`](../../BUILD.md)
 and [`RUN.md`](../../RUN.md).
 
-The image is `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.0`, built and uploaded
-by GitHub Actions. The download is approximately **8.43 GiB**, excluding models.
-Python, the CUDA toolchain, NIXL POSIX, and prebuilt FlashInfer kernels are
-included; the host supplies the NVIDIA driver. Native installations remain
-independent of the container image.
+Publishing v2.5.1 builds and uploads
+`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1` through GitHub Actions. Check the
+[Pennyroyal container workflow](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml)
+for availability. Python, the CUDA toolchain, NIXL POSIX, and prebuilt
+FlashInfer kernels are included; the host supplies the NVIDIA driver. Native
+installations remain independent of the container image.
 
 ## Prerequisites
 
@@ -47,11 +48,10 @@ replace this setting.
 
 ## Get the Compose files
 
-Get the launch files from the current public branch (the original
-v2.5.0 source tag predates container packaging):
+Get the matching launch and Compose files from the release tag:
 
 ```bash
-git clone --depth 1 --branch pennyroyal-main-sm120-final \
+git clone --depth 1 --branch pennyroyal-v2.5.1 \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
 cd pennyroyal/docker/pennyroyal
 cp .env.example .env
@@ -144,8 +144,8 @@ The entrypoint exposes two non-serving checks. The CPU-only import check skips
 device work:
 
 ```bash
-docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.0 --help
-docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.0 --check
+docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1 --help
+docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1 --check
 ```
 
 Arbitrary commands require the explicit `exec` boundary:
@@ -154,13 +154,14 @@ Arbitrary commands require the explicit `exec` boundary:
 docker compose run --rm pennyroyal exec .venv/bin/python --version
 ```
 
-Both profiles passed API schema/tool checks, 64K prefill, 1,024-token C1/C4
-decode, a JPEG spatial check, a static-video frame-path check, and NIXL reuse
-after container restart. Each restored 63,872 of 63,906 prompt tokens from
-storage and returned exact `READY`. GPU serving was tested with rootless Podman
-on one RTX PRO 6000; the supplied Docker Compose configuration was checked
-separately. These checks cover container packaging and runtime function. The
-Next check used the RadixArk reference target; 27B used the measured FP8
+The v2.5.1 image build runs the automated CPU installation check shown above.
+Both profiles were regression-tested natively on the release source. The fresh
+container GPU qualification remains the v2.5.0 result: both profiles passed API
+schema/tool checks, 64K prefill, 1,024-token C1/C4 decode, JPEG and static-video
+checks, and NIXL reuse after container restart. Each restored 63,872 of 63,906
+prompt tokens from storage and returned exact `READY`. That GPU serving test
+used rootless Podman on one RTX PRO 6000; Docker Compose was checked separately.
+The Next check used the RadixArk reference target; 27B used the measured FP8
 checkpoint in [`BUILD.md`](../../BUILD.md#reference-and-measured-checkpoints).
 
 ## Optional settings
@@ -174,6 +175,32 @@ docker compose up -d --force-recreate
 
 Online FP8 is off by default. Read [`FP8.md`](../../FP8.md), then set
 `SGLANG_SM120_ONLINE_MXFP8=true` to opt in. RAM-backed PLE is the default.
+
+For the optional six-request Flash-Next profile, keep preprocessing on the CPU
+and set these values in `.env`:
+
+```dotenv
+SGLANG_SM120_ONLINE_MXFP8=true
+SGLANG_MM_PREPROCESS_DEVICE=cpu
+MAX_RUNNING_REQUESTS=6
+MAX_MAMBA_CACHE_SIZE=36
+MAX_TOTAL_TOKENS=1048576
+```
+
+Then recreate the container:
+
+```bash
+docker compose up -d --force-recreate
+```
+
+The normal FR-Spec defaults remain four requests, 24 Mamba slots, and 824,384 KV
+tokens. The native C6 check used online FP8, RAM PLE and A4000 preprocessing;
+it retained 524,288 tokens per request and profiled 1,034,176 shared KV tokens
+from the 1,048,576 request. This is one shared pool,
+not six independent 524K contexts; SGLang may clamp it to the capacity available
+on another system. CPU preprocessing requires no second GPU. The optional
+secondary-GPU configuration below is another way to keep preprocessing off the
+model GPU; neither path requires a dual-socket system or NUMA configuration.
 
 For NVMe-backed PLE, read [`NVME-PLE.md`](../../NVME-PLE.md). The image already
 contains the isolated reader, but a prepared overlay is still required. The
@@ -233,3 +260,25 @@ services:
 This disables SELinux separation for this container only. Host SELinux remains
 enabled, the container remains unprivileged, and the model mount remains
 read-only. Omit the override when the engine does not enforce SELinux labels.
+
+## Release builds
+
+Publishing a GitHub release builds its exact tagged source and uploads the
+matching versioned image automatically. For example, `pennyroyal-v2.5.1`
+produces `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1`. Draft releases and ordinary
+branch pushes do not publish a release image. No moving `latest` tag is used.
+
+The build checks package versions, the source revision and import location,
+launcher syntax, the entrypoint and the NIXL POSIX plugin without a GPU. A
+failed check fails the workflow and leaves the version tag unchanged. GPU
+regression remains separate: routine source-only maintenance uses the tested
+native runtime evidence, while changes to the container's dependency stack or
+device handling warrant another GPU container check.
+
+For a failed build, rerun the **Pennyroyal container** workflow in Actions.
+Alternatively, run it manually against the release's Git tag with both inputs
+empty. A manual run on a branch publishes only a `build-<commit>` image. The
+optional `promote_digest` and `image_tag` inputs still allow an already checked
+image to receive a version tag without another build. Release creation must use
+the GitHub UI or a normal user/App credential; GitHub's automatic `GITHUB_TOKEN`
+does not trigger another workflow when it creates a release.

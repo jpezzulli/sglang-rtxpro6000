@@ -1,0 +1,37 @@
+# Pennyroyal — SGLang for Qwen3.8 on RTX PRO 6000
+
+> Optimized SGLang runtime for Qwen3.8 Flash-Next NVFP4 with native NEXTN/FR-Spec and Qwen3.8-27B FP8 with DFlash2, HiCache and NIXL on NVIDIA RTX PRO 6000 Blackwell (SM120).
+
+Canonical repository: https://github.com/jpezzulli/sglang-rtxpro6000
+
+Both profiles use the same runtime source. The documented recipes use one GPU
+and thinking-enabled agentic inference. Start with the Docker guide for a
+prebuilt image or BUILD.md and RUN.md for native installation. Model weights
+are downloaded separately. Detailed settings and dated measurements live in
+the linked documents; this file is an index, not a second set of instructions.
+
+## Start here
+
+- [README](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/README.md): Model choices, release summary, performance tables and setup links.
+- [Docker and Compose](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/docker/pennyroyal/README.md): Prebuilt image, host mounts, profile selection and startup.
+- [Native build](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/BUILD.md): Fresh installation, updates, dependencies and checkpoints.
+- [Native launch](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RUN.md): Required paths, both launch profiles, API smoke checks and optional capacity/media settings.
+
+## Optional features
+
+- [Online FP8](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/FP8.md): Flash-Next precision changes, activation and measured speed/memory results.
+- [NVMe PLE](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/NVME-PLE.md): Move the PLE table from fixed host-RAM residency to an SSD-backed overlay.
+
+## Results and source
+
+- [Results](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RESULTS.md): Dated benchmarks and measurement definitions.
+- [Community results](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/COMMUNITY-RESULTS.md): Attributed reports from other users and hardware.
+- [Changes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/CHANGES.md): Release fixes, affected profiles and upstream credit.
+- [Provenance](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/PROVENANCE.md): Source identity, lineage and checkpoint provenance.
+- [Validation suite](https://github.com/jpezzulli/pennyroyal-validation): Maintained reasoning, tool, vision and performance tests.
+
+## Optional
+
+- [Backends](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/BACKENDS.md): Kernel and execution-path details.
+- [Memory and persistence](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/MEMORY-AND-PERSISTENCE.md): Hybrid cache state, namespaces and restoration.
+- [Limitations](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/LIMITATIONS.md): Hardware, representation and measurement boundaries.

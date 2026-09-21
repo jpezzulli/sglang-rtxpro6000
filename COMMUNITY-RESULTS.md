@@ -17,6 +17,8 @@ remain in [RESULTS.md](RESULTS.md).
 - [StockSpecialist1707: a larger single-GPU pool and online FP8](#stockspecialist1707--single-gpu-capacity-and-online-fp8)
 - [hpiguyTR: RAM versus NVMe PLE over OCuLink](#hpiguytr--ram-versus-nvme-ple-over-oculink)
 - [H3PO: two-GPU Flash-Next FP8 and NVFP4](#h3po--two-gpu-flash-next)
+- [AntigravityAI: Flash-Next with 62 GB host RAM](#antigravityai--flash-next-with-62-gb-host-ram)
+- [untcoder2: TP2 with GPU-resident PLE](#untcoder2--tp2-with-gpu-resident-ple)
 
 ## kazimirek — a week of agentic work on Max-Q
 
@@ -322,6 +324,77 @@ to our qualified TP1 recipe. Neither table supplies MTP acceptance or a
 full reasoning/tool/media qualification; high-concurrency prefill was noisy.
 This is useful independent multi-GPU evidence, not a controlled comparison
 with our TP1 results or a claim that all TP2/TP4 combinations have been tested.
+
+## AntigravityAI — Flash-Next with 62 GB host RAM
+
+**Reported September 10, 2026** by [Eddy / AntigravityAI](https://github.com/AntigravityAI).
+[Original report (#2)](https://github.com/jpezzulli/sglang-rtxpro6000/issues/2) ·
+[Campaign and follow-up](https://github.com/AntigravityAI/Qwen3.8-Flash-Next-on-RTX-PRO-6000).
+
+**Pennyroyal version:** v2.3.0, source `836206a0ad`, with the author's changes.
+
+One **RTX PRO 6000 96 GB with about 62 GB usable host RAM** drove this work:
+the full RAM-PLE plus 32 GB HiCache recipe did not fit. The author used an
+SSD-Stream split checkpoint with a roughly 51 GB PLE table on NVMe and two
+320 MiB staging buffers, then also explored a quantized, pinned-RAM PLE path.
+
+Across the campaign, the reported KV pool grew from **374,208 to 1,111,168
+tokens**, with native NEXTN MTP, FP8 KV and a configured **1,048,576-token
+context** using factor-4 YaRN. This combined allocator, loading, memory-accounting,
+precision and Mamba-capacity changes. The largest individual reported jump was
+528,640 KV tokens after collecting temporary loading tensors before pool sizing.
+
+The author passed a **786,432-input-token cold long-context test** on an earlier
+configuration and reported **99.99% prefix reuse** on a follow-up. The final
+1.11M-pool configuration had boot and short warmup checks; those results should
+not be read as a completed 1M-input test. Their later capacity work also tested
+seven images back-to-back and showed why increasing the pool further could
+leave too little room for a second image.
+
+This is useful low-RAM and capacity-tuning work, especially the NVMe PLE path.
+The settings and gains belong to the author's modified configuration, rather
+than a drop-in change to Pennyroyal's defaults.
+
+## untcoder2 — TP2 with GPU-resident PLE
+
+**Reported September 16, 2026** by [untcoder2](https://github.com/untcoder2).
+[Original report (#9)](https://github.com/jpezzulli/sglang-rtxpro6000/issues/9) ·
+[Full write-up](https://github.com/untcoder2/qwen38-flash-next-nvfp4-sm120-tp2).
+
+**Pennyroyal version:** v2.5, as identified by the author; no exact source SHA
+specified in the report.
+
+The deployment used **two RTX PRO 6000 Blackwell Workstation cards without
+NVLink**, 90 GB host RAM, `next-plain`, online MXFP8, and an NVFP4 checkpoint
+with a transplanted BF16 MTP block. PLE stayed in GPU memory. The configured
+context was **786,432 tokens**, with a **2,254,464-token KV pool**, 48 Mamba
+slots and an eight-request limit.
+
+### Reported single-request decode
+
+| Configuration | Median tok/s | p90 tok/s | Acceptance length |
+|---|---:|---:|---:|
+| One card, `next-plain`, temperature 0 | 259.1 | 298.9 | 3.06 |
+| Two cards, temperature 0 | **308.3** | 339.1 | 3.01 |
+| Two cards, temperature 1.0 / top-p 0.95 / top-k 20 | 274.7 | 313.4 | 2.91 |
+
+These are scheduler decode samples from **one running request**, after warmup
+and four 1,000-token generations. Samples below 20 tok/s were excluded as
+batch tails. They are not HTTP completion rates or eight-request aggregate
+measurements. The author reports **20/20** on a small verifiable-answer test
+set. [Measurement details](https://github.com/untcoder2/qwen38-flash-next-nvfp4-sm120-tp2/blob/main/docs/MEASUREMENTS.md).
+
+**Setup findings:** this host needed `--disable-custom-all-reduce` to pass
+startup, `--no-ple-offload-embedding` for GPU-resident PLE, a reduced static
+memory fraction of 0.88, and 48 Mamba slots to admit eight requests. NIXL was
+disabled after backend initialization failed, so this is not a persistence
+result. Concurrent throughput and long-uptime stability of the new TP2 setup
+were not yet measured.
+
+The author also found that full-vocabulary drafting beat the bundled FR-Spec
+map on their tested Russian and English prompts. Changing from froggeric-v22.5
+to the checkpoint template barely changed speed but changed tool formatting.
+Both are useful reminders to measure the actual language and agent workload.
 
 ## Share a field report
 

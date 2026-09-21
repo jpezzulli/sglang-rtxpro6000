@@ -49,7 +49,7 @@ cache identity while leaving older namespaces intact.
 
 The launch commands below use the defaults. Set any
 [precision or PLE](#optional-flash-next-precision-and-ple-placement),
-[KV-capacity](#optional-1000000-token-flash-next-kv-pool),
+[request/KV-capacity](#optional-six-request-flash-next-profile),
 [media-device](#cpu-model-gpu-or-secondary-gpu-media-preprocessing), or
 [host-control](#optional-host-and-launcher-controls) overrides before running
 the launcher. Stop and restart the server after changing them.
@@ -102,6 +102,15 @@ The target is a dense FP8 model; Flash-Next's routed-expert settings do not
 apply.
 
 Run one profile at a time on a single GPU.
+
+### Unknown tool names
+
+The qualified launchers default `SGLANG_FORWARD_UNKNOWN_TOOLS=true`. A native
+tool call whose name is absent from the request's tool definitions reaches the
+API consumer's executor, which can return an error for the model to correct and
+retry. Markdown fenced tool examples remain text, and forwarding does not
+execute anything by itself. Set `SGLANG_FORWARD_UNKNOWN_TOOLS=false` before a
+native launch, or in the Compose `.env`, to opt out.
 
 ## Smoke through the normal API
 
@@ -170,15 +179,16 @@ YaRN/mRoPE implementation. Keep them in the checkpoint configuration.
 
 For Flash-Next, confirm:
 
-- 824,384 target/native-MTP KV tokens by default, or the selected explicit cap,
-  with FP8 E4M3 dtypes;
-- 24 Mamba slots and zero intermediate speculative SSM;
+- 824,384 target/native-MTP KV tokens by default, or the resolved value for an
+  explicit cap, with FP8 E4M3 dtypes;
+- four running requests and 24 Mamba slots by default, or six requests and 36
+  slots for the optional C6 profile, with zero intermediate speculative SSM;
 - `FlashInferGDNKernel` decode/prefill and
   `none-mode WY output-only` verification/recovery;
 - QSA sparse decode through FlashInfer's wrapper resolving to XQA on SM120,
   `sgl-kernel` top-k, and MTP index sharing;
 - target and native-MTP MoE resolved to FlashInfer CUTLASS;
-- recovery graphs for batch sizes 1-4; and
+- recovery graphs for batch sizes 1-4 by default, or 1-6 with C6; and
 - attached KV, Mamba/PLE, and QSA HiCache pools.
 
 With online FP8, also confirm MXFP8 projection signatures and the row-wise HC
@@ -261,12 +271,13 @@ details.
 export MAX_TOTAL_TOKENS=1000000
 ```
 
-This setting was tested with online FP8, RAM PLE, CPU media preprocessing, and
-only the RTX PRO 6000 visible. The runtime allocated 1,000,000 KV tokens,
-retained 524,288-token context, captured the normal graphs, and passed
-warmup/schema/tools, 64K/490K retrieval, fixed-output C1/C4, JPEG and static
-video checks, and three image-history turns around 208K context. Post-graph
-free memory was 5.21 GiB; the lowest media sample was 1,187 MiB.
+This v2.5.0 setting was tested with online FP8, RAM PLE, CPU media
+preprocessing, and only the RTX PRO 6000 visible. The runtime allocated
+1,000,000 KV tokens, retained 524,288-token context, captured the normal
+graphs, and passed warmup/schema/tools, 64K/490K retrieval, fixed-output C1/C4,
+JPEG and static video checks, and three image-history turns around 208K
+context. Post-graph free memory was 5.21 GiB; the lowest media sample was
+1,187 MiB.
 
 The option changes KV capacity. Context remains 524,288 tokens, and no speed
 comparison was run. Model-GPU media preprocessing was not tested with this
@@ -274,6 +285,34 @@ pool. Unset `MAX_TOTAL_TOKENS` to return to the 824,384-token FR-Spec default.
 The non-FR recipe uses automatic sizing when unset and accepts the same kind of
 page-aligned override. See
 [RESULTS.md](RESULTS.md#explicit-1000000-token-capacity-option) for timings.
+
+## Optional six-request Flash-Next profile
+
+For longer concurrent conversations, Flash-Next can use six running requests
+and a larger shared KV pool while keeping 524,288 tokens per request. The
+FR-Spec defaults remain four requests, 24 Mamba slots, and 824,384 KV tokens. Set the
+C6 values before launching either Flash-Next recipe:
+
+```bash
+export SGLANG_SM120_ONLINE_MXFP8=true
+export SGLANG_MM_PREPROCESS_DEVICE=cpu
+export MAX_RUNNING_REQUESTS=6
+export MAX_MAMBA_CACHE_SIZE=36
+export MAX_TOTAL_TOKENS=1048576
+```
+
+With online FP8, RAM PLE, and A4000 media preprocessing, the RTX PRO 6000
+profiled 1,034,176 shared KV tokens from the requested 1,048,576. This is one
+shared pool, not six independent 524K contexts or a 1M per-request context.
+SGLang may clamp the request to the capacity it profiles on another system.
+
+CPU preprocessing is the single-GPU default. A secondary GPU is another way
+to keep media preprocessing off the model GPU; see
+[CPU, model-GPU, or secondary-GPU media preprocessing](#cpu-model-gpu-or-secondary-gpu-media-preprocessing).
+The C6 profile does not require a dual-socket system or NUMA configuration.
+More Mamba slots and larger CUDA graphs also consume VRAM, so confirm the
+resolved token pool, six-request admission, 36 Mamba slots, and batch 1-6
+graphs in the startup output.
 
 ## Launch Flash-Next without FR-Spec (alternative)
 
@@ -372,7 +411,8 @@ restore NumPy's huge-page requests. NumPy reads the setting at import, so a
 change requires a server restart. A host-wide `always` policy can still supply
 huge pages.
 
-Chat Completions `reasoning_effort` now takes precedence over the launcher's
-medium default. With Froggeric v22.5, `high`, `xhigh`, and `max` select the same
-xhigh instruction, which can change answer length relative to the medium
-default. Responses API precedence is unchanged.
+For Pennyroyal's thinking-enabled agentic use, the launcher defaults to medium
+reasoning effort. Chat Completions `reasoning_effort` takes precedence over
+that default. With Froggeric v22.5, `high`, `xhigh`, and `max` select the same
+xhigh instruction, which can change answer length relative to medium.
+Responses API precedence is unchanged.

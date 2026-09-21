@@ -1,6 +1,6 @@
 services:
   pennyroyal:
-    image: ${PENNYROYAL_IMAGE:-ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.0}
+    image: ${PENNYROYAL_IMAGE:-ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1}
     command: ["${PENNYROYAL_PROFILE:-next}"]
     user: "${USER_ID:-1000}:${GROUP_ID:-1000}"
     init: true
@@ -26,6 +26,10 @@ services:
       PENNY_PLE_NVME_MODEL: ${PENNY_PLE_NVME_MODEL:-/models/flash-next-ple}
       SGLANG_SM120_ONLINE_MXFP8: ${SGLANG_SM120_ONLINE_MXFP8:-false}
       SGLANG_MM_PREPROCESS_DEVICE: ${SGLANG_MM_PREPROCESS_DEVICE:-cpu}
+      SGLANG_FORWARD_UNKNOWN_TOOLS: ${SGLANG_FORWARD_UNKNOWN_TOOLS:-true}
+      MAX_RUNNING_REQUESTS: ${MAX_RUNNING_REQUESTS:-4}
+      MAX_MAMBA_CACHE_SIZE: ${MAX_MAMBA_CACHE_SIZE:-24}
+      MAX_TOTAL_TOKENS: ${MAX_TOTAL_TOKENS:-}
     volumes:
       - type: bind
         source: ${HOST_MODELS_ROOT:-./models}

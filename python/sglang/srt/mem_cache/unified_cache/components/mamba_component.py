@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from collections import defaultdict
 from typing import TYPE_CHECKING, Callable, Optional, Sequence
 
@@ -53,6 +55,9 @@ if TYPE_CHECKING:
         UnifiedRadixCache,
         UnifiedTreeNode,
     )
+
+
+logger = logging.getLogger(__name__)
 
 
 class MambaComponent(TreeComponent):
@@ -491,12 +496,34 @@ class MambaComponent(TreeComponent):
 
     def _alloc_mamba_slot(self) -> torch.Tensor:
         """Allocate one mamba pool slot, evicting if necessary."""
+        slot = self._try_alloc_mamba_slot()
+        assert slot is not None, "Can not alloc mamba cache"
+        return slot
+
+    def _try_alloc_mamba_slot(self) -> Optional[torch.Tensor]:
+        """Allocate one slot after eviction, or return None if none is evictable."""
         slot = self.cache.req_to_token_pool.mamba_allocator.alloc(1)
         if slot is None:
             self.cache.evict_for_alloc(EvictParams(num_tokens=0, mamba_num=1))
             slot = self.cache.req_to_token_pool.mamba_allocator.alloc(1)
-            assert slot is not None, "Can not alloc mamba cache"
         return slot
+
+    _last_skip_log_time = 0.0
+
+    def _log_skipped_checkpoint(self, req: Req) -> None:
+        now = time.monotonic()
+        if now - MambaComponent._last_skip_log_time < 1.0:
+            return
+        MambaComponent._last_skip_log_time = now
+        allocator = self.cache.req_to_token_pool.mamba_allocator
+        logger.info(
+            "mamba checkpoint skipped for rid=%s: no free or evictable slot "
+            "(available=%d evictable=%d of %d)",
+            req.rid,
+            allocator.available_size(),
+            self.tree_core.mamba_evictable_size(),
+            getattr(allocator, "size", -1),
+        )
 
     @property
     def int8_ckpt_pool(self):
@@ -570,10 +597,15 @@ class MambaComponent(TreeComponent):
         else:
             if cache_len is None:
                 return 0
-            # Donate the mamba index to the radix cache instead of copying.
+            # An unfinished-request checkpoint is an optimization. If every
+            # slot is protected (including by an in-flight host backup), keep
+            # the request's live state and retry at the next chunk boundary.
             if self.int8_ckpt_pool is not None:
                 if self.cache.enable_mamba_extra_buffer:
-                    new_slot = self._alloc_mamba_slot()
+                    new_slot = self._try_alloc_mamba_slot()
+                    if new_slot is None:
+                        self._log_skipped_checkpoint(req)
+                        return 0
                     src_active = (
                         self.cache.req_to_token_pool.donate_mamba_ping_pong_slot(
                             req, new_slot
@@ -586,14 +618,20 @@ class MambaComponent(TreeComponent):
                         req.mamba_pool_idx.view(-1)
                     )
             elif self.cache.enable_mamba_extra_buffer:
-                new_slot = self._alloc_mamba_slot()
+                new_slot = self._try_alloc_mamba_slot()
+                if new_slot is None:
+                    self._log_skipped_checkpoint(req)
+                    return 0
                 mamba_value_donated = (
                     self.cache.req_to_token_pool.donate_mamba_ping_pong_slot(
                         req, new_slot
                     )
                 )
             else:
-                mamba_value_donated = self._alloc_mamba_slot()
+                mamba_value_donated = self._try_alloc_mamba_slot()
+                if mamba_value_donated is None:
+                    self._log_skipped_checkpoint(req)
+                    return 0
                 # mamba_pool is a pure PHYSICAL store; translate both slot ids
                 # virtual->physical (identity for the non-unified memory pool) first.
                 translate = self.cache.req_to_token_pool.translate_mamba_indices
@@ -858,18 +896,14 @@ class MambaComponent(TreeComponent):
         Host leaves: atomic eviction via _evict_host_leaf."""
         ct = self.component_type
         host_lru = self.tree_core.host_lru_lists[ct]
-        enabled = self.tree_core.enable_session_radix_cache
-        if enabled:
-            host_lru.cursor_begin()
-            x = host_lru.cursor_next(host_lock=True)
-        else:
-            x = host_lru.get_lru_no_host_lock()
-        while tracker[ct] < num_tokens and x is not None and host_lru.in_list(x):
-            if not enabled:
-                x_next = host_lru.get_prev_no_host_lock(x)
+        while tracker[ct] < num_tokens:
+            x = self._select_host_eviction_candidate(host_lru)
+            if x is None:
+                break
             cd = x.component_data[ct]
             if x in self.tree_core.evictable_host_leaves and (
-                not enabled or self._can_evict_leaf_atomically(x)
+                not self.tree_core.enable_session_radix_cache
+                or self._can_evict_leaf_atomically(x)
             ):
                 # Host leaf: atomic eviction (all components host + delete)
                 self.tree_core._evict_host_leaf(x, tracker, device_frees, host_frees)
@@ -893,12 +927,82 @@ class MambaComponent(TreeComponent):
                     target=EvictLayer.HOST,
                 )
                 self.tree_core._update_evictable_leaf_sets(x)
+
+    def _select_host_eviction_candidate(self, host_lru):
+        """Prefer a redundant linear-path checkpoint within the LRU partition.
+
+        A later complete component-consensus boundary contains the recurrent
+        state needed to resume that longer prefix; its intermediate Mamba
+        checkpoints are not part of the restore unit. Prefer the oldest such
+        checkpoint before falling back to the ordinary oldest unlocked entry.
+        Branch points are never classified as redundant because their state may
+        still be the only reusable boundary for another branch.
+        """
+        enabled = self.tree_core.enable_session_radix_cache
+        fallback = None
+        fallback_partition = None
+        selected = None
+        cursor_started = False
+        try:
             if enabled:
-                x = host_lru.cursor_next(host_lock=True)
+                host_lru.cursor_begin()
+                cursor_started = True
+                node = host_lru.cursor_next(host_lock=True)
             else:
-                x = x_next
-        if enabled:
-            host_lru.cursor_end()
+                node = host_lru.get_lru_no_host_lock()
+
+            while node is not None and host_lru.in_list(node):
+                partition = self.session_ref(node) > 0 if enabled else None
+                if fallback is None:
+                    fallback = node
+                    fallback_partition = partition
+                elif partition != fallback_partition:
+                    break
+
+                if self._has_later_complete_boundary(node):
+                    selected = node
+                    break
+                node = (
+                    host_lru.cursor_next(host_lock=True)
+                    if enabled
+                    else host_lru.get_prev_no_host_lock(node)
+                )
+        finally:
+            if cursor_started:
+                host_lru.cursor_end()
+        return selected if selected is not None else fallback
+
+    def _has_later_complete_boundary(self, node: UnifiedTreeNode) -> bool:
+        """Whether a single-child continuation has a later reusable boundary."""
+        root = self.tree_core.root_node
+        validators = tuple(
+            component.create_match_validator()
+            for component in self.tree_core.components
+        )
+
+        # Stateful validators (notably SWA) must observe the same root-to-node
+        # history they would see during match_prefix before examining descendants.
+        ancestors = []
+        cur = node
+        while cur is not root:
+            ancestors.append(cur)
+            cur = cur.parent
+        for ancestor in reversed(ancestors):
+            if ancestor.evicted and not ancestor.backuped:
+                return False
+            for validator in validators:
+                validator(ancestor)
+
+        cur = node
+        while len(cur.children) == 1:
+            child = next(iter(cur.children.values()))
+            # Match traversal cannot cross a Full-KV hole, regardless of aux state.
+            if child.evicted and not child.backuped:
+                return False
+            if all([validator(child) for validator in validators]):
+                return True
+            cur = child
+        return False
 
     def free_host_values(self, host_values: list[torch.Tensor]) -> None:
         if self._mamba_pool_host is None:

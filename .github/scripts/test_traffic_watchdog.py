@@ -12,18 +12,23 @@ T = dt.datetime(2026, 9, 7, 2, 0, tzinfo=dt.timezone.utc)
 
 
 class FakeGitHub:
-    def __init__(self, collected='2026-09-06T01:35:52+00:00', status='completed', conclusion='success'):
+    def __init__(self, collected='2026-09-06T01:35:52+00:00', status='completed',
+                 conclusion='success', package_collected=None):
         self.collected = collected
+        self.package_collected = package_collected or collected
         self.status = status
         self.conclusion = conclusion
         self.dispatch_count = 0
         self.active = []
         self.latest = []
         self.update = True
+        self.update_package = True
         self.dispatch_failure = False
 
     def archive(self, branch):
-        return {'head': 'history', 'collected_at': self.collected, 'through_date': '2026-09-05'}
+        return {'head': 'history', 'collected_at': self.collected,
+                'package_collected_at': self.package_collected,
+                'through_date': '2026-09-05'}
 
     def runs(self):
         return self.active + self.latest
@@ -37,6 +42,8 @@ class FakeGitHub:
     def run(self, run_id):
         if self.status == 'completed' and self.conclusion == 'success' and self.update:
             self.collected = T.isoformat()
+        if self.status == 'completed' and self.conclusion == 'success' and self.update_package:
+            self.package_collected = T.isoformat()
         return {'id': run_id, 'status': self.status, 'conclusion': self.conclusion,
                 'html_url': 'https://github.com/test/repo/actions/runs/' + str(run_id)}
 
@@ -74,6 +81,12 @@ class WatchdogTests(unittest.TestCase):
     def test_same_day_pre_deadline_capture_does_not_suppress_due_run(self):
         self.verified()
         g = FakeGitHub('2026-09-07T00:05:00+00:00')
+        w.reconcile(g, self.state, 'traffic-history')
+        self.assertEqual(g.dispatch_count, 1)
+
+    def test_stale_package_archive_dispatches_when_traffic_is_fresh(self):
+        self.verified()
+        g = FakeGitHub(T.isoformat(), package_collected='2026-09-06T01:35:52+00:00')
         w.reconcile(g, self.state, 'traffic-history')
         self.assertEqual(g.dispatch_count, 1)
 
@@ -118,6 +131,12 @@ class WatchdogTests(unittest.TestCase):
 
     def test_success_without_archive_update_is_failure(self):
         g = FakeGitHub();g.update = False
+        with self.assertRaises(RuntimeError):
+            w.reconcile(g, self.state, 'traffic-history')
+        self.assertFalse((self.state / 'verified.json').exists())
+
+    def test_success_without_package_archive_update_is_failure(self):
+        g = FakeGitHub();g.update_package = False
         with self.assertRaises(RuntimeError):
             w.reconcile(g, self.state, 'traffic-history')
         self.assertFalse((self.state / 'verified.json').exists())

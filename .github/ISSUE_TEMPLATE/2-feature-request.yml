@@ -1,14 +1,18 @@
 name: 🚀 Feature request
-description: Suggest an idea for this project
+description: Suggest an improvement to Pennyroyal.
 title: "[Feature] "
 
 body:
+- type: markdown
+  attributes:
+    value: |
+      Have an idea for Pennyroyal? Tell us what you want to do and how the change
+      would help. Questions and field reports are welcome here too.
 - type: checkboxes
   attributes:
     label: Checklist
     options:
-      - label: If this is not a feature request but a general question, please start a discussion at https://github.com/sgl-project/sglang/discussions. Otherwise, it will be closed.
-      - label: Please use English. Otherwise, it will be closed.
+      - label: I checked existing issues for a similar request.
 - type: textarea
   attributes:
     label: Motivation

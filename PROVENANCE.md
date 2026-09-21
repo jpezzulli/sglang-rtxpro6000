@@ -6,18 +6,18 @@
 |---|---|
 | Upstream | `https://github.com/sgl-project/sglang.git` |
 | Public documentation and distribution branch | `pennyroyal-main-sm120-final`; continues above the runtime release tag |
-| Executable source HEAD | `23931293183417e750a8e41f715c52230c231c25` |
+| Executable source HEAD | `1a8f3e9d1f0b7ac847bfa2701bf0f6b69d54a16e` |
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Latest runtime additions | Optional online FP8 and NVMe PLE, grammar startup warmup, and loader-reference cleanup; prior history is retained |
-| Qualification dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.5.0 Python/JIT source |
-| Release | v2.5.0 |
-| Release tag | `pennyroyal-v2.5.0` at `2c675da096939cb01102f8f4871bda3db55f7f28` |
-| Container build source | `b976bb329cfc1376b7d4589d55871f586d460ad4`; same executable runtime plus container packaging |
-| Container image | `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.0` at `sha256:1d71b02dde64d3edb454fb6020b7b21bb32dee7ba0ddaacefbf9df6b266940d7` |
+| Latest runtime additions | Host-cache retention, optional checkpoint donation guard, reasoning/tool parsing, QSA chunk-prefix handling and optional C6 launch settings |
+| Qualification dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.5.1 Python/JIT source |
+| Release | v2.5.1 |
+| Release tag | `pennyroyal-v2.5.1` |
+| Container build source | Exact commit selected by the release tag; also recorded in the image's OCI revision label |
+| Container image | `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1`; build digest recorded by the [release workflow](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml) |
 
 The release includes launch recipes, documentation, and measurement summaries.
-v2.5.0 adds optional Flash-Next acceleration and SSD-backed PLE while keeping
-the dependency stack, CPU image preprocessing, RAM PLE default, and pinned
+v2.5.1 keeps the v2.5.0 dependency stack, optional Flash-Next online FP8 and
+NVMe PLE, CPU image preprocessing, RAM PLE default, and pinned
 [Froggeric v22.5 template](configs/pennyroyal/templates/README.md). The earlier
 27B release remains available as `qwen38-dflash2-pro6000-20260824`, with its
 results and lineage preserved in the current documentation. The former
@@ -39,7 +39,38 @@ no change to the released graph implementation. Dependencies and launch
 settings are unchanged. [CHANGES.md](CHANGES.md) records the focused
 two-profile regression scope; existing performance results are not refreshed.
 
+## v2.5.1 source provenance
+
+Commit `1a8f3e9d1f0b7ac847bfa2701bf0f6b69d54a16e` adds the maintenance changes
+to public source `d00aa74092d12eac289891e5eccec50e7206573a`. Documentation and
+release metadata sit above that executable-source commit.
+
+- Optional unfinished-request Mamba donation adapts SGLang
+  [#37619](https://github.com/sgl-project/sglang/pull/37619).
+- Host recurrent-checkpoint retention is a local correction for
+  [community issue #3](https://github.com/jpezzulli/sglang-rtxpro6000/issues/3).
+- Qwen reasoning/tool-marker handling and fenced-code preservation are local
+  parser corrections, including the thinking-mode defect in
+  [community issue #6](https://github.com/jpezzulli/sglang-rtxpro6000/issues/6).
+- Unaligned QSA EXTEND prefixes adapt SGLang
+  [#39575](https://github.com/sgl-project/sglang/pull/39575), with additional
+  per-layer key and shared rotary-coordinate lifetime handling.
+- Native/Compose capacity options and automatic container release builds are
+  local packaging changes. The NVMe reader's source manifest is refreshed for
+  the updated QSA module; its data format and loader implementation are unchanged.
+
+Both supported profiles received focused CPU/GPU and live regression. Existing
+performance tables retain their original release/date. See
+[CHANGES.md](CHANGES.md#v251--cache-and-parser-maintenance) for the checked paths
+and the host-cache reproduction result.
+
 ## v2.5.0 source provenance
+
+Executable source: `23931293183417e750a8e41f715c52230c231c25`; release tag
+`pennyroyal-v2.5.0` at `2c675da096939cb01102f8f4871bda3db55f7f28`.
+The first container used source `b976bb329cfc1376b7d4589d55871f586d460ad4`
+and image digest
+`sha256:1d71b02dde64d3edb454fb6020b7b21bb32dee7ba0ddaacefbf9df6b266940d7`.
 
 This release builds on public source `1c7392a09b9938c2626c53d2524b3fb7dfac0cae`
 without an upstream rebase or dependency refresh.

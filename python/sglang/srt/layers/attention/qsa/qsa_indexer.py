@@ -294,6 +294,19 @@ class QSAIndexer(MultiPlatformOp):
 
         pool = metadata.token_to_kv_pool
         is_extend = metadata.compress_member_rows is not None
+        has_cross_prefix_group = is_extend and getattr(
+            metadata, "has_cross_prefix_group", False
+        )
+        if has_cross_prefix_group:
+            if state_stored:
+                raise RuntimeError(
+                    "QSA cross-prefix compression must read the old pending "
+                    "ring before fused preparation updates it"
+                )
+            # A later pending tail in this same chunk can wrap the request
+            # ring and overwrite a prefix member. Consume crossed groups
+            # before publishing any of this forward's new pending state.
+            self._compress_cross_prefix_groups(token_k, metadata)
         if not state_stored:
             if state_slots is None:
                 state_slots = self._pending_ring_slots(
@@ -320,13 +333,23 @@ class QSAIndexer(MultiPlatformOp):
         group_end_positions = metadata.compress_group_positions.long()
         compressed_locs = metadata.write_locs
         if is_extend:
-            # Extend chunks are group-aligned, so every member of every
-            # planned group is a token of THIS forward: source the members
-            # from the packed chunk tensors directly (no cache round trip).
             member_rows = metadata.compress_member_rows.long()
             group_locs = member_rows[:, None] + torch.arange(
                 self.compress_ratio, device=member_rows.device, dtype=torch.long
             )
+            prefix_members = getattr(metadata, "compress_prefix_members", None)
+            if prefix_members is not None:
+                prefix_members = prefix_members.long()
+                first_current_rows = member_rows + prefix_members
+                group_locs = torch.maximum(group_locs, first_current_rows[:, None])
+                # Crossed groups were written from the old ring before its
+                # update above. Route this ordinary packed-key pass to the
+                # inert slot so it cannot replace the correct result.
+                compressed_locs = torch.where(
+                    prefix_members > 0,
+                    torch.zeros_like(compressed_locs),
+                    compressed_locs,
+                )
             plan_valid = metadata.compress_plan_valid
             if plan_valid is not None:
                 # Only dummy plan entries may alias row zero. Clamping all
@@ -369,6 +392,71 @@ class QSAIndexer(MultiPlatformOp):
         )
         normalized = self.normalize_compressed_keys(pooled, compressed_rope_positions)
         pool.set_qsa_compressed_k_buffer(self.layer_id, compressed_locs, normalized)
+
+    def _compress_cross_prefix_groups(self, token_k: torch.Tensor, metadata) -> None:
+        """Rebuild groups split between the retained ring and this extend.
+
+        This runs before the new chunk updates the modulo-addressed ring. A
+        long chunk may itself leave a pending tail whose writes alias the old
+        prefix slots, so reversing this order silently mixes different groups.
+        """
+
+        prefix_members = metadata.compress_prefix_members
+        ring_group_locs = metadata.compress_group_ring_locs
+        prefix_rope_positions = metadata.cross_prefix_rope_positions
+        if (
+            prefix_members is None
+            or ring_group_locs is None
+            or prefix_rope_positions is None
+        ):
+            raise RuntimeError("QSA cross-prefix compression metadata is incomplete")
+
+        prefix_members = prefix_members.long()
+        plan_valid = metadata.compress_plan_valid
+        cross = prefix_members > 0
+        if plan_valid is not None:
+            cross = cross & plan_valid
+
+        member_rows = metadata.compress_member_rows.long()
+        current_group_locs = member_rows[:, None] + torch.arange(
+            self.compress_ratio, device=member_rows.device, dtype=torch.long
+        )
+        first_current_rows = member_rows + prefix_members
+        current_group_locs = torch.maximum(
+            current_group_locs, first_current_rows[:, None]
+        )
+        if plan_valid is not None:
+            current_group_locs = torch.where(
+                plan_valid[:, None],
+                current_group_locs,
+                first_current_rows[:, None],
+            )
+        ring_group_locs = ring_group_locs.long()
+
+        pool = metadata.token_to_kv_pool
+        current_keys = token_k[current_group_locs]
+        ring_keys = pool.get_qsa_key_state_buffer(self.layer_id)[ring_group_locs]
+        use_ring = (
+            torch.arange(
+                self.compress_ratio,
+                device=prefix_members.device,
+                dtype=torch.long,
+            )[None, :]
+            < prefix_members[:, None]
+        )
+        while use_ring.ndim < current_keys.ndim:
+            use_ring = use_ring.unsqueeze(-1)
+        key_groups = torch.where(use_ring, ring_keys, current_keys)
+        pooled = average_pool_qsa_keys(key_groups)
+        compressed_rope_positions = self._rope_from_matrix(prefix_rope_positions)
+        normalized = self.normalize_compressed_keys(pooled, compressed_rope_positions)
+        # Keep the plan fixed-capacity and device-asynchronous: non-crossing
+        # and padded rows write the reserved dump slot instead of boolean-
+        # compacting a device mask (which would need a dynamic output size).
+        cross_write_locs = torch.where(
+            cross, metadata.write_locs, torch.zeros_like(metadata.write_locs)
+        )
+        pool.set_qsa_compressed_k_buffer(self.layer_id, cross_write_locs, normalized)
 
     def _compress_decode_cuda_graph(self, metadata) -> None:
         """Run a fixed-shape compression step; non-boundaries write slot zero.
@@ -613,11 +701,19 @@ class QSAIndexer(MultiPlatformOp):
                 logical_positions,
                 indexer_metadata.compress_member_rows is not None,
             )
+        # Cross-prefix groups must consume the previous ring generation before
+        # this chunk publishes its tail. Fused preparation stores as part of
+        # projection, so bypass it only for this rare unaligned EXTEND case;
+        # aligned extend and all paged/MTP paths keep the existing fast path.
+        preserve_prefix_ring = (
+            indexer_metadata.compress_member_rows is not None
+            and getattr(indexer_metadata, "has_cross_prefix_group", False)
+        )
         q, token_k, state_stored = self.project_qk(
             hidden_states,
             positions,
-            pool=indexer_metadata.token_to_kv_pool,
-            cache_loc=state_slots,
+            pool=(None if preserve_prefix_ring else indexer_metadata.token_to_kv_pool),
+            cache_loc=(None if preserve_prefix_ring else state_slots),
             q_heads_padded=(
                 # The tilelang decode MQA requires a query-head multiple of 8;
                 # writing the zero padding from the fused prep kernel avoids a

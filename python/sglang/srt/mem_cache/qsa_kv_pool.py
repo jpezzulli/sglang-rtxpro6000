@@ -131,9 +131,9 @@ class QSATokenToKVPool(HybridLinearKVPool):
         self.qsa_compressed_capacity = -(state_size // -self.qsa_compress_ratio)
         # Pre-compression index-K state is a per-request RING, not a
         # per-token cache: once a group's compressed key is written, its raw
-        # members are never read again, and page-granular prefix sharing
-        # keeps every extend chunk group-aligned, so the only state that
-        # must survive a forward is the pending group's members -- at most
+        # members are never read again. Radix-shared prefixes are page-aligned,
+        # but a request's private chunk tail can end inside a group. The state
+        # that must survive a forward is that pending group's members -- at most
         # ``ratio`` tokens per request, addressed as
         # ``req_pool_idx * ratio + position % ratio``. Request slot 0 is
         # never allocated, so ring rows [0, ratio) double as the inert dump

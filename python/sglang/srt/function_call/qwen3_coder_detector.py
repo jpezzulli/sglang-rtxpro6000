@@ -68,6 +68,14 @@ class Qwen3CoderDetector(BaseFormatDetector):
         self._rejected_tool_depth = 0
         self._preserve_tool_wrapper = False
 
+        # Markdown fenced examples are literal output, even when their body is
+        # valid tool syntax. Streaming holds only a possibly structural line
+        # prefix; ordinary body content is forwarded immediately.
+        self._code_fence_marker: Optional[str] = None
+        self._code_fence_length = 0
+        self._code_fence_line_can_close = True
+        self._stream_at_line_start = True
+
     def has_tool_call(self, text: str) -> bool:
         return self.tool_call_start_token in text
 
@@ -199,11 +207,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
         calls = []
         try:
-            raw_tool_calls = list(
-                self._iter_structure_spans(
-                    text, self.tool_call_start_token, self.tool_call_end_token
-                )
-            )
+            raw_tool_calls = list(self._iter_unquoted_tool_spans(text))
             # Preserve the legacy incomplete-wrapper fallback only when there
             # are no complete wrappers; do not promote a truncated trailing one.
             complete_tool_calls = [
@@ -314,6 +318,141 @@ class Qwen3CoderDetector(BaseFormatDetector):
             yield start, end, body_end
             pos = end
 
+    @staticmethod
+    def _find_fence_open(text: str, pos: int = 0, *, require_newline: bool = False):
+        """Find the next ordinary Markdown fence opening line."""
+        line_end = r"(?:\r\n|\r|\n)" if require_newline else r"(?:\r\n|\r|\n|$)"
+        pattern = re.compile(
+            rf"(?:(?<=\n)|(?<=\r)|\A) {{0,3}}"
+            rf"(?P<marker>`{{3,}}|~{{3,}})(?P<info>[^\r\n]*){line_end}",
+        )
+        while match := pattern.search(text, pos):
+            marker = match.group("marker")
+            # CommonMark forbids backticks in an info string for a backtick
+            # fence. Tilde fences have no equivalent restriction.
+            if marker[0] != "`" or "`" not in match.group("info"):
+                return match
+            pos = match.end()
+        return None
+
+    @staticmethod
+    def _find_fence_close(text: str, pos: int, marker: str, length: int):
+        return re.compile(
+            rf"(?:(?<=\n)|(?<=\r)|\A) {{0,3}}"
+            rf"{re.escape(marker)}{{{length},}}[ \t]*(?:\r\n|\r|\n|$)",
+        ).search(text, pos)
+
+    def _iter_unquoted_tool_spans(self, text: str):
+        """Yield wrappers outside fenced code, treating wrappers as opaque.
+
+        A genuine wrapper that starts first owns its whole body, so Markdown in
+        a real argument does not change tool parsing. Conversely, a fence that
+        starts first owns all apparent wrappers through its close or EOF.
+        """
+        pos = 0
+        while pos < len(text):
+            tool_start = text.find(self.tool_call_start_token, pos)
+            fence = self._find_fence_open(text, pos)
+            if fence is not None and (tool_start == -1 or fence.start() < tool_start):
+                marker = fence.group("marker")
+                close = self._find_fence_close(
+                    text, fence.end(), marker[0], len(marker)
+                )
+                pos = close.end() if close is not None else len(text)
+                continue
+            if tool_start == -1:
+                break
+
+            relative_span = next(
+                self._iter_structure_spans(
+                    text[tool_start:],
+                    self.tool_call_start_token,
+                    self.tool_call_end_token,
+                )
+            )
+            start, end, body_end = relative_span
+            yield (
+                tool_start + start,
+                tool_start + end,
+                tool_start + body_end,
+            )
+            pos = tool_start + end
+
+    def _advance_stream(self, length: int) -> None:
+        consumed = self._buffer[self.parsed_pos : self.parsed_pos + length]
+        self.parsed_pos += length
+        if consumed:
+            self._stream_at_line_start = consumed.endswith(("\r", "\n"))
+
+    @staticmethod
+    def _stream_line_end(text: str) -> Optional[int]:
+        """Return the end offset of the first LF, CRLF, or bare-CR line."""
+        cr = text.find("\r")
+        lf = text.find("\n")
+        starts = [index for index in (cr, lf) if index != -1]
+        if not starts:
+            return None
+        start = min(starts)
+        if text[start : start + 2] == "\r\n":
+            return start + 2
+        return start + 1
+
+    def _stream_fence_event(self, text: str):
+        """Return the next complete opening or an incomplete candidate."""
+        search_pos = 0
+        while opening := self._find_fence_open(text, search_pos, require_newline=True):
+            if opening.start() != 0 or self._stream_at_line_start:
+                return "open", opening.start(), opening
+            search_pos = opening.end()
+
+        line_start = max(text.rfind("\n"), text.rfind("\r")) + 1
+        if line_start == 0 and not self._stream_at_line_start:
+            return None
+        tail = text[line_start:]
+        if re.fullmatch(r" {1,3}", tail):
+            return "potential", line_start, None
+        candidate = re.match(r" {0,3}(?P<marker>`+|~+)(?P<info>.*)$", tail)
+        if candidate is None:
+            return None
+        marker = candidate.group("marker")
+        info = candidate.group("info")
+        if len(marker) < 3 and info:
+            return None
+        if marker[0] == "`" and "`" in info:
+            return None
+        return "potential", line_start, None
+
+    def _is_stream_fence_close(self, line: str) -> bool:
+        content = line.removesuffix("\n").removesuffix("\r")
+        return (
+            re.fullmatch(
+                rf" {{0,3}}{re.escape(self._code_fence_marker or '')}"
+                rf"{{{self._code_fence_length},}}[ \t]*",
+                content,
+            )
+            is not None
+        )
+
+    def _could_be_stream_fence_close(self, line: str) -> bool:
+        """Whether an unfinished line can still become the closing fence."""
+        match = re.match(r" {0,3}", line)
+        assert match is not None
+        pos = match.end()
+        if pos == len(line):
+            return True
+        if line[pos] != self._code_fence_marker:
+            return False
+
+        marker_end = pos
+        while marker_end < len(line) and line[marker_end] == self._code_fence_marker:
+            marker_end += 1
+        marker_count = marker_end - pos
+        if marker_end == len(line):
+            return True
+        if marker_count < self._code_fence_length:
+            return False
+        return all(char in " \t\r" for char in line[marker_end:])
+
     def parse_streaming_increment(
         self, new_text: str, tools: List[Tool]
     ) -> StreamingParseResult:
@@ -336,6 +475,55 @@ class Qwen3CoderDetector(BaseFormatDetector):
             # Optimization: If almost empty, wait for more
             if not current_slice:
                 break
+
+            if self._code_fence_marker is not None:
+                if not self._code_fence_line_can_close:
+                    line_end = self._stream_line_end(current_slice)
+                    emit_length = len(current_slice) if line_end is None else line_end
+                    self._append_normal_text(
+                        current_slice[:emit_length], normal_text_chunks
+                    )
+                    self._advance_stream(emit_length)
+                    if line_end is not None:
+                        self._code_fence_line_can_close = True
+                    continue
+
+                line_end = self._stream_line_end(current_slice)
+                if line_end is None:
+                    if self._could_be_stream_fence_close(current_slice):
+                        # Keep only an ambiguous closing-line tail buffered.
+                        break
+                    self._code_fence_line_can_close = False
+                    continue
+                line = current_slice[:line_end]
+                closes_fence = self._is_stream_fence_close(line)
+                self._append_normal_text(line, normal_text_chunks)
+                self._advance_stream(len(line))
+                if closes_fence:
+                    self._code_fence_marker = None
+                    self._code_fence_length = 0
+                self._code_fence_line_can_close = True
+                continue
+
+            # A real wrapper takes precedence over Markdown-like content in
+            # its arguments. Outside wrappers, stop before an opening fence so
+            # apparent tool syntax in the block is emitted literally.
+            if not self.is_inside_tool_call:
+                fence_event = self._stream_fence_event(current_slice)
+                if fence_event is not None:
+                    event, start, opening = fence_event
+                    if start == 0:
+                        if event == "potential":
+                            break
+                        marker = opening.group("marker")
+                        opening_line = current_slice[: opening.end()]
+                        self._append_normal_text(opening_line, normal_text_chunks)
+                        self._advance_stream(len(opening_line))
+                        self._code_fence_marker = marker[0]
+                        self._code_fence_length = len(marker)
+                        self._code_fence_line_can_close = True
+                        continue
+                    current_slice = current_slice[:start]
 
             # Rejected bodies are literal until their own function closes.
             # Handle nested tags before callable-tag recognition: otherwise a
@@ -371,7 +559,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     self._append_normal_text(
                         current_slice[:literal_tag_len], normal_text_chunks
                     )
-                    self.parsed_pos += literal_tag_len
+                    self._advance_stream(literal_tag_len)
                     continue
 
             # -------------------------------------------------------
@@ -386,7 +574,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 self._tool_wrapper_prefix = self.tool_call_start_token
                 self._suppress_current_call = False
                 self._preserve_tool_wrapper = False
-                self.parsed_pos += len(self.tool_call_start_token)
+                self._advance_stream(len(self.tool_call_start_token))
                 self.is_inside_tool_call = True
                 continue
 
@@ -420,7 +608,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         )
                         self._preserve_tool_wrapper = True
                         self._pending_tool_prefix = None
-                        self.parsed_pos += end_angle + 1
+                        self._advance_stream(end_angle + 1)
                         continue
 
                     if self._pending_tool_prefix is not None:
@@ -445,7 +633,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         )
                     )
 
-                    self.parsed_pos += end_angle + 1
+                    self._advance_stream(end_angle + 1)
                     continue
                 else:
                     # Incomplete tag
@@ -533,7 +721,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
                         # Advance cursor
                         total_len = (name_end + 1) + end_pos + end_token_len
-                        self.parsed_pos += total_len
+                        self._advance_stream(total_len)
                         continue
 
                 # Incomplete parameter tag or value
@@ -550,7 +738,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         self.function_end_token, normal_text_chunks
                     )
                     self._suppress_current_call = False
-                    self.parsed_pos += len(self.function_end_token)
+                    self._advance_stream(len(self.function_end_token))
                     continue
                 if not self.json_started:
                     calls.append(
@@ -561,7 +749,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 calls.append(
                     ToolCallItem(tool_index=self.current_tool_id, parameters="}")
                 )
-                self.parsed_pos += len(self.function_end_token)
+                self._advance_stream(len(self.function_end_token))
                 self.current_func_name = None
                 continue
 
@@ -583,7 +771,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     )
                 else:
                     self._pending_tool_separator = ""
-                self.parsed_pos += len(self.tool_call_end_token)
+                self._advance_stream(len(self.tool_call_end_token))
                 self.is_inside_tool_call = False  # [FIX] Exit tool call region
                 self._suppress_current_call = False
                 self._preserve_tool_wrapper = False
@@ -602,7 +790,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 # This entire segment is plain text
                 self._append_unparsed_text(current_slice, normal_text_chunks)
                 # [FIX] If inside tool call, discard this text (usually \n), don't append
-                self.parsed_pos += len(current_slice)
+                self._advance_stream(len(current_slice))
                 continue
 
             elif next_open_angle == 0:
@@ -628,7 +816,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 else:
                     # Just a plain '<' symbol
                     self._append_unparsed_text("<", normal_text_chunks)
-                    self.parsed_pos += 1
+                    self._advance_stream(1)
                     continue
 
             else:
@@ -636,7 +824,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 text_segment = current_slice[:next_open_angle]
                 self._append_unparsed_text(text_segment, normal_text_chunks)
                 # [FIX] If inside tool call, discard whitespace/text before Tag
-                self.parsed_pos += next_open_angle
+                self._advance_stream(next_open_angle)
                 continue
 
         # Memory Cleanup: Slice the buffer
@@ -664,7 +852,13 @@ class Qwen3CoderDetector(BaseFormatDetector):
         # Only flush unrecognized syntax. An unfinished accepted call must not
         # silently become prose or have fabricated argument-closing delimiters.
         chunks = []
-        if self.current_func_name is None:
+        if self._code_fence_marker is not None:
+            self._append_normal_text(self._buffer, chunks)
+            self._code_fence_marker = None
+            self._code_fence_length = 0
+            self._code_fence_line_can_close = True
+            self._buffer = ""
+        elif self.current_func_name is None:
             self._append_normal_text(
                 (self._pending_tool_prefix or "") + self._buffer, chunks
             )

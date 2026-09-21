@@ -1,6 +1,11 @@
 import inspect
+import json
 import re
 from typing import Dict, List, Optional, Tuple, Type
+
+import partial_json_parser
+from partial_json_parser.core.exceptions import MalformedJSON
+from partial_json_parser.core.options import Allow
 
 from sglang.srt.entrypoints.openai.encoding_dsv4 import dsml_token as dsv4_dsml_token
 from sglang.srt.entrypoints.openai.encoding_dsv4 import eos_token as dsv4_eos_token
@@ -134,35 +139,31 @@ class BaseReasoningFormatDetector:
         while processed_text.startswith(think_start_text):
             processed_text = processed_text[len(think_start_text) :]
 
+        tool_idx, tool_start_confirmed = -1, None
+        if in_reasoning and self.tool_start_token is not None:
+            tool_idx, tool_start_confirmed = self._find_tool_start(processed_text)
+        end_idx = self._find_think_end(processed_text, tool_idx)
+
         if (
-            self.think_end_token not in processed_text
+            tool_start_confirmed
+            and end_idx == -1
             and self.think_end_token not in self.previous_content
         ):
-            # Check for tool_start_token interruption
-            if (
-                in_reasoning
-                and self.tool_start_token is not None
-                and self.tool_start_token in processed_text
-            ):
-                # Find the first occurrence of tool_start_token and split there
-                tool_idx = processed_text.find(self.tool_start_token)
-                reasoning_text = processed_text[:tool_idx]
-                # Preserve tool_start_token in normal text
-                normal_text = processed_text[tool_idx:]
-                return StreamingParseResult(
-                    normal_text=normal_text, reasoning_text=reasoning_text
-                )
+            # Preserve tool_start_token in normal text.
+            return StreamingParseResult(
+                normal_text=processed_text[tool_idx:],
+                reasoning_text=processed_text[:tool_idx],
+            )
+
+        if end_idx == -1 and self.think_end_token not in self.previous_content:
             # Assume reasoning was truncated before end token
             return StreamingParseResult(reasoning_text=processed_text)
 
         # Extract reasoning content
-        if self.think_end_token in processed_text:
-            splits = processed_text.split(self.think_end_token, maxsplit=1)
-            reasoning_text = splits[0]
-            normal_text = splits[1]
-
+        if end_idx != -1:
             return StreamingParseResult(
-                normal_text=normal_text, reasoning_text=reasoning_text
+                normal_text=processed_text[end_idx + len(self.think_end_token) :],
+                reasoning_text=processed_text[:end_idx],
             )
         else:
             # think_end_token is in self.previous_content for continue_final_message=True case
@@ -210,9 +211,13 @@ class BaseReasoningFormatDetector:
             self.stripped_think_start = True
             self._in_reasoning = True
 
+        tool_idx, tool_start_confirmed = -1, None
+        if self._in_reasoning and self.tool_start_token:
+            tool_idx, tool_start_confirmed = self._find_tool_start(current_text)
+        end_idx = self._find_think_end(current_text, tool_idx)
+
         # Handle end of reasoning block
-        if self._in_reasoning and self.think_end_token in current_text:
-            end_idx = current_text.find(self.think_end_token)
+        if self._in_reasoning and end_idx != -1:
 
             reasoning_text = current_text[:end_idx]
 
@@ -228,16 +233,23 @@ class BaseReasoningFormatDetector:
         if self._in_reasoning:
             # Check for tool_start_token interruption. Streaming cannot see a
             # think_end_token that has not arrived yet; see the chunk_dependent test.
-            if self.tool_start_token and self.tool_start_token in current_text:
-                tool_idx = current_text.find(self.tool_start_token)
-                reasoning_text = current_text[:tool_idx]
-                # Preserve tool_start_token in normal text
-                normal_text = current_text[tool_idx:]
-                self._buffer = ""
-                self._in_reasoning = False
-                return StreamingParseResult(
-                    normal_text=normal_text, reasoning_text=reasoning_text
-                )
+            if self.tool_start_token:
+                if tool_start_confirmed:
+                    self._buffer = ""
+                    self._in_reasoning = False
+                    return StreamingParseResult(
+                        normal_text=current_text[tool_idx:],
+                        reasoning_text=current_text[:tool_idx],
+                    )
+                if tool_idx != -1 and tool_start_confirmed is None:
+                    # Do not classify an occurrence at the chunk edge until a
+                    # model-specific detector has enough following text.
+                    if self.stream_reasoning:
+                        self._buffer = current_text[tool_idx:]
+                        return StreamingParseResult(
+                            reasoning_text=current_text[:tool_idx]
+                        )
+                    return StreamingParseResult()
             if self.stream_reasoning:
                 # Minus any trailing slice that could be a token split across chunks.
                 holdback_tokens = [self.think_end_token]
@@ -263,6 +275,38 @@ class BaseReasoningFormatDetector:
             return StreamingParseResult(normal_text=current_text)
 
         return StreamingParseResult()
+
+    def _tool_start_confirmed(self, remainder: str) -> Optional[bool]:
+        """Classify a possible tool-start interruption.
+
+        ``remainder`` starts with ``tool_start_token``. Subclasses may return
+        ``None`` while streaming when the following text is not sufficient to
+        distinguish a real tool call from a literal mention. The base behavior
+        remains the historical unconditional interruption.
+        """
+        return True
+
+    def _find_think_end(self, text: str, tool_idx: int = -1) -> int:
+        """Find the first reasoning end token relevant to this detector."""
+        return text.find(self.think_end_token)
+
+    def _find_tool_start(self, text: str) -> Tuple[int, Optional[bool]]:
+        """Find the first confirmed or not-yet-decidable tool-start token."""
+        tool_start_token = self.tool_start_token
+        if tool_start_token is None:
+            return -1, None
+
+        search_from = 0
+        while True:
+            tool_idx = text.find(tool_start_token, search_from)
+            if tool_idx == -1:
+                return -1, None
+
+            confirmed = self._tool_start_confirmed(text[tool_idx:])
+            if confirmed is not False:
+                return tool_idx, confirmed
+
+            search_from = tool_idx + len(tool_start_token)
 
     def _strip_leading_think_start(self, text: str) -> str:
         think_start_text = self.think_start_token + self.think_start_self_label
@@ -397,6 +441,129 @@ class Qwen3Detector(BaseReasoningFormatDetector):
             reasoning_default="enable_thinking",
             force_nonempty_content=force_nonempty_content,
         )
+
+    def _tool_start_confirmed(self, remainder: str) -> Optional[bool]:
+        """Require a supported Qwen payload after ``<tool_call>``.
+
+        Qwen tool formats supported by this reasoner begin with either a
+        qwen3_coder function wrapper or a JSON object. A bare tag in reasoning
+        is not an implicit close.
+        """
+        # These subclasses reuse Qwen's reasoning envelope, not its tool wire
+        # format. Keep their historical unconditional interruption semantics.
+        if self.__class__ is not Qwen3Detector:
+            return super()._tool_start_confirmed(remainder)
+
+        tool_start_token = self.tool_start_token
+        assert tool_start_token is not None
+        after = remainder[len(tool_start_token) :].lstrip(" \t\r\n")
+
+        if not after:
+            return None
+        if after.startswith("{"):
+            return self._json_tool_object_confirmed(after)
+        return self._function_tool_header_confirmed(after)
+
+    def _find_think_end(self, text: str, tool_idx: int = -1) -> int:
+        if self.__class__ is not Qwen3Detector or tool_idx == -1:
+            return super()._find_think_end(text, tool_idx)
+
+        payload_spans = self._tool_payload_spans(text)
+        search_from = 0
+        while True:
+            end_idx = text.find(self.think_end_token, search_from)
+            if end_idx == -1:
+                return -1
+            if not any(
+                start <= end_idx and (end is None or end_idx < end)
+                for start, end in payload_spans
+            ):
+                return end_idx
+            search_from = end_idx + len(self.think_end_token)
+
+    def _tool_payload_spans(self, text: str) -> List[Tuple[int, Optional[int]]]:
+        """Return complete or pending Qwen payload spans in the current buffer."""
+        tool_start_token = self.tool_start_token
+        assert tool_start_token is not None
+
+        spans = []
+        search_from = 0
+        while True:
+            start = text.find(tool_start_token, search_from)
+            if start == -1:
+                return spans
+
+            remainder = text[start:]
+            confirmed = self._tool_start_confirmed(remainder)
+            if confirmed is False:
+                search_from = start + len(tool_start_token)
+                continue
+
+            relative_end = self._tool_payload_end(remainder)
+            end = None if relative_end is None else start + relative_end
+            spans.append((start, end))
+            if end is None:
+                return spans
+            search_from = end
+
+    def _tool_payload_end(self, remainder: str) -> Optional[int]:
+        """Return the end of a complete Qwen payload after ``<tool_call>``."""
+        tool_start_token = self.tool_start_token
+        assert tool_start_token is not None
+
+        payload_start = len(tool_start_token)
+        while payload_start < len(remainder) and remainder[payload_start] in " \t\r\n":
+            payload_start += 1
+        after = remainder[payload_start:]
+
+        if after.startswith("{"):
+            try:
+                _, json_end = json.JSONDecoder().raw_decode(after)
+            except json.JSONDecodeError:
+                return None
+            return payload_start + json_end
+
+        function_end_token = "</function>"
+        function_end = after.find(function_end_token)
+        if function_end == -1:
+            return None
+        return payload_start + function_end + len(function_end_token)
+
+    @staticmethod
+    def _function_tool_header_confirmed(after: str) -> Optional[bool]:
+        prefix = "<function="
+        common = min(len(after), len(prefix))
+        if after[:common] != prefix[:common]:
+            return False
+        if len(after) < len(prefix):
+            return None
+
+        name_end = after.find(">", len(prefix))
+        partial_name = after[len(prefix) : name_end if name_end != -1 else None]
+        if not partial_name:
+            return None if name_end == -1 else False
+        if re.search(r"[\s<>=]", partial_name):
+            return False
+        if name_end == -1:
+            return None
+        return True
+
+    @staticmethod
+    def _json_tool_object_confirmed(after: str) -> Optional[bool]:
+        """Confirm a complete JSON object or keep a viable prefix buffered."""
+        try:
+            value, _ = json.JSONDecoder().raw_decode(after)
+        except json.JSONDecodeError:
+            try:
+                partial_json_parser.loads(after, Allow.ALL)
+            except (MalformedJSON, json.JSONDecodeError, IndexError, AssertionError):
+                return False
+            return None
+
+        if not isinstance(value, dict):
+            return False
+        name = value.get("name")
+        return isinstance(name, str) and bool(name)
 
 
 class KimiDetector(BaseReasoningFormatDetector):

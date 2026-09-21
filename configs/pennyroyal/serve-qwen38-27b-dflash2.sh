@@ -4,6 +4,7 @@ set -euo pipefail
 # Operators can opt back into NumPy huge-page advice; this is not a kernel policy.
 export NUMPY_MADVISE_HUGEPAGE="${NUMPY_MADVISE_HUGEPAGE:-0}"
 export SGLANG_MM_PREPROCESS_DEVICE="${SGLANG_MM_PREPROCESS_DEVICE:-cpu}"
+export SGLANG_FORWARD_UNKNOWN_TOOLS="${SGLANG_FORWARD_UNKNOWN_TOOLS:-true}"
 case "$SGLANG_MM_PREPROCESS_DEVICE" in
   cpu) IMAGE_PROCESSOR_BACKEND=pil ;;
   cuda:*) IMAGE_PROCESSOR_BACKEND=torchvision ;;

@@ -50,20 +50,21 @@ PYTHON="$PWD/.venv/bin/python" bash tools/ple_nvme/install.sh
 Build tooling may download dependencies. Serving from an already prepared
 snapshot works offline.
 
-The installer refuses to overwrite an existing destination, and
-v2.5.0 rejects earlier reader builds that lack its complete hook-application
-enforcement. If you are replacing an earlier optional-reader test install,
-select a new empty directory and keep that setting for launch:
+The reader checks the runtime's source signatures. When upgrading to v2.5.1,
+install the reader from the new checkout; its QSA signature has changed.
+The installer preserves existing destinations, so choose a new directory and
+keep that setting for launch:
 
 ```bash
-export PENNY_PLE_PLUGIN_DIR="$PWD/.ple-nvme-v250"
+export PENNY_PLE_PLUGIN_DIR="$PWD/.ple-nvme-v251"
 PYTHON="$PWD/.venv/bin/python" bash tools/ple_nvme/install.sh
 ```
 
-A previously prepared 48 GiB overlay can be reused when the v2.5.0 preflight
+A previously prepared 48 GiB overlay can be reused when the normal preflight
 accepts the source config/index/header identity, prepared ordinary-weight
 mapping, and prepared-table checksum. Changing only the isolated reader
-directory leaves the overlay valid.
+directory leaves the overlay valid. The container image includes the matching
+reader, so this reinstall step is for native installations.
 
 ## Prepare the NVMe overlay once
 

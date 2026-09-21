@@ -20,6 +20,20 @@ def sample(start='2026-08-24', end='2026-08-26', count=10):
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_repository_metrics_request_uses_repository_root_without_trailing_slash(self):
+        seen = []
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return b'{"stargazers_count":12,"forks_count":3}'
+        original = a.urllib.request.urlopen
+        a.urllib.request.urlopen = lambda request, timeout: seen.append(request.full_url) or Response()
+        try:
+            self.assertEqual(a.collect_repository_metrics(a.API('test')), {'stars': 12, 'forks': 3})
+        finally:
+            a.urllib.request.urlopen = original
+        self.assertEqual(seen, [f'https://api.github.com/repos/{a.REPOSITORY}'])
+
     def test_overlap_corrections_preserve_older_days_and_uniques(self):
         old = a.merge(None, sample(), '2026-08-27T01:00:00Z')
         untouched = copy.deepcopy(old)
@@ -34,7 +48,7 @@ class ArchiveTests(unittest.TestCase):
         h = a.merge(None, raw, '2026-08-29T00:17:00Z')
         self.assertEqual(h['coverage']['missing_dates_through_latest_exposed'], ['2026-08-24', '2026-08-25'])
         self.assertEqual(h['coverage']['not_yet_exposed_dates'], ['2026-08-29'])
-        self.assertNotIn('Exact cumulative', a.render(h, raw, 'snapshot.json'))
+        self.assertNotIn('Exact cumulative', a.render(h, raw, 'snapshot.json', {'stars': 12, 'forks': 3}))
 
     def test_bad_responses_fail_without_mutating_history(self):
         old = a.merge(None, sample(), '2026-08-27T01:00:00Z')
@@ -60,11 +74,27 @@ class ArchiveTests(unittest.TestCase):
     def test_daily_zero_is_retained_and_uniques_label_is_honest(self):
         raw = sample(count=0)
         h = a.merge(None, raw, '2026-08-27T01:00:00Z')
-        summary = a.render(h, raw, 'snapshot.json')
+        summary = a.render(h, raw, 'snapshot.json', {'stars': 12, 'forks': 3})
         self.assertEqual(h['days']['2026-08-24']['views']['count'], 0)
         self.assertIn('sum_of_daily_uniques', summary)
         self.assertNotIn('lifetime_unique_users', summary)
         self.assertIn('Exact cumulative views', summary)
+
+    def test_repository_metrics_preserve_prior_days_and_update_same_day(self):
+        first = a.merge_repository_metrics(None, {'stars': 12, 'forks': 3}, '2026-09-19T01:00:00Z')
+        updated = a.merge_repository_metrics(first, {'stars': 13, 'forks': 4}, '2026-09-19T12:00:00Z')
+        next_day = a.merge_repository_metrics(updated, {'stars': 14, 'forks': 4}, '2026-09-20T01:00:00Z')
+        self.assertEqual(next_day['days']['2026-09-19'],
+                         {'stars': 13, 'forks': 4, 'collected_at': '2026-09-19T12:00:00Z'})
+        self.assertEqual(next_day['days']['2026-09-20']['stars'], 14)
+        with self.assertRaises(a.ArchiveError):
+            a.merge_repository_metrics(next_day, {'stars': -1, 'forks': 4}, '2026-09-21T01:00:00Z')
+        corrupt = copy.deepcopy(next_day)
+        corrupt['days']['2026-09-20']['collected_at'] = '2026-09-20T99:99:99Z'
+        with self.assertRaises(a.ArchiveError):
+            a.validate_repository_metrics_history(corrupt)
+        with self.assertRaises(a.ArchiveError):
+            a.merge_repository_metrics(None, {'stars': 12, 'forks': 3}, '2026-09-18T01:00:00Z')
 
     def test_branch_race_fails_before_ref_update(self):
         class Fake:
@@ -91,8 +121,30 @@ class ArchiveTests(unittest.TestCase):
             for key, value in bodies.items():
                 self.assertEqual(captured[0][f'raw/first-run/{key}.json'].encode(), value)
             self.assertEqual(len([p for p in captured[0] if p.startswith('snapshots/')]), 1)
+            self.assertNotIn('repository-metrics.json', captured[0])
         finally:
             a.read_history, a.publish = original_read, original_publish
+
+    def test_regular_archive_persists_current_repository_metrics(self):
+        raw = sample()
+        bodies = {k: json.dumps(v).encode() for k, v in raw.items()}
+        old = a.merge(None, raw, '2026-08-27T00:17:00Z')
+        captured = []
+        original_read, original_metrics_read, original_publish = (
+            a.read_history, a.read_repository_metrics_history, a.publish)
+        a.read_history = lambda *args, **kwargs: ('head', 'tree', old)
+        a.read_repository_metrics_history = lambda *args, **kwargs: None
+        a.publish = lambda api, head, tree, files, message: captured.append(files) or 'sha'
+        try:
+            a.archive(None, raw, bodies, '2026-09-19T00:17:00Z', 'test',
+                      {'stars': 12, 'forks': 3})
+            metric_history = json.loads(captured[0]['repository-metrics.json'])
+            self.assertEqual(metric_history['days']['2026-09-19']['forks'], 3)
+            snapshot = next(v for p, v in captured[0].items() if p.startswith('snapshots/'))
+            self.assertEqual(json.loads(snapshot)['repository_metrics']['stars'], 12)
+        finally:
+            a.read_history, a.read_repository_metrics_history, a.publish = (
+                original_read, original_metrics_read, original_publish)
 
 
 if __name__ == '__main__':

@@ -27,7 +27,19 @@ itself is retrieved using Contents API at the workflow's exact commit SHA.
 - `raw/first-run/metadata.json`: first capture provenance, SHA-256 checksums,
   endpoint query strings and exact coverage/missing dates.
 - `README.md`: cumulative daily counts, daily table, current rolling uniques,
-  and current referrer/path tables. Previous snapshots remain in the archive.
+  current stars/forks, and current referrer/path tables. Previous snapshots remain
+  in the archive.
+- `repository-metrics.json`: date-keyed daily observations of public star and
+  fork counts, beginning **2026-09-19** when this metric was added. Existing
+  traffic history is not backfilled with invented repository-metric values.
+- `package-downloads.json`: date-keyed observations of the public GHCR package
+  total and every discovered version's download counter.
+- `package-snapshots/YYYY-MM-DD/<UTC timestamp>-<run ID>-<attempt>.json`:
+  immutable parsed package observations for every successful collection.
+- `PACKAGE-DOWNLOADS.md`: readable package totals, per-version counters and
+  day-over-day changes. Package downloads are never added to repository clones.
+- `raw/packages/first-run/package.html` and `metadata.json`: immutable public
+  package-page baseline, its hash, extracted counters and provenance.
 
 All structured archive documents contain repository, launch date, UTC collection
 time, schema version `1`, and API version `2022-11-28`. Unmodified raw API bodies
@@ -41,6 +53,22 @@ preserved. Exact cumulative counts apply only through the latest exposed date
 when every date since launch is present. Missing dates are listed without zero
 filling; recent unexposed dates are labeled separately. Counts are GitHub-reported
 activity, including any bots GitHub counts, not verified human activity.
+
+Stars and forks are collected from the repository REST response using the same
+run timestamp as the traffic snapshot. The canonical daily record is replaced
+only by a later successful collection on that same UTC day; each traffic snapshot
+retains its own timestamped observed star/fork values.
+
+The public GitHub Packages page reports cumulative package and version download
+counters. They are not unique users or successful installations: OCI clients can
+fetch an index, platform manifests and layers, and builds/tests can contribute.
+GitHub's documented Packages REST responses expose metadata but do not include
+download counters. The package collector therefore validates the public HTML,
+tracks versions by stable GitHub version ID after discovery, and fails loudly if
+the representation becomes malformed. Package collection runs after repository
+traffic is safely committed, so a package-page failure cannot cost the expiring
+14-day traffic window. The failed workflow remains visible and is retried by the
+existing thegrid watchdog.
 
 Never add rolling totals or rolling unique values across snapshots. The summary
 labels daily-unique sums as `sum_of_daily_uniques`; these are not a deduplicated
@@ -98,6 +126,7 @@ To test archive merge/integrity logic without GitHub access:
 
 ```sh
 python3 .github/scripts/test_archive_traffic.py
+python3 .github/scripts/test_archive_package_downloads.py
 ```
 
 The first capture exposed 2026-08-22 through 2026-09-04, including all dates from
@@ -121,10 +150,12 @@ only read-only API checks; this does not make twice-hourly archive commits.
 The first activation commissions one real workflow run even if a manual capture
 is already fresh, proving that unattended credentials and execution work.
 
-The watchdog dispatches the existing GitHub workflow if collection is overdue.
+The watchdog dispatches the existing GitHub workflow if either repository traffic
+or package-download collection is overdue.
 It adopts a queued/running collector instead of dispatching another, waits up to
-eight minutes, and verifies both workflow success and a fresh `daily.json` on
-`traffic-history`. A still-pending run is resumed on the next timer tick. If a pending run was
+eight minutes, and verifies workflow success plus fresh `daily.json` and
+`package-downloads.json` on `traffic-history`. A still-pending run is resumed on
+the next timer tick. If a pending run was
 deleted, a confirmed HTTP 404 plus a successful run listing retires that reference
 so recovery can proceed; authentication errors never clear pending state. Failed
 runs or transport/authentication failures leave history untouched, mark the local

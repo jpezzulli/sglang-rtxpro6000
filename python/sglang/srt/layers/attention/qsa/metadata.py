@@ -74,16 +74,19 @@ class QSAIndexerMetadata(msgspec.Struct, frozen=True):
     # slot, the group-end token position (sequence-local) and the metadata
     # row owning it. For extend forwards, compress_member_rows additionally
     # holds each group's first member as a token-row index into this
-    # forward's packed tensors (extend chunks are group-aligned, so every
-    # member is in-chunk); compress_plan_valid marks the fixed-capacity plan's
-    # real entries so padded entries can use in-bounds dummy reads. Paged
-    # forwards leave compress_member_rows None and source members from the
-    # per-request pending ring instead.
+    # forward's packed tensors. An unaligned private prefix can put the first
+    # members before that packed range; compress_prefix_members records how
+    # many must be recovered from the per-request ring. compress_plan_valid
+    # marks the fixed-capacity plan's real entries so padded entries can use
+    # in-bounds dummy reads. Paged forwards leave compress_member_rows None
+    # and source members from the per-request pending ring instead.
     write_locs: Optional[torch.Tensor] = None
     compress_group_positions: Optional[torch.Tensor] = None
     compress_sequence_ids: Optional[torch.Tensor] = None
     compress_member_rows: Optional[torch.Tensor] = None
     compress_plan_valid: Optional[torch.Tensor] = None
+    compress_prefix_members: Optional[torch.Tensor] = None
+    has_cross_prefix_group: bool = False
     is_cuda_graph: bool = False
     graph_write_locs: Optional[torch.Tensor] = None
     graph_compressed_page_table: Optional[torch.Tensor] = None
@@ -94,6 +97,7 @@ class QSAIndexerMetadata(msgspec.Struct, frozen=True):
     decode_logical_positions: Optional[torch.Tensor] = None
     pending_ring_slots: Optional[torch.Tensor] = None
     compress_group_ring_locs: Optional[torch.Tensor] = None
+    cross_prefix_rope_positions: Optional[torch.Tensor] = None
     extend_rope_matrix: Optional[torch.Tensor] = None
     graph_ring_group_locs: Optional[torch.Tensor] = None
     prefill_compressed_cu_seqlens: Optional[torch.Tensor] = None

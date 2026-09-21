@@ -1,19 +1,20 @@
 name: Pennyroyal container
 
 on:
+  release:
+    types: [published]
   push:
     branches:
       - 'john/pennyroyal-container-*'
   workflow_dispatch:
     inputs:
       promote_digest:
-        description: 'Tested image digest to tag; leave empty to build this source commit'
+        description: 'Optional checked image digest to tag without rebuilding'
         required: false
         type: string
       image_tag:
-        description: 'Release image tag (only used when promoting a tested digest)'
+        description: 'Image tag for digest promotion; otherwise select the release Git tag to rebuild'
         required: false
-        default: 'v2.5.0'
         type: string
 
 permissions:
@@ -36,14 +37,38 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Validate promotion request
-        if: inputs.promote_digest != ''
+          ref: ${{ github.sha }}
+      - name: Select source and image tag
+        id: image_meta
         env:
-          DIGEST: ${{ inputs.promote_digest }}
-          IMAGE_TAG: ${{ inputs.image_tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          PROMOTE_DIGEST: ${{ inputs.promote_digest }}
+          MANUAL_IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "$IMAGE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][a-zA-Z0-9]+)*$ ]]
+          revision="$(git rev-parse HEAD)"
+          image_tag=''
+          if [[ "$EVENT_NAME" == release ]]; then
+            image_tag="${RELEASE_TAG#pennyroyal-}"
+          elif [[ -n "$PROMOTE_DIGEST" ]]; then
+            [[ "$PROMOTE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ -n "$MANUAL_IMAGE_TAG" ]]
+            image_tag="$MANUAL_IMAGE_TAG"
+          elif [[ -n "$MANUAL_IMAGE_TAG" ]]; then
+            echo 'To rebuild a release, select its Git tag and leave the inputs empty.' >&2
+            exit 1
+          elif [[ "$REF_TYPE" == tag ]]; then
+            image_tag="${REF_NAME#pennyroyal-}"
+          fi
+          # Branch builds stay build-SHA only; published releases and manual
+          # tag retries get a version tag only after the image checks pass.
+          if [[ "$EVENT_NAME" == release || "$REF_TYPE" == tag || -n "$image_tag" ]]; then
+            [[ "$image_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][a-zA-Z0-9]+)*$ ]]
+            (( ${#image_tag} <= 128 ))
+          fi
+          printf 'revision=%s\nimage_tag=%s\n' "$revision" "$image_tag" >> "$GITHUB_OUTPUT"
       - name: Make room on the disposable build runner
         if: inputs.promote_digest == ''
         run: |
@@ -58,7 +83,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and upload an image for validation
+      - name: Build, check and upload image
         if: inputs.promote_digest == ''
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -67,9 +92,9 @@ jobs:
           file: docker/pennyroyal/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ${{ env.IMAGE }}:build-${{ github.sha }}
+          tags: ${{ env.IMAGE }}:build-${{ steps.image_meta.outputs.revision }}
           build-args: |
-            SOURCE_REVISION=${{ github.sha }}
+            SOURCE_REVISION=${{ steps.image_meta.outputs.revision }}
           # Reuse uploaded layers without storing CUDA wheels twice in a
           # separate exported build cache on the small hosted runner.
           cache-from: type=registry,ref=${{ env.IMAGE }}:build-cache
@@ -80,13 +105,14 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           docker buildx imagetools create --tag "$IMAGE:build-cache" "$IMAGE@$DIGEST"
-          echo "Image for GPU validation: $IMAGE@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
-          echo "No release tag is updated by the build job." >> "$GITHUB_STEP_SUMMARY"
-      - name: Tag the tested image without rebuilding
-        if: inputs.promote_digest != ''
+          echo "Built and CPU-checked image: $IMAGE@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          echo "GPU regression is performed separately; this job does not run model tests." >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish version tag without rebuilding
+        id: publish
+        if: steps.image_meta.outputs.image_tag != ''
         env:
-          DIGEST: ${{ inputs.promote_digest }}
-          IMAGE_TAG: ${{ inputs.image_tag }}
+          DIGEST: ${{ inputs.promote_digest || steps.build.outputs.digest }}
+          IMAGE_TAG: ${{ steps.image_meta.outputs.image_tag }}
         run: |
           docker buildx imagetools create --tag "$IMAGE:$IMAGE_TAG" "$IMAGE@$DIGEST"
-          echo "Published $IMAGE:$IMAGE_TAG from tested digest $DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          echo "Published $IMAGE:$IMAGE_TAG from checked digest $DIGEST" >> "$GITHUB_STEP_SUMMARY"
