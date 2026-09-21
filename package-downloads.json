@@ -1,5 +1,5 @@
 {
-  "collected_at": "2026-09-21T00:17:19Z",
+  "collected_at": "2026-09-21T04:55:25Z",
   "days": {
     "2026-09-16": {
       "collected_at": "2026-09-16T12:40:24Z",
@@ -205,16 +205,16 @@
       }
     },
     "2026-09-21": {
-      "collected_at": "2026-09-21T00:17:19Z",
-      "source_sha256": "8be4288f40edd77385b988d63fbb434426ea0c407ad87a31d05b593990dcc244",
-      "total_downloads": 968,
+      "collected_at": "2026-09-21T04:55:25Z",
+      "source_sha256": "a5256bd7a8e0e14674452bfdd8df52324740079f2d981f80adbd666add5b6d45",
+      "total_downloads": 989,
       "versions": {
         "1249423633": {
           "available": true,
           "digest": "sha256:2cd223e1c8640124cf88b1efb60207d869e8d1d8e8ee5e70d81d65ef65a9a985",
           "downloads": 8,
           "html_url": "https://github.com/users/jpezzulli/packages/container/sglang-rtxpro6000/1249423633",
-          "last_observed_at": "2026-09-21T00:17:19Z",
+          "last_observed_at": "2026-09-21T04:55:25Z",
           "tags": [
             "build-814db1461bf8baa86d9ce745ec672a84f0fd5311"
           ],
@@ -223,9 +223,9 @@
         "1249529601": {
           "available": true,
           "digest": "sha256:1d71b02dde64d3edb454fb6020b7b21bb32dee7ba0ddaacefbf9df6b266940d7",
-          "downloads": 134,
+          "downloads": 135,
           "html_url": "https://github.com/users/jpezzulli/packages/container/sglang-rtxpro6000/1249529601",
-          "last_observed_at": "2026-09-21T00:17:19Z",
+          "last_observed_at": "2026-09-21T04:55:25Z",
           "tags": [
             "build-b976bb329cfc1376b7d4589d55871f586d460ad4",
             "v2.5.0"
@@ -235,9 +235,9 @@
         "1258528724": {
           "available": true,
           "digest": "sha256:76258532b1c01f7583fbe951f90b80903db931030291db9db4e5a68b28567866",
-          "downloads": 290,
+          "downloads": 298,
           "html_url": "https://github.com/users/jpezzulli/packages/container/sglang-rtxpro6000/1258528724",
-          "last_observed_at": "2026-09-21T00:17:19Z",
+          "last_observed_at": "2026-09-21T04:55:25Z",
           "tags": [
             "build-2d6689abdac6f200091e9aa1ae65e95b86d9dd82",
             "build-cache",
