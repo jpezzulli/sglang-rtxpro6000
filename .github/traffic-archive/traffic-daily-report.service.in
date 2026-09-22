@@ -1,0 +1,7 @@
+[Unit]
+Description=Email daily Pennyroyal GitHub traffic report
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 @INSTALL_DIR@/traffic_daily_report.py --repository @REPOSITORY@ --recipient @RECIPIENT@
+TimeoutStartSec=3min

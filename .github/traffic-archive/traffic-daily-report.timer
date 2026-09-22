@@ -1,0 +1,11 @@
+[Unit]
+Description=Email Pennyroyal GitHub traffic report each morning
+
+[Timer]
+OnCalendar=*-*-* 06:15:00 America/New_York
+Persistent=true
+AccuracySec=1min
+Unit=traffic-daily-report.service
+
+[Install]
+WantedBy=timers.target
