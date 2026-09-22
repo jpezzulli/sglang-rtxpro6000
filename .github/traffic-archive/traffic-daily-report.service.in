@@ -3,5 +3,5 @@ Description=Email daily Pennyroyal GitHub traffic report
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 @INSTALL_DIR@/traffic_daily_report.py --repository @REPOSITORY@ --recipient @RECIPIENT@
+ExecStart=/usr/bin/bash -o pipefail -c 'report=$(/usr/sbin/runuser -u @OWNER@ -- /usr/bin/python3 @INSTALL_DIR@/traffic_daily_report.py --repository @REPOSITORY@) && printf "%s\\n" "$report" | /usr/bin/mail -s "Pennyroyal daily GitHub report" @RECIPIENT@'
 TimeoutStartSec=3min

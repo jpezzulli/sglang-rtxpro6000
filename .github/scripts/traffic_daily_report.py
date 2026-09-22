@@ -5,12 +5,10 @@ import base64
 import copy
 import datetime as dt
 import json
-import subprocess
 import sys
 from urllib.parse import quote
-from zoneinfo import ZoneInfo
 
-from traffic_watchdog import GitHub, UTC, now, required_cutoff, timestamp
+from traffic_watchdog import GitHub, now, required_cutoff, timestamp
 
 
 def require(condition, message):
@@ -216,22 +214,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--repository', required=True)
     parser.add_argument('--history-branch', default='traffic-history')
-    parser.add_argument('--recipient', required=True)
-    parser.add_argument('--timezone', default='America/New_York')
-    parser.add_argument('--mail-command', default='/usr/bin/mail')
-    parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
-    local_date = now().astimezone(ZoneInfo(args.timezone)).date().isoformat()
     body, _ = report(GitHub(args.repository, 'archive-traffic.yml'), args.history_branch)
-    subject = f'Pennyroyal daily GitHub report — {local_date}'
-    if args.dry_run:
-        print(body, end='')
-        return
-    result = subprocess.run([args.mail_command, '-s', subject, args.recipient], input=body,
-                            text=True, timeout=60, check=False)
-    if result.returncode:
-        raise RuntimeError(f'Mail sender failed with exit {result.returncode}')
-    print(f'Emailed daily traffic report for {local_date}', flush=True)
+    print(body, end='')
 
 
 if __name__ == '__main__':
