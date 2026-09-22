@@ -64,8 +64,8 @@ def version_links(text):
 def parse_index(body):
     text = body.decode('utf-8')
     require(f'ghcr.io/{PACKAGE_OWNER}/{PACKAGE_NAME}' in text, 'Wrong package page identity')
-    total = re.search(r'Total downloads</span>\s*<h3 title="([0-9,]+)">([0-9,]+)</h3>', text)
-    require(total and total.group(1) == total.group(2), 'Missing or inconsistent package total')
+    total = re.search(r'Total downloads</span>\s*<h3 title="([0-9,]+)">([^<]+)</h3>', text)
+    require(total and total.group(2).strip(), 'Missing or malformed package total')
     marker = '<h3 class="f5">Recent tagged image versions</h3>'
     require(marker in text, 'Missing recent tagged versions section')
     section = text.split(marker, 1)[1].split('<div data-view-component="true" class="Box-footer">', 1)[0]

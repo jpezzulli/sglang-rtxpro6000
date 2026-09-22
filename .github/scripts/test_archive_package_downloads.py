@@ -34,13 +34,15 @@ class PackageArchiveTests(unittest.TestCase):
         parsed = p.parse_index(index())
         self.assertEqual(parsed['total_downloads'], 189)
         self.assertEqual(parsed['versions']['1249529601']['downloads'], 78)
+        abbreviated_total = index(1047).replace(b'>1047</h3>', b'>1.05K</h3>')
+        self.assertEqual(p.parse_index(abbreviated_total)['total_downloads'], 1047)
         detail = p.parse_version(version(), '1249529601')
         self.assertEqual(detail['tags'], ['build-cache', 'v2.5.0'])
 
     def test_malformed_or_wrong_package_fails(self):
-        for body in [b'', index().replace(b'189</h3>', b'188</h3>'),
-                     index().replace(b'jpezzulli', b'someoneelse'),
-                     index().replace(b'title="189">189', b'title="1,,89">1,,89')]:
+        for body in [b'', index().replace(b'jpezzulli', b'someoneelse'),
+                     index().replace(b'title="189">189', b'title="1,,89">189'),
+                     index().replace(b'>189</h3>', b'></h3>')]:
             with self.subTest(body=body), self.assertRaises(p.ArchiveError):
                 p.parse_index(body)
 
