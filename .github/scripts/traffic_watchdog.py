@@ -126,11 +126,13 @@ class GitHub:
         return int(match.group(1)) if match else None
 
 
-def reconcile(github, state_dir, branch, wait_seconds=480, poll_seconds=15):
+def reconcile(github, state_dir, branch, wait_seconds=480, poll_seconds=15,
+              retry_retired_pending=False):
     pending_path = state_dir / 'pending.json'
     verified_path = state_dir / 'verified.json'
     archive = github.archive(branch)
     pending = load_json(pending_path)
+    can_retry_retired_pending = retry_retired_pending and pending is not None
     verified = load_json(verified_path)
     cutoff = required_cutoff(now())
     both_current = (timestamp(archive['collected_at']) >= cutoff and
@@ -139,6 +141,13 @@ def reconcile(github, state_dir, branch, wait_seconds=480, poll_seconds=15):
         print(f'Current: traffic collected {archive["collected_at"]}; package collected '
               f'{archive["package_collected_at"]}; through {archive["through_date"]}', flush=True)
         return
+
+    def retry_or_fail(message):
+        if can_retry_retired_pending:
+            # The daily job has no near-term timer tick. Once an old terminal
+            # reference is safely retired, make one fresh collection attempt now.
+            return reconcile(github, state_dir, branch, wait_seconds, poll_seconds)
+        raise RuntimeError(message)
 
     if pending is None:
         # Commissioning dispatches once even if a manual capture is already fresh,
@@ -165,6 +174,7 @@ def reconcile(github, state_dir, branch, wait_seconds=480, poll_seconds=15):
             # Clearing intent after 15 minutes bounds recovery from a failed dispatch.
             if now() - timestamp(pending['requested_at']) > dt.timedelta(minutes=15):
                 pending_path.unlink()
+                return retry_or_fail('Expired dispatch outcome; retrying collection')
             raise RuntimeError('Dispatch outcome unknown; waiting for run registration before retry')
         pending['run_id'] = max(candidates, key=lambda r: r['id'])['id']
         write_json(pending_path, pending)
@@ -180,18 +190,18 @@ def reconcile(github, state_dir, branch, wait_seconds=480, poll_seconds=15):
             if any(r['id'] == pending['run_id'] for r in listed):
                 raise RuntimeError('Pending run lookup and Actions listing disagree; retry later')
             pending_path.unlink()
-            raise RuntimeError('Pending workflow run no longer exists; retry on next timer tick') from None
+            return retry_or_fail('Pending workflow run no longer exists; retrying collection')
         if run['status'] == 'completed':
             if run['conclusion'] != 'success':
                 pending_path.unlink()
-                raise RuntimeError(f'Traffic run {run["id"]} ended {run["conclusion"]}; retry on next timer tick')
+                return retry_or_fail(f'Traffic run {run["id"]} ended {run["conclusion"]}; retrying collection')
             archive = github.archive(branch)
             required = max(timestamp(pending['requested_at']), required_cutoff(now()))
             if (timestamp(archive['collected_at']) < required or
                     timestamp(archive['package_collected_at']) < required):
                 pending_path.unlink()
-                raise RuntimeError(
-                    f'Traffic run {run["id"]} succeeded without fresh traffic and package archives')
+                return retry_or_fail(
+                    f'Traffic run {run["id"]} succeeded without fresh traffic and package archives; retrying collection')
             write_json(verified_path, {'verified_at': now().isoformat(), 'run_id': run['id'],
                                       'run_url': run['html_url'], 'archive': archive})
             pending_path.unlink()
@@ -211,6 +221,8 @@ def main():
     parser.add_argument('--workflow', default='archive-traffic.yml')
     parser.add_argument('--history-branch', default='traffic-history')
     parser.add_argument('--state-dir', type=Path, required=True)
+    parser.add_argument('--fail-if-locked', action='store_true')
+    parser.add_argument('--retry-retired-pending', action='store_true')
     args = parser.parse_args()
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', args.repository):
         raise RuntimeError('Invalid owner/repository')
@@ -220,8 +232,11 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             print('Another traffic watchdog invocation is active', flush=True)
+            if args.fail_if_locked:
+                raise RuntimeError('Another traffic watchdog invocation is active')
             return
-        reconcile(GitHub(args.repository, args.workflow), args.state_dir, args.history_branch)
+        reconcile(GitHub(args.repository, args.workflow), args.state_dir, args.history_branch,
+                  retry_retired_pending=args.retry_retired_pending)
 
 
 if __name__ == '__main__':

@@ -141,27 +141,20 @@ although the workflow was active on the correct default branch. Manual dispatch
 continued to succeed. The underlying GitHub scheduler cause is unconfirmed;
 manual success alone does not verify GitHub's schedule delivery.
 
-Thegrid therefore runs `traffic-archive-watchdog.timer` as `mrkaos`, independently
-of Codex, Neomatrix, and any interactive session. User lingering was already enabled.
-The timer starts a check 30 seconds after activation and at minutes **17 and 47
-of every UTC hour**, with `Persistent=true` for calendar catch-up after downtime.
-The target is one capture at or after **00:17 UTC each day**. Fresh days perform
-only read-only API checks; this does not make twice-hourly archive commits.
-The first activation commissions one real workflow run even if a manual capture
-is already fresh, proving that unattended credentials and execution work.
+Thegrid runs one `traffic-daily-report.timer` job at **06:15 America/New_York**.
+It first invokes the watchdog as `mrkaos`, then emails the report only after the
+watchdog verifies fresh traffic and package archives. User lingering was already
+enabled, and `Persistent=true` catches up after downtime. A fresh archive requires
+a capture at or after **00:17 UTC**; otherwise the watchdog dispatches the existing
+GitHub workflow, waits for completion, and verifies its writes before the email step.
 
 The watchdog dispatches the existing GitHub workflow if either repository traffic
-or package-download collection is overdue.
-It adopts a queued/running collector instead of dispatching another, waits up to
-eight minutes, and verifies workflow success plus fresh `daily.json` and
-`package-downloads.json` on `traffic-history`. A still-pending run is resumed on
-the next timer tick. If a pending run was
-deleted, a confirmed HTTP 404 plus a successful run listing retires that reference
-so recovery can proceed; authentication errors never clear pending state. Failed
-runs or transport/authentication failures leave history untouched, mark the local
-service failed, and are retried on later timer ticks. Ambiguous dispatch responses
-are reconciled against GitHub run history before another dispatch is attempted.
-The existing GitHub workflow concurrency group serializes all collectors.
+or package-download collection is overdue. It adopts a queued/running collector
+instead of dispatching another, waits up to eight minutes, and verifies workflow
+success plus fresh `daily.json` and `package-downloads.json` on `traffic-history`.
+Authentication, transport, archive, or workflow failures leave history untouched,
+skip the email, and mark the single daily service failed for the existing journal
+alert path. The existing GitHub workflow concurrency group serializes collectors.
 
 The watchdog reuses the operator's `gh` login directly and does not copy or print
 a credential. It makes no Git clone/fetch requests and never writes history
@@ -172,21 +165,28 @@ Both schedulers still depend on GitHub API/Actions availability; recovery resume
 when the service is available. A thegrid outage is caught up after user-manager
 startup; data absent from GitHub's retention window cannot be reconstructed.
 
+The report uses the existing host `mail` → `msmtp` sender. It keeps no local
+report state or report history; it reads GitHub at send time. Its report includes
+adoption/package deltas, launch totals, daily and rolling traffic, referrers and
+popular paths. Daily unique sums are labeled honestly and never presented as a
+deduplicated lifetime-person count.
+
 Installed locations:
 
 - `/opt/sglang/traffic-archive/traffic_watchdog.py`: deployed watchdog.
 - `/opt/sglang/traffic-archive/state/verified.json`: last run verified by watchdog.
 - `/opt/sglang/traffic-archive/state/pending.json`: in-flight dispatch, when present.
-- `~/.config/systemd/user/traffic-archive-watchdog.{service,timer}`: user units.
-- `.github/traffic-archive/`: portable unit templates; substitute `@INSTALL_DIR@`
-  and `@REPOSITORY@` in the service template during installation.
+- `~/.config/systemd/user/traffic-archive-watchdog.service`: callable archive verifier.
+- `~/.config/systemd/user/traffic-daily-report.{service,timer}`: daily verify-then-email job.
+- `.github/traffic-archive/`: portable unit templates; substitute `@INSTALL_DIR@`,
+  `@REPOSITORY@`, and `@RECIPIENT@` in the daily-report service template during installation.
 
 Inspect without changing anything:
 
 ```sh
-systemctl --user list-timers traffic-archive-watchdog.timer
-systemctl --user status traffic-archive-watchdog.service
-journalctl --user -u traffic-archive-watchdog.service --since today
+systemctl --user list-timers traffic-daily-report.timer
+systemctl --user status traffic-daily-report.service
+journalctl --user -u traffic-daily-report.service --since today
 cat /opt/sglang/traffic-archive/state/verified.json
 ```
 

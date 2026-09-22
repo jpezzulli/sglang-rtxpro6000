@@ -1,6 +1,7 @@
 import datetime as dt
 import importlib.util
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -77,6 +78,14 @@ class WatchdogTests(unittest.TestCase):
         g = FakeGitHub(T.isoformat())
         w.reconcile(g, self.state, 'traffic-history')
         self.assertEqual(g.dispatch_count, 0)
+
+    def test_daily_chain_fails_if_another_watchdog_holds_the_lock(self):
+        args = ['traffic_watchdog.py', '--repository', 'jpezzulli/sglang-rtxpro6000',
+                '--state-dir', str(self.state), '--fail-if-locked']
+        with patch.object(sys, 'argv', args), \
+             patch.object(w.fcntl, 'flock', side_effect=BlockingIOError):
+            with self.assertRaises(RuntimeError):
+                w.main()
 
     def test_same_day_pre_deadline_capture_does_not_suppress_due_run(self):
         self.verified()
@@ -158,6 +167,29 @@ class WatchdogTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):w.reconcile(g, self.state, 'traffic-history')
         self.assertFalse((self.state / 'pending.json').exists())
         w.reconcile(g, self.state, 'traffic-history')
+        self.assertEqual(g.dispatch_count, 1)
+
+    def test_daily_job_retries_retired_terminal_run_immediately(self):
+        g = FakeGitHub()
+        w.write_json(self.state / 'pending.json',
+                     {'run_id': 77, 'requested_at': (T-dt.timedelta(days=1)).isoformat()})
+        original_run = g.run
+        def run(run_id):
+            if run_id == 77:
+                return {'id': 77, 'status': 'completed', 'conclusion': 'failure',
+                        'html_url': 'https://github.com/test/repo/actions/runs/77'}
+            return original_run(run_id)
+        g.run = run
+        w.reconcile(g, self.state, 'traffic-history', wait_seconds=0,
+                    retry_retired_pending=True)
+        self.assertEqual(g.dispatch_count, 1)
+        self.assertEqual(w.load_json(self.state / 'verified.json')['run_id'], 123)
+
+    def test_daily_job_does_not_retry_its_own_failed_dispatch(self):
+        g = FakeGitHub(conclusion='failure')
+        with self.assertRaises(RuntimeError):
+            w.reconcile(g, self.state, 'traffic-history', wait_seconds=0,
+                        retry_retired_pending=True)
         self.assertEqual(g.dispatch_count, 1)
 
     def test_lookup_authentication_failure_keeps_pending(self):

@@ -3,5 +3,5 @@ Description=Email daily Pennyroyal GitHub traffic report
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 @INSTALL_DIR@/traffic_daily_report.py --repository @REPOSITORY@ --recipient @RECIPIENT@
-TimeoutStartSec=3min
+ExecStart=/usr/bin/bash -o pipefail -c '/usr/bin/python3 @INSTALL_DIR@/traffic_watchdog.py --fail-if-locked --retry-retired-pending --repository @REPOSITORY@ --state-dir @INSTALL_DIR@/state && /usr/bin/python3 @INSTALL_DIR@/traffic_daily_report.py --repository @REPOSITORY@ --recipient @RECIPIENT@'
+TimeoutStartSec=15min
