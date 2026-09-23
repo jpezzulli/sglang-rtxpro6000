@@ -1,6 +1,7 @@
 """Inference-only Qwen4-Exp (text + VL) on the Qwen3.5 backbone."""
 
 import math
+import mmap
 from contextlib import nullcontext
 from typing import Any, Iterable, Optional, Set, Tuple
 
@@ -488,20 +489,31 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             and get_attention_dp_size() > 1
             and not self.use_attn_tp_ngram
         )
-        self.ngram_embedding = VocabParallelEmbedding(
-            padded_vocab_size,
-            self.head_dim_per_ngram,
-            params_dtype=(
-                torch.float8_e4m3fn
-                if (quant_config is not None and quant_config.get_name() == "fp8")
-                or getattr(config, "ple_embedding_dtype", None) == "float8_e4m3fn"
-                else torch.bfloat16
-            ),
-            output_dtype=torch.bfloat16,
-            use_attn_tp_group=self.use_attn_tp_ngram,
-        )
-        self.ngram_embedding.register_buffer(
+        offload_embedding = bool(config.ple_offload_embedding)
+        # The offloaded table is consumed for its metadata only, so build the
+        # template on meta: the pinned host table becomes its first and only
+        # allocation instead of a transient per-rank device shard (sgl-project/sglang#39841).
+        with torch.device("meta") if offload_embedding else nullcontext():
+            ngram_embedding = VocabParallelEmbedding(
+                padded_vocab_size,
+                self.head_dim_per_ngram,
+                params_dtype=(
+                    torch.float8_e4m3fn
+                    if (quant_config is not None and quant_config.get_name() == "fp8")
+                    or getattr(config, "ple_embedding_dtype", None) == "float8_e4m3fn"
+                    else torch.bfloat16
+                ),
+                output_dtype=torch.bfloat16,
+                use_attn_tp_group=self.use_attn_tp_ngram,
+            )
+        # The scale is tiny; keep it on the real device with the model.
+        ngram_embedding.register_buffer(
             "weight_scale", torch.ones(1, dtype=torch.bfloat16), persistent=True
+        )
+        self.ngram_embedding = (
+            Qwen4ExpPinnedHostEmbedding(ngram_embedding)
+            if offload_embedding
+            else ngram_embedding
         )
 
     @classmethod
@@ -750,11 +762,49 @@ def _gather_ple_embedding_from_pinned_kernel(
     )
 
 
+# Pinned PLE tables live as long as the process (like the model weights), so
+# their mappings stay registered here and are never unmapped.
+_PINNED_TABLE_BUFFERS: list = []
+_CUDA_HOST_REGISTER_PORTABLE_MAPPED = 0x01 | 0x02
+
+
+def _allocate_pinned_table(shape: Tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+    """Page-locked host tensor that locks exactly ``shape``/``dtype`` bytes.
+
+    ``torch.empty(..., pin_memory=True)`` goes through the caching host
+    allocator, which rounds the request up to the next power of two; the
+    47.68 GiB fp8 Flash-Next table would lock 64 GiB (a bf16 table 128 GiB)
+    of unreclaimable host memory (sgl-project/sglang#40626). Map anonymous
+    memory of the exact size and register it with CUDA instead; the result is
+    pinned and device-accessible through the same host-pointer semantics the
+    Triton gathers already rely on.
+    """
+    shape = tuple(int(d) for d in shape)
+    nbytes = math.prod(shape) * torch.empty(0, dtype=dtype).element_size()
+    if nbytes == 0:
+        return torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True)
+    buf = mmap.mmap(-1, nbytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+    raw = torch.frombuffer(buf, dtype=torch.uint8)
+    try:
+        err = torch.cuda.cudart().cudaHostRegister(
+            raw.data_ptr(), nbytes, _CUDA_HOST_REGISTER_PORTABLE_MAPPED
+        )
+        if int(err) != 0:
+            raise RuntimeError(f"cudaHostRegister failed: {err}")
+    except Exception:
+        buf.close()
+        raise
+    _PINNED_TABLE_BUFFERS.append(buf)
+    return raw.view(dtype).view(shape)
+
+
 class Qwen4ExpPinnedHostEmbedding(VocabParallelEmbedding):
     """PLE table read directly from pinned host memory.
 
     The table stays in its checkpoint storage dtype (fp8 with a per-tensor
     weight_scale for fp8 checkpoints, bf16 otherwise); gathers emit bf16.
+
+    The source weight may be on the meta device; only its metadata is used.
     """
 
     _COPIED_ATTRIBUTES = (
@@ -798,21 +848,23 @@ class Qwen4ExpPinnedHostEmbedding(VocabParallelEmbedding):
         self.quant_method = None
 
         source_weight = embedding.weight
-        cpu_weight = nn.Parameter(
-            torch.empty(
-                source_weight.shape,
-                dtype=source_weight.dtype,
-                device="cpu",
-                pin_memory=True,
-            ),
-            requires_grad=False,
-        )
+        try:
+            cpu_weight = nn.Parameter(
+                _allocate_pinned_table(source_weight.shape, source_weight.dtype),
+                requires_grad=False,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "unable to page-lock the PLE host table "
+                f"{tuple(source_weight.shape)}/{source_weight.dtype}: {exc}"
+            ) from exc
         for name, value in vars(source_weight).items():
             setattr(cpu_weight, name, value)
         cpu_weight.weight_loader = self.weight_loader
         self.register_parameter("weight", cpu_weight)
         # The scale is tiny; keep it with the model instead of offloading it
-        # with the table.
+        # with the table. The template always registers it outside the meta
+        # construction, so it carries real values already.
         self.register_buffer("weight_scale", embedding.weight_scale, persistent=True)
         del embedding.weight
         self._block_d = triton.next_power_of_2(self.embedding_dim)
@@ -894,10 +946,6 @@ class Qwen4ExpPLELayer(nn.Module):
             ple_layer_index=ple_layer_index,
             quant_config=quant_config,
         )
-        if config.ple_offload_embedding:
-            self.ple_embedding.ngram_embedding = Qwen4ExpPinnedHostEmbedding(
-                self.ple_embedding.ngram_embedding
-            )
         self.short_conv_dilation = self.ple_embedding.ngram_size
         self.short_conv_state_len = (
             self.conv_kernel_size - 1
