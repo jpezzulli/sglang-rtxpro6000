@@ -2,14 +2,14 @@
 
 Package: [`ghcr.io/jpezzulli/sglang-rtxpro6000`](https://github.com/users/jpezzulli/packages/container/package/sglang-rtxpro6000).
 Published: **2026-09-15**. First captured: **2026-09-16T12:21:06Z**.
-Latest capture: **2026-09-23T04:44:58Z**.
+Latest capture: **2026-09-24T04:50:22Z**.
 
 | Metric | Latest reported | Change from previous archived day |
 | --- | ---: | ---: |
-| Package total downloads | 1,149 | +85 |
-| Version `build-814db1461bf8baa86d9ce745ec672a84f0fd5311` | 9 | +1 |
-| Version `build-b976bb329cfc1376b7d4589d55871f586d460ad4`, `v2.5.0` | 142 | +6 |
-| Version `build-2d6689abdac6f200091e9aa1ae65e95b86d9dd82`, `build-cache`, `v2.5.1` | 363 | +34 |
+| Package total downloads | 1,275 | +126 |
+| Version `build-814db1461bf8baa86d9ce745ec672a84f0fd5311` | 10 | +1 |
+| Version `build-b976bb329cfc1376b7d4589d55871f586d460ad4`, `v2.5.0` | 150 | +8 |
+| Version `build-2d6689abdac6f200091e9aa1ae65e95b86d9dd82`, `build-cache`, `v2.5.1` | 407 | +44 |
 
 These are GitHub package download counters, not unique users, successful installations, or repository clones. Container clients may fetch an index, platform manifests, and layers; builds and tests can also contribute downloads.
 
@@ -25,5 +25,6 @@ These are GitHub package download counters, not unique users, successful install
 | 2026-09-21 | 2026-09-21T04:55:25Z | 989 | +152 |
 | 2026-09-22 | 2026-09-22T04:55:59Z | 1,064 | +75 |
 | 2026-09-23 | 2026-09-23T04:44:58Z | 1,149 | +85 |
+| 2026-09-24 | 2026-09-24T04:50:22Z | 1,275 | +126 |
 
 GitHub exposes these counters on the public package pages. Its documented Packages REST responses provide package/version metadata but do not include download counters, so this collector validates and archives the public HTML representation. A markup change fails the package step loudly; the preceding repository-traffic step remains safely committed.
