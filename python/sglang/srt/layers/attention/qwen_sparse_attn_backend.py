@@ -1624,26 +1624,29 @@ class QwenSparseAttnBackend(AttentionBackend):
         v_buffer = pool.get_value_buffer(layer.layer_id)
         req_to_token = self.req_to_token_pool.req_to_token
         req_indices = forward_batch.req_pool_indices.tolist()
-        k_parts = [
-            k_buffer.index_select(
-                0, req_to_token[req_indices[i], : sequence_lens[i]].long()
-            )
+        # Join the gather INDICES, not the gathered K/V.  An index row is 8 B
+        # per token; a K (or V) row is tp_kv_head_num * head_dim bytes.  Gathering
+        # per request and then torch.cat-ing the results materialised a SECOND
+        # full-context copy of each of K and V purely to concatenate it, so this
+        # path peaked at 4x the packed size instead of 2x.  One index_select over
+        # the joined index produces the same packed tensor directly, and the
+        # length-1 case -- every request under --max-running-requests 1 -- stops
+        # paying the cat copy torch.cat allocates even for a one-element list.
+        gather_index = [
+            req_to_token[req_indices[i], : sequence_lens[i]].long()
             for i in range(len(sequence_lens))
         ]
-        v_parts = [
-            v_buffer.index_select(
-                0, req_to_token[req_indices[i], : sequence_lens[i]].long()
-            )
-            for i in range(len(sequence_lens))
-        ]
+        gather_index = (
+            gather_index[0] if len(gather_index) == 1 else torch.cat(gather_index)
+        )
         sequence_lens_tensor = torch.tensor(
             sequence_lens, dtype=torch.int32, device=q.device
         )
         cu_seqlens_k = F.pad(sequence_lens_tensor.cumsum(0), (1, 0)).contiguous()
         output = sparse_gqa_fwd_interface_triton_ck(
             q.contiguous(),
-            torch.cat(k_parts),
-            torch.cat(v_parts),
+            k_buffer.index_select(0, gather_index),
+            v_buffer.index_select(0, gather_index),
             topk_indices,
             cu_seqlens_q,
             cu_seqlens_k,
