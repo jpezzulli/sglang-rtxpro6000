@@ -1,6 +1,7 @@
 import logging
+import math
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from sglang.srt.environ import envs
 from sglang.srt.mem_cache.storage.nixl.nixl_routing import (
@@ -16,7 +17,26 @@ _SGLANG_NIXL_CONFIG_KEYS = {
     "l3_cleaner_enabled",
     "l3_cleaner_high_watermark",
     "l3_cleaner_low_watermark",
+    "l3_cleaner_max_cache_gb",
 }
+
+
+def _parse_max_cache_gb(value: Any, source: str) -> float:
+    """Parse a cache byte budget in GiB, failing clearly on unusable values."""
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f"{source} must be a number of GiB, got {value!r}")
+    try:
+        gib = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{source} must be a number of GiB, got {value!r}") from None
+    if not math.isfinite(gib):
+        raise ValueError(f"{source} must be a finite number of GiB, got {value!r}")
+    if gib < 0:
+        raise ValueError(
+            f"{source} must be >= 0 (0 disables the cache byte budget), "
+            f"got {value!r}"
+        )
+    return gib
 
 
 class NixlBackendConfig:
@@ -52,6 +72,7 @@ class NixlBackendConfig:
             "enabled": True,
             "high_watermark": 80.0,
             "low_watermark": 70.0,
+            "max_cache_gb": 0.0,
         }
         if "l3_cleaner_enabled" in self.config:
             enabled = self.config["l3_cleaner_enabled"]
@@ -65,6 +86,19 @@ class NixlBackendConfig:
         for raw_key, (cleaner_key, parser) in key_map.items():
             if raw_key in self.config:
                 config[cleaner_key] = parser(self.config[raw_key])
+        # Optional cache-owned byte budget in GiB (0/unset disables the quota).
+        # The top-level NIXL config key wins over
+        # SGLANG_HICACHE_NIXL_MAX_CACHE_GB, matching how use_direct_io combines
+        # the two sources. Callers convert GiB to bytes.
+        if "l3_cleaner_max_cache_gb" in self.config:
+            config["max_cache_gb"] = _parse_max_cache_gb(
+                self.config["l3_cleaner_max_cache_gb"], "l3_cleaner_max_cache_gb"
+            )
+        else:
+            env_field = envs.SGLANG_HICACHE_NIXL_MAX_CACHE_GB
+            env_value = env_field.get()
+            if env_value is not None:
+                config["max_cache_gb"] = _parse_max_cache_gb(env_value, env_field.name)
         return config
 
     def get_specified_plugin(self) -> str:

@@ -714,6 +714,11 @@ class Envs:
     # Disable with SGLANG_HICACHE_NIXL_USE_DIRECT_IO=0 or via the
     # "use_direct_io": false key in --hicache-storage-backend-extra-config.
     SGLANG_HICACHE_NIXL_USE_DIRECT_IO = EnvBool(True)
+    # Optional soft byte budget (GiB) for the NIXL FILE cache's configured
+    # storage dirs, enforced by the L3 cleaner alongside disk watermarks.
+    # 0/unset disables the quota; the top-level "l3_cleaner_max_cache_gb" key in
+    # --hicache-storage-backend-extra-config overrides this.
+    SGLANG_HICACHE_NIXL_MAX_CACHE_GB = EnvStr(None)
     SGLANG_HUGEPAGE_SIZE = EnvStr("")
 
     # ===================================================================
