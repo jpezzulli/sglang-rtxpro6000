@@ -8,10 +8,11 @@ This repository contains the complete SGLang-derived source used on one
 NVIDIA RTX PRO 6000 Blackwell Workstation Edition (96 GB, SM120, TP=1). Both
 model configurations run from the same patched source.
 
-**Get running:** [Prebuilt Docker image](docker/pennyroyal/README.md) ·
-[Build SGLang on SM120](BUILD.md) ·
-[Choose a model](#qualified-model-profiles-and-launch-recipes) ·
-[Run Qwen3.8](RUN.md).
+**Get running:** [Use the prebuilt container](docker/pennyroyal/README.md)
+for the shortest setup, or [build and install natively](BUILD.md).
+Both paths support the two model profiles below.
+An optional terminal setup utility walks through your model, GPU, and cache
+settings; manual configuration remains available.
 
 Using an AI assistant to set this up? Give it [llms.txt](llms.txt)
 for the short setup map and links to the detailed instructions.

@@ -9,6 +9,34 @@ Build the release with [BUILD.md](BUILD.md) first. Container users should
 follow the separate [Docker and Compose guide](docker/pennyroyal/README.md).
 Pennyroyal does not include a native systemd service file.
 
+## Configure and run
+
+After building Pennyroyal and downloading your model, run this from the checkout:
+
+```bash
+./configure-penny --native
+./run-penny --check
+./run-penny
+```
+
+Setup asks for the model, cache locations, and GPU, then shows your choices
+before saving. Next needs one target checkpoint; 27B also needs its DFlash2
+draft. Leave advanced settings alone to use the normal recipe defaults.
+Create any missing cache directories shown by the check before starting.
+
+Settings are saved in `~/.config/pennyroyal/pennyroyal.env`. Rerun setup to
+change them, or edit the file directly. `./run-penny --show-config` shows the
+selected configuration without loading a model. For separate saved profiles,
+pass `--config /absolute/path/to/next.env` to both setup and launch.
+
+The setup utility needs Python 3 but no model packages or GPU to validate
+configuration. It does not install dependencies, download models, start the
+server, or delete caches. The normal launcher still checks the runtime and
+checkpoint when starting. Stop and restart the server to apply changes.
+
+Prefer shell exports or an existing service? The direct launchers below still
+work; the setup utility is optional.
+
 ## Common setup
 
 Set the repository, compiler-cache, and persistent-cache roots. The launchers
@@ -209,6 +237,19 @@ For 27B, confirm:
 [BACKENDS.md](BACKENDS.md) maps each resolved implementation and its evidence.
 
 ## Distinguish cache paths
+
+### Limit NIXL disk use
+
+Set `SGLANG_HICACHE_NIXL_MAX_CACHE_GB=200` in your saved config, Compose `.env`,
+or environment before launching to give the active NIXL cache a 200 GiB
+budget. The setup utility asks about this too. Zero or unset disables it.
+
+This is a periodic cleanup target, not a hard disk quota: writes can briefly
+exceed it, and cleanup aims for 90% of the budget. Existing filesystem-space
+watermarks still apply. It covers the active cache namespace, not old caches
+left by other versions or configurations. No model files are removed.
+
+### Cache reuse
 
 - **Cold prefill:** no matching GPU radix prefix and no matching NIXL object;
   logs show most tokens as newly computed.

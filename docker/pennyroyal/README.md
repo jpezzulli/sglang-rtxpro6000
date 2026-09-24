@@ -53,16 +53,47 @@ Get the matching launch and Compose files from the release tag:
 ```bash
 git clone --depth 1 --branch pennyroyal-v2.5.1 \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
-cd pennyroyal/docker/pennyroyal
-cp .env.example .env
+cd pennyroyal
 ```
 
 This checkout supplies configuration and documentation; Docker pulls the
 prebuilt image; no local SGLang build is involved.
 
+## Guided setup
+
+If Python 3 is available on the host, run:
+
+```bash
+./configure-penny --container
+./configure-penny --container --check
+```
+
+Choose Next or 27B, enter your model and cache paths, and review the settings
+before saving. The utility writes `docker/pennyroyal/.env`; it does not install
+or start anything. Model paths inside the container begin with `/models`.
+For example, `/srv/models/MyModel` on the host becomes `/models/MyModel` when
+`HOST_MODELS_ROOT=/srv/models`.
+
+Create the cache directories shown by the check, with the configured UID/GID,
+then run the launch command printed by setup. That command includes the
+selected configuration and can be run from any directory. Rerun setup to
+change settings; stop and recreate the container to apply them.
+
+Next needs one target checkpoint. The 27B profile also needs its DFlash2 draft.
+The NIXL size budget is optional and measured in GiB; see
+[what the budget covers](../../RUN.md#limit-nixl-disk-use).
+
+Prefer to edit the configuration yourself? Use the manual path below. No host
+Python is needed for manual Compose setup.
+
 <a id="profiles-and-checks"></a>
 
-## Choose a profile and configure `.env`
+## Manual setup
+
+```bash
+cd docker/pennyroyal
+cp .env.example .env
+```
 
 Set `PENNYROYAL_PROFILE` in `.env` to one of:
 
@@ -110,9 +141,12 @@ sudo install -d -o 1000 -g 1000 \
 
 ## Start and verify
 
-Pull the image and start in the background:
+For manual setup, run these from `docker/pennyroyal`. Normal Compose rules
+apply: exported shell variables take precedence over `.env`; unset conflicting
+exports if you want to use the saved values.
 
 ```bash
+docker compose config --quiet
 docker compose pull
 docker compose up -d
 docker compose logs -f pennyroyal
@@ -124,8 +158,15 @@ start period. Configuration errors stop the container without entering a
 restart loop.
 
 The API is published at `http://localhost:8001/v1` by default. After the log
-reports readiness, use the health and chat requests in
-[`RUN.md`](../../RUN.md#smoke-through-the-normal-api).
+reports readiness, check it with:
+
+```bash
+curl -fsS http://127.0.0.1:8001/health
+```
+
+Use `pennyroyal` as the model name in your client. A
+[sample chat request](../../RUN.md#smoke-through-the-normal-api) is available
+if you want to try the API directly.
 
 Inspect or stop the service with:
 

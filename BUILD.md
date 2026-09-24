@@ -39,16 +39,7 @@ source .venv/bin/activate
 uv pip install pip "setuptools>=61.0" "setuptools-rust>=1.10" \
   "setuptools-scm>=8.0" wheel build
 
-export CUDA_HOME=/usr/local/cuda CUDACXX=/usr/local/cuda/bin/nvcc
-export CC=/usr/bin/gcc-15 CXX=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15
-export TORCH_CUDA_ARCH_LIST=12.0
-export PENNY_BUILD_JOBS="${PENNY_BUILD_JOBS:-4}"
-export MAX_JOBS="${MAX_JOBS:-$PENNY_BUILD_JOBS}"
-export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$PENNY_BUILD_JOBS}"
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$PENNY_BUILD_JOBS}"
-export FLASHINFER_NINJA_JOBS="${FLASHINFER_NINJA_JOBS:-$PENNY_BUILD_JOBS}"
-export FLASHINFER_NVCC_THREADS="${FLASHINFER_NVCC_THREADS:-1}"
-export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-$PENNY_BUILD_JOBS}"
+source scripts/pennyroyal/build-env.sh
 
 uv pip install --prerelease=allow --index-strategy unsafe-best-match \
   --extra-index-url https://docs.sglang.ai/whl/cu130/ \
@@ -60,7 +51,9 @@ checkout in place while using this environment.
 
 Next, complete [NIXL POSIX](#nixl-posix) if it is not already installed,
 [download your checkpoints](#reference-and-measured-checkpoints), then follow
-[RUN.md](RUN.md) to choose a launcher.
+[RUN.md](RUN.md#configure-and-run) to save your settings and start the server.
+The build helper uses four parallel jobs by default. Set `PENNY_BUILD_JOBS`
+before sourcing it to change that; compiler paths can also be overridden.
 
 ## Update an existing install
 
@@ -76,16 +69,7 @@ git fetch origin tag pennyroyal-v2.5.1
 git switch --detach pennyroyal-v2.5.1
 source .venv/bin/activate
 
-export CUDA_HOME=/usr/local/cuda CUDACXX=/usr/local/cuda/bin/nvcc
-export CC=/usr/bin/gcc-15 CXX=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15
-export TORCH_CUDA_ARCH_LIST=12.0
-export PENNY_BUILD_JOBS="${PENNY_BUILD_JOBS:-4}"
-export MAX_JOBS="${MAX_JOBS:-$PENNY_BUILD_JOBS}"
-export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$PENNY_BUILD_JOBS}"
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$PENNY_BUILD_JOBS}"
-export FLASHINFER_NINJA_JOBS="${FLASHINFER_NINJA_JOBS:-$PENNY_BUILD_JOBS}"
-export FLASHINFER_NVCC_THREADS="${FLASHINFER_NVCC_THREADS:-1}"
-export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-$PENNY_BUILD_JOBS}"
+source scripts/pennyroyal/build-env.sh
 
 uv pip install --no-build-isolation --no-deps -e python
 ```
