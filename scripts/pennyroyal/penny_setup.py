@@ -78,19 +78,52 @@ class Prompt:
             except pc.ConfigError as exc:
                 self.say(f"  {exc}")
 
+    def choose(self, label: str, options: list[tuple[str, str]],
+               default: str = "", accept: Optional[dict[str, str]] = None,
+               manual: Optional[tuple[str, str]] = None) -> str:
+        """Numbered menu, printed BEFORE the question.
+
+        options are (value, display); manual is one more (value, display) the
+        caller interprets as a free-text entry (it returns that value). Enter
+        keeps the current/default value, 'q' or EOF cancels, a number or the
+        choice's own text selects, and anything else is re-asked.
+        """
+        items = list(options) + ([manual] if manual else [])
+        self.say(label + ":")
+        for number, (_, display) in enumerate(items, start=1):
+            self.say(f"  [{number}] {display}")
+        keep = "Enter keeps the default"
+        for number, (value, _) in enumerate(items, start=1):
+            if value == default:
+                keep = f"Enter keeps [{number}] {value}"
+                break
+        else:
+            if default:
+                keep = f"Enter keeps the current value ({default})"
+        while True:
+            answer = self._read(f"  Choice ({keep}, 'q' cancels): ").lower()
+            if not answer:
+                return default
+            if answer.isdigit() and 1 <= int(answer) <= len(items):
+                return items[int(answer) - 1][0]
+            for value, _ in items:
+                if answer == value.lower():
+                    return value
+            hit = (accept or {}).get(answer)
+            if hit is not None:
+                return hit
+            self.say("  Pick one of the listed numbers, or Enter for the "
+                     "default; 'q' cancels without saving.")
+
     def confirm(self, label: str, default: bool = True) -> bool:
         if self.assume_yes:
             return True
-        suffix = "[Y/n]" if default else "[y/N]"
-        while True:
-            answer = self._read(f"{label} {suffix}: ").lower()
-            if not answer:
-                return default
-            if answer in pc.TRUE_VALUES + ("y",):
-                return True
-            if answer in pc.FALSE_VALUES + ("n",):
-                return False
-            self.say("  Answer yes or no.")
+        answer = self.choose(
+            label, [("yes", "yes"), ("no", "no")],
+            default="yes" if default else "no",
+            accept={word: "yes" for word in pc.TRUE_VALUES + ("y", "yes")}
+                   | {word: "no" for word in pc.FALSE_VALUES + ("n", "no")})
+        return answer == "yes"
 
 
 # Prompt order for the wizard: basic section first, advanced on request.
@@ -119,15 +152,115 @@ def ordered_names(mode: str, advanced: bool = False) -> list[str]:
     return names
 
 
+# Sentinel choose() returns for its manual-entry row; the caller then asks
+# free text. Values like these never collide with real settings.
+_MANUAL = "__manual__"
+
+
+def _ask_cuda_id(prompt: Prompt, spec: pc.KeySpec, default: str) -> str:
+    """The 'another GPU' row: ask the LOGICAL CUDA index as a bare number.
+
+    The saved value is still a cuda:N string, but typing 'cuda:N' invites the
+    mistake this whole screen guards against: a host GPU index (what nvidia-smi
+    lists) is not the CUDA id once CUDA_VISIBLE_DEVICES restricts the view, and
+    this setup never maps one to the other. 'q'/EOF still cancels via _read.
+    """
+    shown = default.removeprefix("cuda:") if default.startswith("cuda:") else ""
+    while True:
+        answer = prompt.ask(
+            "  logical CUDA index of that GPU (a number, e.g. 1 — NOT the "
+            "host GPU index; this setup does not map between them)",
+            default=shown)
+        text = answer.strip().lower()
+        number = (text[5:] if text.startswith("cuda:") else text)
+        try:
+            return pc.validate_value(spec, f"cuda:{number}", "your answer")
+        except pc.ConfigError as exc:
+            prompt.say(f"  {exc}")
+            shown = ""
+
+
+def _ask_fixed(prompt: Prompt, spec: pc.KeySpec, default: str) -> str:
+    """Menu entry for a managed key whose answers are a closed set.
+
+    Booleans and declared choices get the numbered menu. The media-preprocessing
+    device gets cpu, the model GPU (cuda:0 = GPU 0), the saved device when it is
+    some other cuda:N, and a manual 'another GPU' row — every row carries a
+    human label (the manual sentinel is never displayed), and nothing is ever
+    inferred from a host GPU index. A saved value outside the managed set (an
+    edited file) is rejected by the shared validator and re-asked instead of
+    being accepted on Enter. Paths and numeric settings stay free text.
+    """
+    accept = None
+    if spec.kind == "bool":
+        rows = [("true", "true"), ("false", "false")]
+        accept = ({word: "true" for word in pc.TRUE_VALUES}
+                  | {word: "false" for word in pc.FALSE_VALUES})
+    elif spec.kind == "mm-device":
+        rows = [("cpu", "cpu — media preprocessing on the CPU"),
+                ("cuda:0", "cuda:0 — GPU 0, the model's GPU")]
+        if default.startswith("cuda:") and default != "cuda:0":
+            rows.append((default, f"{default} — the device saved in this file"))
+        rows.append((_MANUAL, "another GPU — type its logical CUDA index "
+                             "(a number; the setup never maps the host GPU "
+                             "index to a CUDA id)"))
+    else:
+        rows = [(c, c) for c in spec.choices]
+    while True:
+        answer = prompt.choose(spec.prompt or spec.name, rows,
+                               default=default, accept=accept)
+        if answer == _MANUAL:
+            return _ask_cuda_id(prompt, spec, default)
+        if not answer and default == "":
+            # Nothing valid can be kept by Enter (the saved value was junk);
+            # an explicit pick is required before anything is saved.
+            prompt.say("  Pick one of the listed numbers for this setting.")
+            continue
+        try:
+            return pc.validate_value(spec, answer, "your answer")
+        except pc.ConfigError as exc:
+            # A saved value outside the menu must not survive an Enter.
+            prompt.say(f"  {exc}")
+            default = ""
+
+
 def _prompt_gpu(prompt: Prompt, answers: dict[str, str], name: str, spec,
                 default: str, gpus: list[pc.Gpu], note: str) -> None:
+    # A saved file may hold anything under this key (age, hand edits), so the
+    # shared validator decides whether the saved value may act as the menu's
+    # Enter default or be assigned from it at all. An invalid one is named and
+    # dropped — Enter then keeps the documented default instead of crashing the
+    # later _candidate_config validation with an uncaught ConfigError. A valid
+    # off-list value (e.g. a UUID of an unlisted device) is still preserved.
+    if default:
+        try:
+            pc.validate_value(spec, default, "saved file")
+        except pc.ConfigError as exc:
+            prompt.say(f"  {exc}")
+            prompt.say("  Enter will use the default instead; pick another "
+                       "row or type a value to override it.")
+            default = ""
     if gpus:
-        prompt.say("  Visible GPUs (from nvidia-smi):")
-        for gpu in gpus:
-            prompt.say(f"    {gpu.label()}")
+        # Menu numbers are UI positions; each row names the device index it
+        # actually selects, so choice [1] can clearly mean GPU 0.
         prompt.say("  Multi-GPU Compose topology overrides stay an advanced "
                    "manual edit; this setup does not generate them.")
-        label = "GPU index or UUID to use"
+        answer = prompt.choose(
+            "GPU index or UUID to use",
+            [(gpu.index, f"GPU index {gpu.index} — {gpu.name}")
+             for gpu in gpus],
+            default=default or "0",  # the documented default is GPU 0
+            manual=(_MANUAL, "type another index or UUID"))
+        if answer != _MANUAL:
+            # The menu can only return a listed index or the Enter default;
+            # validate anyway so no path can bypass the shared rules.
+            try:
+                answers[name] = pc.validate_value(spec, answer, "your answer")
+            except pc.ConfigError as exc:
+                prompt.say(f"  {exc}")
+            else:
+                return
+        label = "GPU index or UUID (manual entry)"
     else:
         if note:
             prompt.say(f"  {note}")
@@ -168,19 +301,34 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
                "you confirm.")
 
     specs = pc.specs_for(mode)
-    profile = ""
-    while True:
-        answer = prompt.ask("Model profile",
-                            default=existing_profile or "next")
+    # A saved profile is normalized through the shared validator BEFORE it
+    # becomes the menu default or a target lookup key: an older
+    # 'container:next' file must preselect 'next', and a corrupt value must not
+    # become a default that Enter would silently return (or crash the later
+    # CONTAINER_DEFAULT_TARGET lookup). Enter on a fresh file keeps 'next'.
+    menu_default = "next"
+    if existing_profile:
         try:
-            profile = pc.validate_profile(answer, mode)
+            menu_default = pc.validate_profile(existing_profile, mode)
+        except pc.ConfigError as exc:
+            prompt.say(f"  Saved profile is unusable: {exc}")
+            menu_default = ""
+    # The numbered profile menu is printed before the question is asked.
+    while True:
+        # Enter is allowed only once a valid row is the stated default; an
+        # unusable saved profile forces an explicit valid choice (choose()
+        # has no empty-default problem because the loop always re-asks).
+        candidate = prompt.choose(
+            "Model profile",
+            [(name, f"{name} — {pc.PROFILE_LABEL[name]}")
+             for name in pc.PROFILES],
+            default=menu_default or pc.PROFILES[0])
+        try:
+            profile = pc.validate_profile(candidate, mode)
             break
         except pc.ConfigError as exc:
             prompt.say(f"  {exc}")
-    prompt.say("")
-    for name in pc.PROFILES:
-        marker = "*" if name == profile else " "
-        prompt.say(f"  {marker} {name}: {pc.PROFILE_LABEL[name]}")
+            menu_default = ""  # an empty Enter must ask again, never crash
 
     gpus, gpu_note = pc.discover_gpus()
     answers: dict[str, str] = {}
@@ -189,6 +337,10 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
     prompt.say("Downloaded model locations, caches, and GPU")
     for name in ordered_names(mode):
         spec = specs[name]
+        if spec.kind in ("bool", "choice", "mm-device"):
+            answers[name] = _ask_fixed(prompt, spec,
+                                       saved.get(name, "") or spec.default)
+            continue
         default = saved.get(name, "")
         if name in ("GPU", "NVIDIA_GPU"):
             _prompt_gpu(prompt, answers, name, spec, default, gpus, gpu_note)
@@ -223,6 +375,9 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
                 continue
             spec = specs[name]
             default = saved.get(name, "") or spec.default
+            if spec.kind in ("bool", "choice", "mm-device"):
+                answers[name] = _ask_fixed(prompt, spec, default)
+                continue
             label = spec.prompt or f"{name} ({spec.description})"
             answers[name] = prompt.ask_validated(
                 label, spec, default=default,
@@ -269,24 +424,30 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
                        and issue.key in specs
                        and (issue.key in answers or issue.key in preserved)]
         choices = sorted({issue.key for issue in correctable})
-        hint = (", ".join(choices) + ", or 's'") if choices else "'s'"
-        choice = prompt.ask(
-            f"Correct one of: {hint} (anything else cancels; nothing is "
-            "written)", default="", allow_empty=True)
-        if choice.lower() == "s":
+        options = [(key, f"re-enter {key}") for key in choices]
+        options.append(("s", "save despite these errors (--check keeps "
+                             "reporting them)"))
+        options.append(("c", "cancel; nothing is written"))
+        choice = prompt.choose("Fix one setting, save anyway, or cancel",
+                               options, default="c")
+        if choice == "s":
             prompt.say("Saving despite the errors; --check will keep reporting "
                        "them.")
             break
         match = next((issue for issue in correctable
-                      if issue.key == choice.strip()), None)
+                      if issue.key == choice), None)
         if match is None:
             prompt.say("Cancelled; nothing was written.")
             return 3
         spec = specs[match.key]
-        answers[match.key] = prompt.ask_validated(
-            f"  new value for {match.key}", spec,
-            default=answers.get(match.key, preserved.get(match.key, "")),
-            allow_empty=spec.kind == "positive-int")
+        current = answers.get(match.key, preserved.get(match.key, ""))
+        if spec.kind in ("bool", "choice", "mm-device"):
+            answers[match.key] = _ask_fixed(
+                prompt, spec, current)
+        else:
+            answers[match.key] = prompt.ask_validated(
+                f"  new value for {match.key}", spec, default=current,
+                allow_empty=spec.kind == "positive-int")
 
     verb = "Replace" if config_path.exists() else "Save"
     if not prompt.confirm(f"\n{verb} {config_path}?", default=True):

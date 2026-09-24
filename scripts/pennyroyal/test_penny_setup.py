@@ -199,14 +199,307 @@ class SetupSessionTests(FixtureMixin):
         self.assertIn("Replace", output)
         self.assertEqual(path.read_text(), existing)
 
-    def test_invalid_answers_are_reasked_until_valid(self):
+    def test_invalid_menu_selection_is_reasked_until_valid(self):
+        # The numbered profile menu prints BEFORE the question; a junk answer
+        # re-asks (no silent fallback) and selecting "3" picks 27b. The media
+        # preprocessing row is a menu too: entering it gives cpu, never a
+        # cuda id inferred from the host GPU index.
         code, output, path = self.run_setup(
-            ["bogus-profile", "27b"] + self.basics(str(self.dense_model),
-                                                   draft=str(self.draft_model))
+            ["not-a-number", "3"] + self.basics(str(self.dense_model),
+                                                draft=str(self.draft_model))
             + ["n", "y"])
         self.assertEqual(code, 0, output)
         self.assertEqual(pc.read_env_file(path)[pc.PROFILE_KEY], "27b")
+        self.assertIn("Pick one of the listed numbers", output)
+        menu = output.split("Model profile:")[1].split("Choice (")[0]
+        self.assertLess(menu.index("[1] next"), menu.index("[3] 27b"))
+        self.assertIn("Media preprocessing device", output)
+        self.assertEqual(pc.read_env_file(path)["SGLANG_MM_PREPROCESS_DEVICE"],
+                         "cpu")
+
+    def test_enter_keeps_the_numbered_default_everywhere(self):
+        # Blank lines at every menu keep the documented default: profile next,
+        # media cpu, advanced section declined, save confirmed.
+        code, output, path = self.run_setup(
+            [""] + self.basics(str(self.next_model)) + ["", ""])
+        self.assertEqual(code, 0, output)
+        saved = pc.read_env_file(path)
+        self.assertEqual(saved[pc.PROFILE_KEY], "next")
+        self.assertEqual(saved["SGLANG_MM_PREPROCESS_DEVICE"], "cpu")
+        self.assertNotIn("MAX_RUNNING_REQUESTS", saved)
+        self.assertIn("Saved ", output)
+
+    def test_gpu_menu_numbers_map_to_device_indexes_not_positions(self):
+        # Choice [1] may mean GPU 0: the row text names the real index and the
+        # saved value is that index, while Enter preserves the existing saved
+        # GPU and the manual row accepts a UUID.
+        with mock.patch.object(pc, "discover_gpus", return_value=(
+                [pc.Gpu(index="0", name="NVIDIA RTX PRO 6000"),
+                 pc.Gpu(index="1", name="NVIDIA Secondary")], "")):
+            gpu_answers = self.basics(str(self.next_model))
+            gpu_answers[5] = "2"          # menu row 2 = GPU index 1
+            code, output, path = self.run_setup(
+                ["next"] + gpu_answers + ["n", "y"])
+            self.assertEqual(code, 0, output)
+            self.assertIn("[1] GPU index 0 — NVIDIA RTX PRO 6000", output)
+            self.assertIn("[2] GPU index 1 — NVIDIA Secondary", output)
+            self.assertIn("[3] type another index or UUID", output)
+            self.assertEqual(pc.read_env_file(path)["GPU"], "1")
+            # Manual row accepts a UUID verbatim.
+            gpu_answers = self.basics(str(self.next_model))
+            gpu_answers[5] = "3"          # manual row, then the UUID
+            code, output, path = self.run_setup(
+                ["next"] + gpu_answers[:5] +
+                ["3", "GPU-abcdef01-2345-6789-abcd-ef0123456789"] +
+                gpu_answers[6:] + ["n", "y"])
+            self.assertEqual(code, 0, output)
+            self.assertEqual(
+                pc.read_env_file(path)["GPU"],
+                "GPU-abcdef01-2345-6789-abcd-ef0123456789")
+        # With an existing GPU=1 saved, Enter on the menu preserves it.
+        existing = (f"{pc.PROFILE_KEY}=next\n"
+                    f"TARGET_MODEL={pc.quote_value(str(self.next_model))}\n"
+                    f"CACHE_BASE={pc.quote_value(str(self.cache))}\n"
+                    f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n"
+                    "GPU=1\n")
+        with mock.patch.object(pc, "discover_gpus", return_value=(
+                [pc.Gpu(index="0", name="NVIDIA RTX PRO 6000")], "")):
+            gpu_answers = self.basics("")
+            gpu_answers[5] = ""           # Enter keeps the saved GPU=1
+            code, output, path = self.run_setup(
+                [""] + gpu_answers + ["n", "y"], existing=existing)
+            self.assertEqual(code, 0, output)
+            # The saved GPU is not a listed menu row here (only index 0 is
+            # visible), so Enter honestly keeps the current value.
+            self.assertIn("Enter keeps the current value (1)", output)
+            self.assertEqual(pc.read_env_file(path)["GPU"], "1")
+
+    def test_container_mode_shows_the_same_numbered_menus_and_valid_file(self):
+        # Config parity: the container wizard offers the identical numbered
+        # menus (profile, fixed choices, yes/no gates) and its saved .env-style
+        # file validates through the shared parser like the native one.
+        host_root = self.base / "host models"
+        host_root.mkdir()
+        (self.base / "cache").mkdir(exist_ok=True)
+        (self.base / "nixl").mkdir(exist_ok=True)
+        # Give the fixture repo a compose file and the profile's default
+        # target under the mount so the shared validator passes, exactly as a
+        # real starter .env would.
+        compose = self.repo / pc.COMPOSE_RELPATH
+        compose.parent.mkdir(parents=True, exist_ok=True)
+        compose.write_text("services: {}\n")
+        (host_root / pc.CONTAINER_DEFAULT_TARGET["next"].removeprefix(
+            "/models/")).mkdir(parents=True)
+        names = [n for n in ps.ordered_names("container")
+                 if n != "DRAFT_MODEL"]
+        given = {"HOST_MODELS_ROOT": str(host_root),
+                 "HOST_CACHE_BASE": str(self.base / "cache"),
+                 "HOST_NIXL_STORAGE_BASE": str(self.base / "nixl")}
+        # After the fields: the advanced gate (Enter keeps its default 'no')
+        # and the save gate (Enter keeps its default 'yes').
+        answers = ["1"] + [given.get(n, "") for n in names] + ["", ""]
+        out = io.StringIO()
+        prompt = ps.Prompt(stdin=io.StringIO("\n".join(answers) + "\n"),
+                           stdout=out)
+        code = ps.run_session("container", self.config_path, {}, prompt,
+                              self.repo, home=self.base / "isolated-home")
+        output = out.getvalue()
+        self.assertEqual(code, 0, output)
+        self.assertIn("Model profile:\n  [1] next", output)
+        self.assertIn("Media preprocessing device (cpu or cuda:N):\n  [1] cpu",
+                      output)
+        self.assertIn("  [1] yes\n  [2] no", output)
+        saved = pc.read_env_file(self.config_path)
+        self.assertEqual(saved[pc.PROFILE_KEY], "next")
+        self.assertEqual(saved["NVIDIA_GPU"], "0")
+        plan = pc.build_plan("container", pc.load_config("container",
+                                                         self.config_path, {},
+                                                         self.repo), {},
+                             repo_root=self.repo)
+        self.assertEqual(plan.errors, [])
+        # Cancel at the save gate writes nothing, same as native.
+        cancel = self.base / "cancel.env"
+        answers = (["1"] + [given.get(n, "") for n in names]
+                   + ["", "2"])  # save gate: pick row 2 = no
+        out2 = io.StringIO()
+        code = ps.run_session("container", cancel, {}, ps.Prompt(
+            stdin=io.StringIO("\n".join(answers) + "\n"), stdout=out2),
+            self.repo, home=self.base / "isolated-home")
+        self.assertEqual(code, 3, out2.getvalue())
+        self.assertFalse(cancel.exists())
+
+    def test_malformed_saved_gpu_is_named_not_crashed(self):
+        # Parent's repro: saved GPU='bad gpu' + discovered GPU 0, then Enter.
+        # The old code assigned the junk value straight from the menu and the
+        # later _candidate_config validation raised an uncaught ConfigError.
+        # Now the shared validator rejects the saved value (naming the rule),
+        # Enter falls back to the documented default, and the file stays valid.
+        existing = (f"{pc.PROFILE_KEY}=next\n"
+                    f"TARGET_MODEL={pc.quote_value(str(self.next_model))}\n"
+                    f"CACHE_BASE={pc.quote_value(str(self.cache))}\n"
+                    f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n"
+                    f"GPU={pc.quote_value('bad gpu')}\n")
+        with mock.patch.object(pc, "discover_gpus", return_value=(
+                [pc.Gpu(index="0", name="NVIDIA RTX PRO 6000")], "")):
+            answers = self.basics("")
+            answers[5] = ""            # Enter at the GPU menu
+            code, output, path = self.run_setup(
+                [""] + answers + ["n", "y"], existing=existing)
+            self.assertEqual(code, 0, output)
+            self.assertIn("GPU may not contain spaces, quotes, or '$'", output)
+            self.assertIn("Enter will use the default instead", output)
+            self.assertEqual(pc.read_env_file(path)["GPU"], "0")
+            # Retry path: the operator can still override with a typed value.
+            answers = self.basics("")
+            answers[5] = "2"           # manual row, then an explicit UUID
+            code, output, path = self.run_setup(
+                [""] + answers[:5] + ["2", "GPU-deadbeef-0000"]
+                + answers[6:] + ["n", "y"], existing=existing)
+            self.assertEqual(code, 0, output)
+            self.assertEqual(pc.read_env_file(path)["GPU"],
+                             "GPU-deadbeef-0000")
+            # Cancellation at the GPU menu still writes nothing.
+            stale = self.base / "stale-gpu.env"
+            answers = self.basics("")
+            answers[5] = "q"
+            with self.assertRaises(ps.Cancelled):
+                self.run_setup([""] + answers[:6] + ["q"], existing=existing,
+                               config_path=stale)
+            self.assertEqual(stale.read_text(), existing)
+
+    def test_valid_off_list_saved_uuid_stays_the_enter_default(self):
+        # The rejection above must not regress the preserved case: a valid
+        # UUID of a device that is not in the discovered list is still a legal
+        # saved value and Enter keeps it verbatim.
+        existing = (f"{pc.PROFILE_KEY}=next\n"
+                    f"TARGET_MODEL={pc.quote_value(str(self.next_model))}\n"
+                    f"CACHE_BASE={pc.quote_value(str(self.cache))}\n"
+                    f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n"
+                    "GPU=GPU-abcdef01-2345-6789-abcd-ef0123456789\n")
+        with mock.patch.object(pc, "discover_gpus", return_value=(
+                [pc.Gpu(index="0", name="NVIDIA RTX PRO 6000")], "")):
+            answers = self.basics("")
+            answers[5] = ""            # Enter
+            code, output, path = self.run_setup(
+                [""] + answers + ["n", "y"], existing=existing)
+            self.assertEqual(code, 0, output)
+            self.assertNotIn("may not contain", output)
+            self.assertIn("Enter keeps the current value", output)
+            self.assertEqual(
+                pc.read_env_file(path)["GPU"],
+                "GPU-abcdef01-2345-6789-abcd-ef0123456789")
+
+    def test_yes_no_gates_are_numbered_and_cancel_without_writes(self):
+        # The save gate is a menu too: choosing 'no' writes nothing, and the
+        # advanced gate's default is 'no'.
+        code, output, path = self.run_setup(
+            ["next"] + self.basics(str(self.next_model)) + ["n", "2"])
+        self.assertEqual(code, 3, output)
+        self.assertFalse(path.exists())
+        self.assertIn("nothing was written", output)
+        self.assertIn("  [1] yes\n  [2] no", output)
+
+    def test_media_menu_shows_cpu_model_gpu_saved_and_manual_rows(self):
+        base = self.basics(str(self.next_model))
+        # Menu rows carry human labels (never the __manual__ sentinel):
+        # [1] cpu, [2] cuda:0 (the model's GPU), [3] another GPU. Selecting
+        # the manual row asks for a NUMERIC logical index and stores cuda:N;
+        # 'cuda:1' typed by hand also lands on cuda:1; junk is re-asked.
+        code, output, path = self.run_setup(
+            ["next"] + base[:7] + ["3", "junk", "1"] +
+            ["y",                       # yes to the advanced section
+             "",                        # PLE placement menu: Enter keeps ram
+             "/nvme-unused-with-ram",   # free-text path stays free text
+             "true",                    # online FP8 chosen from its menu
+             "",                        # forward tools: Enter keeps true
+             "", "", "", "",            # capacity/build jobs: Enter = blank
+             "/opt/nixl",               # advanced free-text paths below...
+             str(self.venv / "bin" / "sglang"),
+             str(self.venv / "bin" / "python"),
+             "y"])                       # ...then save
+        self.assertEqual(code, 0, output)
+        self.assertIn("[1] cpu — media preprocessing on the CPU", output)
+        self.assertIn("[2] cuda:0 — GPU 0, the model's GPU", output)
+        self.assertIn("[3] another GPU", output)
+        self.assertNotIn("__manual__", output)
+        self.assertIn("NOT the host GPU index", output)
+        self.assertIn("must be cpu or cuda:N, got 'cuda:junk'", output)
+        saved = pc.read_env_file(path)
+        self.assertEqual(saved["SGLANG_MM_PREPROCESS_DEVICE"], "cuda:1")
+        # A boolean advanced key is also a menu: [1]/'true' selected true.
+        self.assertEqual(saved["SGLANG_SM120_ONLINE_MXFP8"], "true")
+        self.assertIn("[1] true\n  [2] false", output)
+
+    def test_media_menu_keeps_saved_device_and_cancels_without_writes(self):
+        # A saved cuda:2 (beyond the fixed rows) gets its own row and Enter
+        # keeps it; 'q' anywhere on the media flow cancels with no writes;
+        # an edited-out junk value is rejected and re-asked, not kept.
+        existing = (f"{pc.PROFILE_KEY}=next\n"
+                    f"TARGET_MODEL={pc.quote_value(str(self.next_model))}\n"
+                    f"CACHE_BASE={pc.quote_value(str(self.cache))}\n"
+                    f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n"
+                    "SGLANG_MM_PREPROCESS_DEVICE=cuda:2\n")
+        code, output, path = self.run_setup(
+            [""] + self.basics("") + ["n", "y"], existing=existing)
+        self.assertEqual(code, 0, output)
+        self.assertIn("[3] cuda:2 — the device saved in this file", output)
+        self.assertEqual(pc.read_env_file(path)["SGLANG_MM_PREPROCESS_DEVICE"],
+                         "cuda:2")
+        # 'q' at the media menu cancels through the shared _read contract and
+        # the existing file stays byte-for-byte as it was.
+        with self.assertRaises(ps.Cancelled):
+            self.run_setup([""] + self.basics("")[:7] + ["q"],
+                           existing=existing)
+        self.assertEqual(path.read_text(), existing)
+        # A junk saved value cannot be kept by Enter: the menu rejects and
+        # re-asks, so the invalid value never reaches the file again (the
+        # extra blank line feeds the second, now-valid, menu prompt).
+        broken = existing.replace("cuda:2", "GPUs")
+        # First Enter would keep the junk saved value; it is rejected, the
+        # second Enter is refused outright, and only an explicit pick passes.
+        code, output, path = self.run_setup(
+            [""] + self.basics("")[:7] + ["", "", "1"] + ["n", "y"],
+            existing=broken)
+        self.assertEqual(code, 0, output)
+        self.assertIn("must be cpu or cuda:N, got 'GPUs'", output)
+        self.assertEqual(pc.read_env_file(path)["SGLANG_MM_PREPROCESS_DEVICE"],
+                         "cpu")
+
+    def test_saved_container_prefixed_profile_preselects_the_right_row(self):
+        # Older files may hold PENNYROYAL_PROFILE=container:next. The wizard
+        # normalizes it through validate_profile BEFORE the menu default and
+        # the profile-target lookup, and saves the canonical name.
+        existing = (f"{pc.PROFILE_KEY}=container:next\n"
+                    f"TARGET_MODEL={pc.quote_value(str(self.next_model))}\n"
+                    f"CACHE_BASE={pc.quote_value(str(self.cache))}\n"
+                    f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n")
+        code, output, path = self.run_setup(
+            [""] + self.basics("") + ["n", "y"], existing=existing)
+        self.assertEqual(code, 0, output)
+        self.assertIn("Enter keeps [1] next", output)
+        self.assertEqual(pc.read_env_file(path)[pc.PROFILE_KEY], "next")
+
+    def test_invalid_saved_profile_forces_a_choice_instead_of_crashing(self):
+        # Enter must not return the junk saved value or crash the later
+        # CONTAINER_DEFAULT_TARGET lookup: the wizard explains, re-asks, and
+        # only proceeds after a valid selection.
+        existing = f"{pc.PROFILE_KEY}=container:weird\n"
+        # First Enter returns the menu's stated fallback ('next' here is not
+        # yet a valid saved value, so choose returns it and validation runs);
+        # the re-ask consumes the second answer '1' before the fields start.
+        code, output, path = self.run_setup(
+            ["1"] + self.basics(str(self.next_model)) + ["n", "y"],
+            existing=existing)
+        self.assertEqual(code, 0, output)
+        self.assertIn("Saved profile is unusable", output)
         self.assertIn("unknown profile", output)
+        self.assertEqual(pc.read_env_file(path)[pc.PROFILE_KEY], "next")
+        # Cancelling at the re-ask writes nothing.
+        stale = self.base / "stale.env"
+        stale.write_text(existing)
+        with self.assertRaises(ps.Cancelled):
+            self.run_setup(["q"], existing=existing, config_path=stale)
+        self.assertEqual(stale.read_text(), existing)
 
     def test_written_file_survives_spaces_and_dollars(self):
         tricky = str(self.custom_model)
@@ -308,15 +601,19 @@ class SetupSessionTests(FixtureMixin):
     def test_invalid_proposal_is_not_saved_and_is_not_reported_ready(self):
         existing = (f"{pc.PROFILE_KEY}=next\n"
                     "TARGET_MODEL=/definitely-missing-penny-model\n")
+        # The validation gate is a numbered menu; picking the cancel row
+        # (Enter keeps it) leaves the file byte-for-byte untouched.
         code, output, path = self.run_setup(
-            ["next", "", str(self.venv), "", "", str(self.nixl), "0", "0", "",
-             "n", "y"],
+            ["next"] + self.basics("") + ["n", ""],
             existing=existing)
         self.assertEqual(code, 3, output)
         self.assertTrue(path.exists())
         self.assertEqual(path.read_text(), existing)
         self.assertIn("Not ready to save", output)
         self.assertIn("/definitely-missing-penny-model", output)
+        self.assertIn("[1] re-enter TARGET_MODEL", output)
+        self.assertIn("[2] save despite these errors", output)
+        self.assertIn("[3] cancel; nothing is written", output)
         self.assertNotIn("Saved ", output)
         self.assertNotIn("Next command:", output)
 
@@ -324,9 +621,8 @@ class SetupSessionTests(FixtureMixin):
         existing = (f"{pc.PROFILE_KEY}=next\n"
                     "TARGET_MODEL=/definitely-missing-penny-model\n")
         code, output, path = self.run_setup(
-            ["next", "", str(self.venv), "", "", str(self.nixl), "0", "0", "",
-             "n",
-             "TARGET_MODEL", str(self.next_model),   # fix at the gate
+            ["next"] + self.basics("") + ["n",
+             "1", str(self.next_model),   # menu row: re-enter TARGET_MODEL
              "y"],
             existing=existing)
         self.assertEqual(code, 0, output)
@@ -335,8 +631,8 @@ class SetupSessionTests(FixtureMixin):
 
     def test_invalid_proposal_can_be_saved_anyway_after_warning(self):
         code, output, path = self.run_setup(
-            ["next", "", str(self.venv), "/definitely-missing-penny-model", "",
-             str(self.nixl), "0", "0", "", "n", "s", "y"])
+            ["next"] + self.basics("/definitely-missing-penny-model") +
+            ["n", "2", "y"])  # row 2 = save anyway
         self.assertEqual(code, 0, output)
         self.assertIn("Saving despite the errors", output)
         self.assertIn("ERROR", output)  # still visible, never claimed ready
@@ -344,8 +640,8 @@ class SetupSessionTests(FixtureMixin):
     def test_mixup_checkpoint_blocks_save_as_clear_error(self):
         # A dense checkpoint on the next profile is the parent's mixup case.
         code, output, path = self.run_setup(
-            ["next", "", str(self.venv), str(self.dense_model), "",
-             str(self.nixl), "0", "0", "", "n", ""])
+            ["next"] + self.basics(str(self.dense_model)) +
+            ["n", ""])  # Enter keeps the cancel row
         self.assertEqual(code, 3, output)
         self.assertIn("clear mixup", output)
         self.assertFalse(path.exists())
