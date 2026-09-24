@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Thin native launcher: saved settings in, one recipe exec out.
+#
+# Inference flags stay exactly where they are — in configs/pennyroyal/serve-*.sh.
+# This script adds no defaults of its own and no launch logic: it locates a
+# Python 3 and hands off to scripts/pennyroyal/penny_config.py, which validates
+# the saved file and execs the recipe itself with the resolved environment. No
+# user configuration is ever shell-sourced or eval'd, and no plan crosses back
+# through the shell.
+#
+# Usage: ./run-penny [--profile NAME] [--config PATH] [--check] [--show-config]
+#   --profile NAME   next (default), next-plain, or 27b
+#   --config PATH    use this saved config instead of the default one
+#   --check          validate the config without a GPU and exit
+#   --show-config    print the resolved configuration and launch command
+#   --help, -h       this help and the config utility's option list
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_UTILITY="$ROOT/scripts/pennyroyal/penny_config.py"
+# Separate name on purpose: the recipes use PYTHON for the runtime interpreter,
+# and this one only picks the interpreter that reads the configuration.
+PENNY_PYTHON="${PENNY_PYTHON:-python3}"
+command -v "$PENNY_PYTHON" >/dev/null 2>&1 || {
+  echo "python3 is required to read the saved configuration" >&2
+  exit 1
+}
+
+pass=()
+while (( $# )); do
+  case "$1" in
+    --profile)
+      (( $# >= 2 )) || { echo "--profile needs a value" >&2; exit 2; }
+      pass+=(--profile "$2"); shift 2 ;;
+    --profile=*) pass+=(--profile "${1#*=}"); shift ;;
+    --config)
+      (( $# >= 2 )) || { echo "--config needs a path" >&2; exit 2; }
+      pass+=(--config "$2"); shift 2 ;;
+    --config=*) pass+=(--config "${1#*=}"); shift ;;
+    --check|--show-config) pass+=("$1"); shift ;;
+    --help|-h)
+      sed -n '11,16p' "${BASH_SOURCE[0]}" | cut -c 3-
+      exec "$PENNY_PYTHON" "$CONFIG_UTILITY" --mode native --help ;;
+    *) echo "Unknown option: $1 (./run-penny --help)" >&2; exit 2 ;;
+  esac
+done
+
+case " ${pass[*]-} " in
+  *" --check "* | *" --show-config "*)
+    exec "$PENNY_PYTHON" "$CONFIG_UTILITY" --mode native "${pass[@]+${pass[@]}}" ;;
+esac
+
+# Plain invocation: the config utility validates once and execs the recipe with
+# the same environment it printed, so the preview and the launch cannot diverge.
+exec "$PENNY_PYTHON" "$CONFIG_UTILITY" --mode native \
+  "${pass[@]+${pass[@]}}" --launch
