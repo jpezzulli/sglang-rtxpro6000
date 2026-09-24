@@ -410,7 +410,14 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             max_num_token=self.max_num_token,
             hidden_size=self.model_runner.model_config.hidden_size,
             next_token_logits_buffer=self.model_runner.graph_shared_output.get_logits_buffer(
-                self.model_runner.model_config.vocab_size, rows=self.max_num_token
+                # A draft worker whose FR-Spec hot-vocabulary head was
+                # assembled replicated across TP (init_lm_head) projects the
+                # full hot width on every rank; mirror the draft-extend
+                # runner's len(hot_token_id) rule. Absent on target workers
+                # and TP1, which keep the model-config width unchanged.
+                getattr(self.model_runner, "hot_vocab_width", None)
+                or self.model_runner.model_config.vocab_size,
+                rows=self.max_num_token,
             ),
             dtype=self.model_runner.model_config.dtype,
             dp_size=self.dp_size,

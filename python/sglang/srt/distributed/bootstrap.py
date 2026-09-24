@@ -81,6 +81,24 @@ def init_torch_distributed(
 
     backend = _resolve_backend(device=device, server_args=server_args)
 
+    # Consumer-PCIe TP>1 hosts (RTX PRO 6000 class) have reported NCCL
+    # transport hangs tied to PCIe ACS/IOMMU peer access, which this launch
+    # does not verify here. Say so before
+    # init_process_group can turn into a silent hang, and recognize an
+    # operator-exported NCCL_P2P_DISABLE=1 with its performance caveat.
+    # Guidance only: nothing here sets NCCL state or probes the device.
+    if not is_draft_worker:
+        from sglang.srt.distributed.p2p_guidance import p2p_startup_guidance
+
+        guidance = p2p_startup_guidance(
+            tp_size=ps.tp_size,
+            backend=backend,
+            node_rank=getattr(server_args, "node_rank", 0),
+            tp_rank=ps.tp_rank,
+        )
+        if guidance is not None:
+            logger.warning(guidance)
+
     before_avail_memory = get_available_gpu_memory(device, ps.gpu_id)
     if not server_args.enable_p2p_check:
         monkey_patch_p2p_access_check()

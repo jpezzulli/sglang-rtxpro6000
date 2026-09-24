@@ -22,6 +22,8 @@ NIXL_STORAGE_BASE="${NIXL_STORAGE_BASE:?Set NIXL_STORAGE_BASE to the FILE cache 
 NIXL_CONFIG="${NIXL_CONFIG:-$SCRIPT_DIR/nixl-posix.toml}"
 NAMESPACE_HELPER="$REPO_ROOT/scripts/pennyroyal/derive_namespace.py"
 source "$SCRIPT_DIR/chat-template.sh"
+source "$SCRIPT_DIR/reasoning-effort.sh"
+source "$SCRIPT_DIR/tp-devices.sh"
 
 CONTEXT_LENGTH=524288
 PAGE_SIZE=64
@@ -72,6 +74,12 @@ export SGLANG_NUMA_BIND_V2=false SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
 export SGLANG_PREP_IN_CUDA_GRAPH=1 SGLANG_MAMBA_CONV_DTYPE="$MAMBA_CONV_DTYPE"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}" MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 export TOKENIZERS_PARALLELISM=false
+
+# TP stays 1 here, but the guard still turns a dedicated cuda:N preprocessor
+# outside the model range into an actionable failure, never a silent ignore.
+# Runs after the durable cache environment so its $PYTHON probe sees the same
+# cache locations as every later Python invocation.
+pennyroyal_check_tp_devices "$TP_SIZE" "$SGLANG_MM_PREPROCESS_DEVICE"
 
 TARGET_OVERRIDES='{"text_config":{"max_position_embeddings":524288,"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":2.0,"original_max_position_embeddings":262144}}}'
 DRAFT_OVERRIDES='{"max_position_embeddings":524288,"rope_parameters":{"rope_type":"yarn","rope_theta":10000000,"factor":2.0,"original_max_position_embeddings":262144}}'
@@ -124,7 +132,7 @@ launch_args=(serve \
   --image-processor-backend "$IMAGE_PROCESSOR_BACKEND" \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \
-  --default-chat-template-kwargs '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}' \
+  --default-chat-template-kwargs "$DEFAULT_CHAT_TEMPLATE_KWARGS" \
   --enable-hierarchical-cache --hicache-size 96 --hicache-host-memory-mode cache \
   --hicache-write-policy write_through --hicache-io-backend kernel \
   --hicache-mem-layout page_first --hicache-storage-backend nixl \

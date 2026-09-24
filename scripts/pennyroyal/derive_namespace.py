@@ -136,6 +136,15 @@ def parse_fields(values: list[str]) -> dict[str, str]:
             raise ValueError(f"invalid field name: {name!r}")
         if name in fields:
             raise ValueError(f"duplicate field: {name}")
+        if name == "tp_size":
+            # TP topology must be real identity, not decoration: a missing or
+            # junk tp_size lets a TP1 and a TP2 launch share one namespace
+            # root, where NIXL FILE rank layout suffixes can collide. Fail
+            # closed (exit 2) instead of silently reusing the directory.
+            if not re.fullmatch(r"[1-9][0-9]*", field_value):
+                raise ValueError(
+                    f"tp_size field must be a positive integer, got {field_value!r}"
+                )
         fields[name] = field_value
     return fields
 
@@ -190,8 +199,17 @@ def ensure_manifest(root: Path, identity: dict[str, Any], digest: str) -> None:
         try:
             current = json.loads(manifest_path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"invalid namespace manifest: {manifest_path}") from exc
+            # A half-written manifest must not turn into a silent purge or a
+            # blind share of whatever files already live in this directory.
+            raise RuntimeError(
+                f"unreadable namespace manifest (fail closed; no data removed): "
+                f"{manifest_path}"
+            ) from exc
         if current != manifest:
+            # The directory name is only the digest prefix; a manifest that
+            # disagrees with the derived identity means this root belongs to
+            # another representation/TP layout. Refuse it, keep every
+            # existing cache file exactly where it is.
             raise RuntimeError(
                 f"namespace manifest does not match derived identity: {manifest_path}"
             )

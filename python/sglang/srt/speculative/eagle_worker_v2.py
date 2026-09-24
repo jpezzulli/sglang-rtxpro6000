@@ -332,18 +332,38 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         else:
             if self.hot_token_id is not None:
                 self.hot_token_id = self.hot_token_id.to(head.device)
-                from sglang.kernels.ops.gemm.sm120_online_fp8 import (
-                    rowwise_scale_of,
-                    select_rowwise_weight_rows,
-                )
+                # The map holds global token ids; a TP-sharded resident head
+                # is indexed by this rank's local rows. Selecting a shard with
+                # global ids mixes rows across the shard boundary and, for the
+                # SM120 online-FP8 head, separates values from their rowwise
+                # scales; hot_vocab maps/fails-closed and replicates the
+                # assembled head across TP only when the head is actually
+                # sharded (TP1 keeps its qualified collective-free path).
+                from sglang.srt.speculative.hot_vocab import shared_hot_lm_head
 
-                if rowwise_scale_of(head) is not None:
-                    # The target's per-row scales must undergo the identical
-                    # hot-vocabulary selection before installation in draft.
-                    head = select_rowwise_weight_rows(head, self.hot_token_id)
-                else:
-                    head = head.clone()
-                    head.data = head.data[self.hot_token_id]
+                selection = shared_hot_lm_head(
+                    head,
+                    hot_token_id=self.hot_token_id,
+                    target_lm_head=target_lm_head,
+                    logger=logger,
+                )
+                head = selection.head
+                if selection.replicated_full_width:
+                    # Every rank now holds the whole (num_hot, K) head, so the
+                    # draft's logits are already full hot width: skip the TP
+                    # all-gather (which would double the width) exactly like
+                    # the TP1 FR-Spec path, and let graph buffers see the hot
+                    # vocab width like the draft-extend runner's
+                    # len(hot_token_id) rule does.
+                    logits_processor = getattr(
+                        self.draft_runner.model, "logits_processor", None
+                    )
+                    if logits_processor is not None:
+                        logits_processor.do_tensor_parallel_all_gather = False
+                        logits_processor.do_tensor_parallel_all_gather_dp_attn = (
+                            False
+                        )
+                    self.draft_runner.hot_vocab_width = selection.draft_vocab_size
 
             # Share the embedding and lm_head
             self.draft_runner.model.set_embed_and_head(embed, head)

@@ -6,7 +6,7 @@
     "sglang.srt.layers.attention.qwen_sparse_attn_backend": "326a0590541e303f0988407520c33a720600d0bce07be185de5adbcac1234a0e",
     "sglang.srt.models.qwen4_exp": "0f82fa37234a0dcbac6bf9ddc6f94978e7efd5980d01672eb14058de654f34cc",
     "sglang.srt.models.qwen3_5": "a0d3cd208f54a089856d850ad22aa81a4c7a056c251a18aa9001f2aeed17cd17",
-    "sglang.srt.model_executor.runner.decode_cuda_graph_runner": "18289f057eb92c5a12b3d55c8d0f524e918a6e4f8d72326e8b5581c4b05a6943",
+    "sglang.srt.model_executor.runner.decode_cuda_graph_runner": "ed359b9f3a0ad36bf290c4e71237fa9103e2b6ba82b28f4ef07ad2fe23e61140",
     "sglang.srt.server_args": "39a0472496b813bb8ac26eeb4e83fd894753de3f7264683531b01d8a9f7334ea",
     "sglang.srt.utils.offloader": "e9b97f8a78d3d5786af92abbf735de8f293f28a4314364c1c3c6634b89578d5c",
     "sglang.srt.utils.common": "5e6bb30f4cf74288b61f5d0432a02e21791d256044b26dd74bb9a9d55e40f03a",

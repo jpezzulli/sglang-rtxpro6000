@@ -416,3 +416,17 @@ reasoning effort. Chat Completions `reasoning_effort` takes precedence over
 that default. With Froggeric v22.5, `high`, `xhigh`, and `max` select the same
 xhigh instruction, which can change answer length relative to medium.
 Responses API precedence is unchanged.
+
+To change the launcher default itself (PR#18), export
+`PENNY_REASONING_EFFORT=none|minimal|low|medium|high|xhigh|max` before
+starting a recipe; unset or empty keeps the qualified medium. The recipes
+build `--default-chat-template-kwargs` from that single value, the server
+never reads the variable, and an invalid tier stops the launch.
+
+Natively, `TP_SIZE=2` makes the Next recipes claim GPUs 0..TP_SIZE-1 when
+`CUDA_VISIBLE_DEVICES` is unset, but it does not grant GPU access: the
+launch aborts with the visible-device count if fewer devices are visible
+than TP (plus a dedicated `SGLANG_MM_PREPROCESS_DEVICE=cuda:N`) requires.
+In Docker/Compose the same `TP_SIZE=2` also needs the existing
+`deploy.resources.reservations.devices` entry edited to name both GPU ids,
+for example `device_ids: ["0", "1"]`; see docker/pennyroyal/README.md.

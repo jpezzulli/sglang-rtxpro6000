@@ -27,6 +27,17 @@ services:
       SGLANG_SM120_ONLINE_MXFP8: ${SGLANG_SM120_ONLINE_MXFP8:-false}
       SGLANG_MM_PREPROCESS_DEVICE: ${SGLANG_MM_PREPROCESS_DEVICE:-cpu}
       SGLANG_FORWARD_UNKNOWN_TOOLS: ${SGLANG_FORWARD_UNKNOWN_TOOLS:-true}
+      # Optional launcher-level reasoning-effort default (unset keeps the
+      # recipe's qualified medium; per-request reasoning_effort still wins).
+      PENNY_REASONING_EFFORT: ${PENNY_REASONING_EFFORT:-}
+      # Optional two-GPU experimental topology (TP1 qualified default).
+      # TP_SIZE does not grant GPU access: the single-GPU device_ids
+      # reservation below must also name both ids for TP2 to launch (see
+      # docker/pennyroyal/README.md); the recipe fails actionably otherwise.
+      TP_SIZE: ${TP_SIZE:-1}
+      # Optional operator workaround exported through the launcher for TP>1
+      # NCCL P2P/ACS isolation; empty leaves NCCL defaults untouched.
+      NCCL_P2P_DISABLE: ${NCCL_P2P_DISABLE:-}
       MAX_RUNNING_REQUESTS: ${MAX_RUNNING_REQUESTS:-4}
       MAX_MAMBA_CACHE_SIZE: ${MAX_MAMBA_CACHE_SIZE:-24}
       MAX_TOTAL_TOKENS: ${MAX_TOTAL_TOKENS:-}

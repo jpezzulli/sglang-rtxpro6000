@@ -21,10 +21,19 @@ NIXL_CONFIG="${NIXL_CONFIG:-$SCRIPT_DIR/nixl-posix.toml}"
 NAMESPACE_HELPER="$REPO_ROOT/scripts/pennyroyal/derive_namespace.py"
 source "$SCRIPT_DIR/chat-template.sh"
 source "$SCRIPT_DIR/request-capacity.sh"
+source "$SCRIPT_DIR/reasoning-effort.sh"
+source "$SCRIPT_DIR/tp-devices.sh"
 
 CONTEXT_LENGTH=524288
 PAGE_SIZE=64
-TP_SIZE=1
+# TP1 is the qualified default; TP_SIZE=2 opts into the two-GPU experimental
+# path (the NIXL namespace hashes tp_size, so the two topologies can never
+# share one cache root).
+TP_SIZE="${TP_SIZE:-1}"
+if [[ ! "$TP_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+  echo "TP_SIZE must be a positive integer" >&2
+  exit 1
+fi
 COMPUTE_DTYPE=bfloat16
 KV_DTYPE=fp8_e4m3
 MAMBA_SSM_DTYPE=bfloat16
@@ -42,7 +51,12 @@ done
 mkdir -p "$CACHE_BASE"/{huggingface,torch,torchinductor,triton,cuda,flashinfer,sglang/jit}
 mkdir -p "$NIXL_STORAGE_BASE"
 
-export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+# Default to as many consecutive GPUs as TP requires (one scheduler process
+# per visible device); an explicit CUDA_VISIBLE_DEVICES still wins.
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((TP_SIZE - 1)))"
+fi
+export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export CUDACXX="${CUDACXX:-$CUDA_HOME/bin/nvcc}"
 export CC="${CC:-/usr/bin/gcc-15}" CXX="${CXX:-/usr/bin/g++-15}"
@@ -64,6 +78,13 @@ export SGLANG_NUMA_BIND_V2=false SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
 export SGLANG_MAMBA_CONV_DTYPE="$MAMBA_CONV_DTYPE"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}" MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 export TOKENIZERS_PARALLELISM=false
+
+# TP selects a topology, it never grants GPUs: refuse to launch when the
+# requested ranks (plus a dedicated cuda:N preprocessor) exceed what is
+# visible, instead of letting NCCL fail or the request be ignored. Runs
+# after the durable cache environment so its $PYTHON probe sees the same
+# cache locations as every later Python invocation.
+pennyroyal_check_tp_devices "$TP_SIZE" "$SGLANG_MM_PREPROCESS_DEVICE"
 
 # NVMe preflight imports Torch, Triton, FlashInfer and SGLang. Activate their
 # durable cache locations before selecting the optional backend.
@@ -142,7 +163,7 @@ launch_args=(serve \
   --chat-template "$CHAT_TEMPLATE" --image-processor-backend "$IMAGE_PROCESSOR_BACKEND" \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \
-  --default-chat-template-kwargs '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}' \
+  --default-chat-template-kwargs "$DEFAULT_CHAT_TEMPLATE_KWARGS" \
   --speculative-algorithm NEXTN --speculative-num-steps 3 \
   --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 \
   --speculative-draft-model-quantization unquant --watchdog-timeout 1800)

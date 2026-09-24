@@ -176,6 +176,36 @@ docker compose up -d --force-recreate
 Online FP8 is off by default. Read [`FP8.md`](../../FP8.md), then set
 `SGLANG_SM120_ONLINE_MXFP8=true` to opt in. RAM-backed PLE is the default.
 
+`PENNY_REASONING_EFFORT` is a launcher-level convenience (PR#18): unset
+(default) keeps the recipes' qualified `medium` default chat-template
+kwargs, and `none|minimal|low|medium|high|xhigh|max` rewrites just that
+key before launch. It is launcher-only -- the server does not read it --
+and an explicit per-request `reasoning_effort` always wins over the
+default. An invalid value stops the container at launch.
+
+`TP_SIZE=2` asks the Next recipes for two tensor-parallel ranks (the
+qualified default is `TP_SIZE=1`), but `TP_SIZE` does not grant GPU access:
+this compose.yaml reserves exactly one GPU under
+`deploy.resources.reservations.devices`, and Compose users who want TP2 must
+also edit that existing reservation to name two explicit ids — the complete
+item is:
+
+```yaml
+            - driver: nvidia
+              device_ids: ["0", "1"]
+              capabilities: [gpu]
+```
+
+Otherwise the recipe fails at launch with the visible-device count it found
+and this fragment, rather than hanging in NCCL or silently running TP1
+(`SGLANG_MM_PREPROCESS_DEVICE=cuda:N` outside the model range counts as an
+extra needed device). TP2 is experimental and not yet hardware-qualified
+on this image: expect a separate NIXL namespace per TP size, a replicated
+FR-Spec draft head, and one scheduler per GPU. Peer access is not verified
+at startup; if NCCL hangs during transport init on a consumer-PCIe host,
+`NCCL_P2P_DISABLE=1` can help isolate a P2P/ACS/IOMMU problem at a possible
+throughput cost the startup log repeats; the image never sets it for you.
+
 For the optional six-request Flash-Next profile, keep preprocessing on the CPU
 and set these values in `.env`:
 

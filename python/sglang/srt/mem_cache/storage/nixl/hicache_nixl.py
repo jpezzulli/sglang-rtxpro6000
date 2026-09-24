@@ -22,6 +22,7 @@ from sglang.srt.mem_cache.pool_host import HostKVCache
 from sglang.srt.mem_cache.storage.mmap import alloc_mmap
 from sglang.srt.mem_cache.storage.nixl.nixl_cleaner import HiCacheL3Cleaner
 
+from .namespace_layout import verify_derived_namespace_layout
 from .nixl_registry import NixlRegistry
 from .nixl_utils import NixlBackendConfig, NixlBackendSelection, NixlFileManager
 
@@ -89,6 +90,9 @@ class HiCacheNixl(HiCacheStorage):
         # Might be better to be unified across HiCache backends and moved to HiCacheController
         storage_dirs = _parse_storage_dirs(
             envs.SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR.get() or file_path
+        )
+        verify_derived_namespace_layout(
+            storage_dirs, storage_config.tp_size
         )
         self.file_manager = (
             NixlFileManager(storage_dirs, use_direct_io=use_direct_io)
