@@ -5,12 +5,11 @@ as the native installation. The default is Flash-Next with FR-Spec. Native
 installation remains supported and is documented in [`BUILD.md`](../../BUILD.md)
 and [`RUN.md`](../../RUN.md).
 
-Publishing v2.5.2 builds and uploads
-`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2` through GitHub Actions. Check the
-[Pennyroyal container workflow](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml)
-for availability. Python, the CUDA toolchain, NIXL POSIX, and prebuilt
-FlashInfer kernels are included; the host supplies the NVIDIA driver. Native
-installations remain independent of the container image.
+The prebuilt image is available at
+`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2`. It includes Python, the CUDA
+toolchain, NIXL POSIX, and prebuilt FlashInfer kernels. The host supplies the
+NVIDIA driver and model files. Follow the setup below; Compose will pull the
+image when you start it.
 
 ## Prerequisites
 

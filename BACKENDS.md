@@ -133,3 +133,36 @@ The 27B profile is dense and uses none of Flash-Next's routed-expert
 optimizations. Its measured stack has no separate local DeepGEMM SM120 patch.
 DFlash2 support comes from the upstream base plus the XQA mask and NIXL fixes
 above.
+
+## Qualified configuration matrix
+
+The matrix separates representation, datatype, backend, and capacity. “BF16
+runtime dtype” covers unquantized tensors; quantized kernels retain the formats
+listed in their own rows.
+
+| Property | Qwen3.8-27B + DFlash2 | Qwen3.8 Flash-Next |
+|---|---|---|
+| Target checkpoint | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) recipe reference; retained measurements used the [orcarouter derivative](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8) | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) |
+| Target weight format | block FP8 E4M3, 128x128 blocks | ModelOpt NVFP4, group size 16 on selected Linear modules |
+| Quantized-path activations | dynamic FP8 E4M3 | NVFP4 input activations on selected Linear modules |
+| Runtime dtype for unquantized tensors | BF16; includes excluded layers and BF16 `lm_head` | Default: BF16 for otherwise-unquantized tensors. Optional online FP8 converts eligible transformer linears, HC mix weights and `lm_head`; BF16 GDN state and the existing NVFP4 expert, router and FP8 PLE-table formats remain unchanged. |
+| Target KV datatype | FP8 E4M3 | FP8 E4M3 |
+| Speculative KV datatype | DFlash2 draft: FP8 E4M3 | native-MTP: FP8 E4M3 |
+| Recurrent/GDN SSM state | FP32 | BF16 |
+| Convolution state | BF16 | BF16 |
+| MoE backend | Not applicable: dense FP8 feed-forward layers | FlashInfer CUTLASS for target and native MTP |
+| Target attention | FlashInfer prefill; TRTLLM-MHA/XQA decode and fixed-width verify | QSA Triton sparse prefill; FlashInfer QSA wrapper resolving to XQA for sparse decode; general attention FlashInfer |
+| Linear/GDN attention | Triton decode, prefill, and state-writing verify | FlashInfer decode/prefill; WY output-only verify/recovery in `none` mode |
+| Speculative backend | DFlash2, 8 draft tokens, 2,048-token window | native NEXTN, 3 steps, top-k 1, 4 draft tokens |
+| Draft vocabulary | unchanged DFlash2 | 65,536-ID FR-Spec map introduced in v2.3; full target vocabulary unchanged |
+| Served context | 524,288, factor-2 YaRN target and draft | 524,288, factor-2 YaRN |
+| KV page size | 64 | 64 |
+| Recipe default GPU KV capacity | 1,118,784 target and draft tokens | 824,384 target and native-MTP tokens |
+| Mamba capacity | 24 slots; maximum 5 retained states/path | 24 slots by default; optional C6 uses 36; `extra_buffer`, tracking interval 64 |
+| HiCache/NIXL | 96 GB configured host tier; target KV + Mamba/GDN + DFlash2 state | 32 GB configured host tier; packed target/native-MTP KV + GDN + PLE + QSA keys. PLE table placement is RAM by default or optional NVMe. |
+| Maximum active requests | 4 | 4 by default; [optional 6](RUN.md#optional-six-request-flash-next-profile) |
+
+The current 27B launcher uses the 24-slot/five-state setting qualified on
+2026-08-26. The 2026-08-24 performance release used 16 slots, a three-state
+path cap, and a 1,194,496-token KV pool. [RESULTS.md](RESULTS.md) keeps the two
+campaigns and their allocations separate.

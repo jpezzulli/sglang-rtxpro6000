@@ -18,6 +18,7 @@ enabled. TP2 changes await verification from u/StockSpecialist1707.
 
 ## Start here
 
+- [Beta configurator](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/CONFIGURE.md): Guided native and container setup, saved settings, checks and launching.
 - [README](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/README.md): Model choices, release summary, performance tables and setup links.
 - [Docker and Compose](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/docker/pennyroyal/README.md): Prebuilt image, host mounts, profile selection and startup.
 - [Native build](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/BUILD.md): Fresh installation, updates, dependencies and checkpoints.
