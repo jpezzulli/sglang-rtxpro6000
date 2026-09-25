@@ -477,6 +477,8 @@ starting a recipe; unset or empty keeps the qualified medium. The recipes
 build `--default-chat-template-kwargs` from that single value, the server
 never reads the variable, and an invalid tier stops the launch.
 
+TP2 verification is pending from
+[u/StockSpecialist1707](https://www.reddit.com/user/StockSpecialist1707/).
 Natively, `TP_SIZE=2` makes the Next recipes claim GPUs 0..TP_SIZE-1 when
 `CUDA_VISIBLE_DEVICES` is unset, but it does not grant GPU access: the
 launch aborts with the visible-device count if fewer devices are visible

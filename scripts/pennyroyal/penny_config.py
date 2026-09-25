@@ -51,6 +51,10 @@ PROFILE_LABEL = {
     "next-plain": "Flash-Next NVFP4 + native NEXTN without FR-Spec",
     "27b": "Qwen3.8-27B FP8 + DFlash2",
 }
+# The --hicache-size literals the three serve recipes pass when the operator
+# chose nothing. --hicache-size counts decimal GB (server_args.hicache_size is
+# an INT and the host pool sizes itself at host_size * 1e9 bytes), not GiB.
+PROFILE_HICACHE_SIZE_GB = {"next": "32", "next-plain": "32", "27b": "96"}
 CONTAINER_MODELS_TARGET = "/models"
 DEFAULT_IMAGE = "ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2"
 COMPOSE_RELPATH = "docker/pennyroyal/compose.yaml"
@@ -106,9 +110,17 @@ SHARED_KEYS: tuple[KeySpec, ...] = (
     KeySpec("DRAFT_MODEL", "draft checkpoint directory (27b profile)", "path",
             prompt="Downloaded draft model directory (27b profile only)"),
     KeySpec("SGLANG_HICACHE_NIXL_MAX_CACHE_GB",
-            "soft byte budget for the NIXL FILE cache dirs, in GiB (0 disables)",
+            "soft byte budget for the NIXL FILE cache dirs, in GiB "
+            "(0 = no cap: the cache stays on and keeps growing)",
             "nonneg-number", default="0",
-            prompt="NIXL soft byte budget in GiB (0 = no budget)"),
+            prompt="Disk budget for the persistent NIXL cache, in GiB "
+                   "(0 = unlimited budget, not an off switch)"),
+    KeySpec("PENNY_HICACHE_SIZE_GB",
+            "host-RAM HiCache tier in decimal GB (blank = the recipe's "
+            "qualified default: 32 for the Next profiles, 96 for 27b)",
+            "positive-int",
+            prompt="RAM (HiCache) cache size in GB (1 GB = 1e9 bytes, not GiB; "
+                   "blank = the recipe's default for this profile)"),
     KeySpec("PENNY_PLE_BACKEND", "PLE table placement", "choice", ("ram", "nvme"),
             default="ram", advanced=True,
             prompt="PLE placement (ram or nvme)"),
@@ -139,35 +151,44 @@ SHARED_KEYS: tuple[KeySpec, ...] = (
 
 NATIVE_KEYS: tuple[KeySpec, ...] = (
     KeySpec("REPO_ROOT", "Pennyroyal repository directory", "path",
-            prompt="Pennyroyal repository directory"),
+            prompt="Where your Pennyroyal folder is (the one holding run-penny)"),
     KeySpec("VENV_PATH", "virtualenv that contains bin/sglang", "path",
-            prompt="Virtualenv directory (contains bin/sglang)"),
-    KeySpec("SGLANG_EXE", "sglang executable override", "path", advanced=True),
-    KeySpec("PYTHON", "python interpreter override", "path", advanced=True),
+            prompt="Your Python environment folder (the one with bin/sglang)"),
+    KeySpec("SGLANG_EXE", "sglang executable override", "path", advanced=True,
+           prompt="Expert: the exact sglang program to run"),
+    KeySpec("PYTHON", "python interpreter override", "path", advanced=True,
+           prompt="Expert: the exact python program to run"),
     KeySpec("CACHE_BASE", "compiler and runtime cache root", "path",
-            prompt="Compiler/runtime cache root"),
+            prompt="Folder for the compiled and runtime caches"),
     KeySpec("NIXL_STORAGE_BASE", "persistent NIXL FILE cache root", "path",
-            prompt="Persistent NIXL storage root"),
+            prompt="Folder for the persistent NIXL cache on disk"),
     KeySpec("PENNY_BUILD_JOBS", "first-start compile jobs (empty = 4)",
             "positive-int", advanced=True,
             prompt="Build jobs for first-start compilation (empty = recipe default)"),
     KeySpec("NIXL_PREFIX", "NIXL install prefix outside the linker path",
-            "path", advanced=True),
+            "path", advanced=True,
+            prompt="Expert: where NIXL is installed, when that prefix is "
+                   "outside the normal linker path"),
     KeySpec("GPU", "GPU index or UUID used for the model", "gpu", default="0",
             prompt="GPU index or UUID"),
 )
 
 CONTAINER_KEYS: tuple[KeySpec, ...] = (
     KeySpec("PENNYROYAL_IMAGE", "container image reference", "token",
-            default=DEFAULT_IMAGE, advanced=True, prompt="Container image"),
+            default=DEFAULT_IMAGE, advanced=True,
+            prompt="Expert: which container image to start"),
     KeySpec("COMPOSE_FILE", "compose file path", "path",
-            prompt="Compose file"),
+            prompt="Compose file to run (usually the shipped "
+                   "docker/pennyroyal/compose.yaml)"),
     KeySpec("HOST_MODELS_ROOT", "host directory mounted read-only at /models",
-            "path", prompt="Host directory mounted read-only at /models"),
+            "path", prompt="Host folder holding your downloaded models "
+                          "(mounted read-only at /models)"),
     KeySpec("HOST_CACHE_BASE", "writable host directory mounted at /cache",
-            "path", prompt="Host directory for writable caches"),
+            "path", prompt="Host folder for the compiled and runtime caches "
+                          "(mounted at /cache)"),
     KeySpec("HOST_NIXL_STORAGE_BASE", "writable host directory at /nixl",
-            "path", prompt="Host directory for persistent NIXL storage"),
+            "path", prompt="Host folder for the persistent NIXL cache on disk "
+                          "(mounted at /nixl)"),
     KeySpec("USER_ID", "numeric UID that owns the writable directories",
             "int", default="1000", advanced=True,
             prompt="Runtime UID (numeric owner of the writable directories)"),
@@ -791,8 +812,8 @@ def _plan_native(config: Config, environ: dict[str, str],
                  "SGLANG_SM120_ONLINE_MXFP8", "SGLANG_MM_PREPROCESS_DEVICE",
                  "SGLANG_FORWARD_UNKNOWN_TOOLS", "MAX_RUNNING_REQUESTS",
                  "MAX_MAMBA_CACHE_SIZE", "MAX_TOTAL_TOKENS",
-                 "SGLANG_HICACHE_NIXL_MAX_CACHE_GB", "PENNY_BUILD_JOBS",
-                 "NIXL_PREFIX"):
+                 "SGLANG_HICACHE_NIXL_MAX_CACHE_GB", "PENNY_HICACHE_SIZE_GB",
+                 "PENNY_BUILD_JOBS", "NIXL_PREFIX"):
         _adopt(plan, config, environ, name)
     gpu = _adopt(plan, config, environ, "GPU") or "0"
     plan.env["CUDA_VISIBLE_DEVICES"] = gpu
@@ -857,8 +878,9 @@ def _plan_native(config: Config, environ: dict[str, str],
         f"cache root: {cache_base}",
         f"NIXL root: {nixl_base}",
         f"GPU: {gpu}",
-        f"NIXL byte budget: {plan.env.get('SGLANG_HICACHE_NIXL_MAX_CACHE_GB', '0')}"
-        " GiB (0 = no budget)",
+        _hicache_size_line(plan.env.get("PENNY_HICACHE_SIZE_GB", ""),
+                           config.profile),
+        _nixl_budget_line(plan.env.get("SGLANG_HICACHE_NIXL_MAX_CACHE_GB", "0")),
     ]
     launcher = root / "run-penny"
     # The printed command has to reload exactly this plan from anywhere, so it
@@ -871,6 +893,43 @@ def _plan_native(config: Config, environ: dict[str, str],
         args += ["--profile", config.cli_profile]
     plan.next_command = " ".join(quote_command_arg(arg) for arg in args)
     return plan
+
+
+def _hicache_size_line(chosen: str, profile: str) -> str:
+    """Say which --hicache-size the recipe will pass, and in which unit.
+
+    The unit is decimal GB (server_args.hicache_size is an INT consumed as
+    host_size * 1e9 bytes), never GiB, and it is separate from the PLE
+    embedding table, which lives in its own host-RAM/NVMe placement.
+    """
+    default = PROFILE_HICACHE_SIZE_GB[profile]
+    if chosen:
+        return (f"RAM cache (HiCache): {chosen} GB as --hicache-size "
+                f"(1 GB = 1e9 bytes, not GiB; the recipe default "
+                f"{default} GB is not used)")
+    return (f"RAM cache (HiCache): {default} GB as --hicache-size "
+            f"(1 GB = 1e9 bytes, not GiB; the recipe default for this "
+            f"profile; unset keeps it)")
+
+
+def _nixl_budget_line(budget: str) -> str:
+    """Name the NIXL disk budget honestly: 0 means no cap, not cache off.
+
+    Every numeric spelling of zero (0, 0.0, 0.00, .0, 00, 0.) is the same
+    unlimited budget to the runtime, so the summary must not call any of them
+    a cap. Anything that is not a number at all (a hand-edited value that
+    failed validation elsewhere) never crashes the summary; it is shown as a
+    cap and named by the plan's own error reporting.
+    """
+    try:
+        unlimited = budget == "" or float(budget) == 0
+    except ValueError:
+        unlimited = False
+    if unlimited:
+        return ("NIXL disk budget: 0 GiB = no cap; the persistent NIXL cache "
+                "stays enabled and keeps growing")
+    return (f"NIXL disk budget: {budget} GiB cap on the persistent NIXL "
+            f"cache dirs (the cache stays enabled)")
 
 
 def _plan_container(config: Config, environ: dict[str, str],
@@ -895,6 +954,7 @@ def _plan_container(config: Config, environ: dict[str, str],
     _adopt(plan, config, environ, "MAX_MAMBA_CACHE_SIZE")
     _adopt(plan, config, environ, "MAX_TOTAL_TOKENS")
     _adopt(plan, config, environ, "SGLANG_HICACHE_NIXL_MAX_CACHE_GB")
+    _adopt(plan, config, environ, "PENNY_HICACHE_SIZE_GB")
     _adopt(plan, config, environ, "USER_ID")
     _adopt(plan, config, environ, "GROUP_ID")
     # The saved names are the variables the Compose file already reads, so no
@@ -987,8 +1047,9 @@ def _plan_container(config: Config, environ: dict[str, str],
         f":{plan.env.get('GROUP_ID', '1000')}",
         f"API port: {port}",
         f"GPU: {gpu}",
-        f"NIXL byte budget: {plan.env.get('SGLANG_HICACHE_NIXL_MAX_CACHE_GB', '0')}"
-        " GiB (0 = no budget)",
+        _hicache_size_line(plan.env.get("PENNY_HICACHE_SIZE_GB", ""),
+                           config.profile),
+        _nixl_budget_line(plan.env.get("SGLANG_HICACHE_NIXL_MAX_CACHE_GB", "0")),
     ]
     return plan
 
@@ -1006,7 +1067,8 @@ COMPOSE_CRITICAL_KEYS = (PROFILE_KEY, "TARGET_MODEL", "DRAFT_MODEL",
                          "HOST_MODELS_ROOT", "HOST_CACHE_BASE",
                          "HOST_NIXL_STORAGE_BASE", "PENNYROYAL_IMAGE",
                          "PENNYROYAL_PORT", "NVIDIA_GPU", "USER_ID", "GROUP_ID",
-                         "SGLANG_HICACHE_NIXL_MAX_CACHE_GB")
+                         "SGLANG_HICACHE_NIXL_MAX_CACHE_GB",
+                         "PENNY_HICACHE_SIZE_GB")
 
 
 def compose_launch_command(plan: Plan) -> str:

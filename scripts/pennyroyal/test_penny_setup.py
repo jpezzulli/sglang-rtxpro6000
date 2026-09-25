@@ -132,13 +132,16 @@ class SetupSessionTests(FixtureMixin):
                               home=home or self.base / "isolated-home")
         return code, out.getvalue(), path
 
-    def basics(self, target: str, *, draft: str | None = None) -> list[str]:
+    def basics(self, target: str, *, draft: str | None = None,
+               hicache: str = "") -> list[str]:
         """Answers for REPO_ROOT, VENV_PATH, TARGET[_DRAFT], CACHE_BASE,
-        NIXL_STORAGE_BASE, GPU, and the NIXL budget; defaults stay blank."""
+        NIXL_STORAGE_BASE, GPU, the NIXL byte budget, the RAM (HiCache) size,
+        and the media menu; defaults stay blank. hicache '' means 'keep the
+        profile's recipe default'."""
         answers = ["", str(self.venv), target]
         if draft is not None:
             answers.append(draft)
-        return answers + ["", str(self.nixl), "0", "0", ""]
+        return answers + ["", str(self.nixl), "0", "0", hicache, ""]
 
     def test_full_flow_writes_a_file_the_launcher_accepts(self):
         code, output, path = self.run_setup(["next"] + self.basics(
@@ -193,7 +196,7 @@ class SetupSessionTests(FixtureMixin):
                     f"CACHE_BASE={pc.quote_value(str(self.cache))}\n"
                     f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n")
         code, output, path = self.run_setup(
-            ["", "", str(self.venv), "", "", "", "0", "0", "", "n", "n"],
+            ["", "", str(self.venv), "", "", "", "0", "0", "", "", "n", "n"],
             existing=existing)
         self.assertEqual(code, 3, output)
         self.assertIn("Replace", output)
@@ -406,7 +409,7 @@ class SetupSessionTests(FixtureMixin):
         # the manual row asks for a NUMERIC logical index and stores cuda:N;
         # 'cuda:1' typed by hand also lands on cuda:1; junk is re-asked.
         code, output, path = self.run_setup(
-            ["next"] + base[:7] + ["3", "junk", "1"] +
+            ["next"] + base[:8] + ["3", "junk", "1"] +
             ["y",                       # yes to the advanced section
              "",                        # PLE placement menu: Enter keeps ram
              "/nvme-unused-with-ram",   # free-text path stays free text
@@ -448,7 +451,7 @@ class SetupSessionTests(FixtureMixin):
         # 'q' at the media menu cancels through the shared _read contract and
         # the existing file stays byte-for-byte as it was.
         with self.assertRaises(ps.Cancelled):
-            self.run_setup([""] + self.basics("")[:7] + ["q"],
+            self.run_setup([""] + self.basics("")[:8] + ["q"],
                            existing=existing)
         self.assertEqual(path.read_text(), existing)
         # A junk saved value cannot be kept by Enter: the menu rejects and
@@ -458,7 +461,7 @@ class SetupSessionTests(FixtureMixin):
         # First Enter would keep the junk saved value; it is rejected, the
         # second Enter is refused outright, and only an explicit pick passes.
         code, output, path = self.run_setup(
-            [""] + self.basics("")[:7] + ["", "", "1"] + ["n", "y"],
+            [""] + self.basics("")[:8] + ["", "", "1"] + ["n", "y"],
             existing=broken)
         self.assertEqual(code, 0, output)
         self.assertIn("must be cpu or cuda:N, got 'GPUs'", output)
@@ -568,7 +571,7 @@ class SetupSessionTests(FixtureMixin):
                     f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n"
                     "MAX_RUNNING_REQUESTS=\n")
         code, output, path = self.run_setup(
-            ["", "", str(self.venv), "", "", "", "0", "0", "", "n", "y"],
+            ["", "", str(self.venv), "", "", "", "0", "0", "", "", "n", "y"],
             existing=existing)
         self.assertEqual(code, 0, output)
         saved = pc.read_env_file(path)
@@ -636,6 +639,116 @@ class SetupSessionTests(FixtureMixin):
         self.assertEqual(code, 0, output)
         self.assertIn("Saving despite the errors", output)
         self.assertIn("ERROR", output)  # still visible, never claimed ready
+
+    def test_normal_setup_omits_the_installation_plumbing_questions(self):
+        # A first run asks about models, caches, and the GPU only: the sglang
+        # and python programs, the image, the runtime identity, the NIXL
+        # prefix, and the compile jobs wait for the advanced section.
+        code, output, path = self.run_setup(
+            ["next"] + self.basics(str(self.next_model)) + ["n", "y"])
+        self.assertEqual(code, 0, output)
+        for absent in ("SGLANG_EXE", "PYTHON", "PENNYROYAL_IMAGE",
+                       "USER_ID", "GROUP_ID", "NIXL_PREFIX",
+                       "PENNY_BUILD_JOBS"):
+            self.assertNotIn(absent, output.split("Review")[0])
+        self.assertIn("Where your Pennyroyal folder is", output)
+        self.assertIn("Your Python environment folder", output)
+        saved = pc.read_env_file(path)
+        self.assertNotIn("SGLANG_EXE", saved)
+
+    def test_labels_keep_ram_gigabytes_disk_gibibytes_and_compiled_cache_apart(self):
+        # Three different 'caches' exist and the wizard never calls them the
+        # same thing: the RAM (HiCache) tier is decimal GB (1e9 bytes), the
+        # NIXL budget is a GiB disk cap whose 0 means unlimited, and the
+        # compiled-cache folder is neither.
+        code, output, path = self.run_setup(
+            ["next"] + self.basics(str(self.next_model)) + ["n", "y"])
+        self.assertEqual(code, 0, output)
+        # The configurator says what it is: an early BETA, not a finished UI.
+        self.assertIn("Pennyroyal setup (BETA)", output)
+        self.assertIn("separate from the PLE embedding table", output)
+        asked = output.split("Review")[0]
+        ram = asked.split("RAM (HiCache) cache size in GB")[1].split("\n")[0]
+        self.assertIn("1e9 bytes, not GiB", asked)
+        self.assertIn("blank = the recipe's default", ram)
+        self.assertIn("Disk budget for the persistent NIXL cache, in GiB",
+                      asked)
+        self.assertIn("0 = unlimited budget, not an off switch", asked)
+        self.assertIn("Folder for the compiled and runtime caches", asked)
+        self.assertIn("not the RAM model cache", asked)
+        self.assertIn("separate from the PLE embedding table", asked)
+
+    def test_small_hicache_size_is_saved_and_only_junk_is_reasked(self):
+        # 1 GB is a real choice (the pool code warns about a smaller-than-device
+        # pool instead of clamping), while 0/negative/fractional/nonnumeric is
+        # re-asked without ever losing the blank default.
+        for size in ("1", "2"):
+            code, output, path = self.run_setup(
+                ["next"] + self.basics(str(self.next_model), hicache=size)
+                + ["n", "y"])
+            self.assertEqual(code, 0, output)
+            saved = pc.read_env_file(path)
+            self.assertEqual(saved["PENNY_HICACHE_SIZE_GB"], size)
+            plan = pc.build_plan("native", pc.load_config("native", path, {},
+                                                          self.repo), {},
+                                 repo_root=self.repo)
+            self.assertEqual(plan.env["PENNY_HICACHE_SIZE_GB"], size)
+        fields = self.basics(str(self.next_model))
+        code, output, path = self.run_setup(
+            ["next"] + fields[:7]
+            + ["0", "-1", "1.5", "two", ""]   # junk is re-asked, Enter = blank
+            + fields[8:] + ["n", "y"],
+            config_path=self.base / "junk-hicache.env")
+        self.assertEqual(code, 0, output)
+        for junk in ("0", "-1", "1.5", "two"):
+            self.assertIn(f"must be a positive integer, got '{junk}'", output)
+        # Enter after the re-asks is still the documented blank: a never-saved
+        # optional key stays absent from the file, which means 'the recipe
+        # decides' and exports nothing to the recipe.
+        self.assertNotIn("PENNY_HICACHE_SIZE_GB", pc.read_env_file(path))
+        plan = pc.build_plan("native", pc.load_config("native", path, {},
+                                                      self.repo), {},
+                             repo_root=self.repo)
+        self.assertNotIn("PENNY_HICACHE_SIZE_GB", plan.env)
+        self.assertIn("RAM cache (HiCache): 32 GB as --hicache-size",
+                      "\n".join(plan.summary))
+
+    def test_saved_installation_overrides_survive_a_normal_run_and_advance_next(self):
+        # Honouring existing saved overrides: an advanced key the declined
+        # section never asked about stays byte-identical, and when the operator
+        # does open the advanced section the saved value is the offered default.
+        existing = (f"{pc.PROFILE_KEY}=next\n"
+                    f"TARGET_MODEL={pc.quote_value(str(self.next_model))}\n"
+                    f"CACHE_BASE={pc.quote_value(str(self.cache))}\n"
+                    f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n"
+                    "PENNY_HICACHE_SIZE_GB=2\n"
+                    "PENNY_BUILD_JOBS=8\n")
+        code, output, path = self.run_setup(
+            [""] + self.basics("") + ["n", "y"], existing=existing)
+        self.assertEqual(code, 0, output)
+        saved = pc.read_env_file(path)
+        self.assertEqual(saved["PENNY_HICACHE_SIZE_GB"], "2")
+        self.assertEqual(saved["PENNY_BUILD_JOBS"], "8")
+        # Enter on the shown RAM size keeps the saved 2 GB.
+        self.assertIn("variable PENNY_HICACHE_SIZE_GB", output)
+        # Opening the advanced section offers the saved jobs count as default.
+        # Eleven answers cover the advanced keys (two menus, the capacity
+        # knobs, the install paths); every one of them presses Enter.
+        code, output, path = self.run_setup(
+            [""] + self.basics("") + ["y",
+                                      "",                       # PLE menu: ram
+                                      "/nvme-unused-with-ram",  # snapshot path
+                                      "false",                  # online FP8
+                                      "true",                   # unknown tools
+                                      "", "", "", "",           # capacity + jobs
+                                      "/opt/nixl",              # NIXL prefix
+                                      str(self.venv / "bin" / "sglang"),
+                                      str(self.venv / "bin" / "python")] + ["y"],
+            existing=existing)
+        self.assertEqual(code, 0, output)
+        self.assertIn("Build jobs for first-start compilation (empty = recipe "
+                      "default) [8]", output)
+        self.assertEqual(pc.read_env_file(path)["PENNY_BUILD_JOBS"], "8")
 
     def test_mixup_checkpoint_blocks_save_as_clear_error(self):
         # A dense checkpoint on the next profile is the parent's mixup case.

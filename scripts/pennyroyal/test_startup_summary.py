@@ -130,6 +130,13 @@ class StartupSummaryTest(unittest.TestCase):
         self.assertIn("PLE: not applicable", output)
 
     def test_all_launcher_argv_match_the_base_exec_blocks(self):
+        # The comparison needs the base commit's blobs. A shallow or partial
+        # clone may not carry that object at all; say so instead of reporting
+        # a recipe regression that never happened.
+        probe = subprocess.run(["git", "cat-file", "-t", BASE], cwd=ROOT,
+                               capture_output=True, text=True)
+        if probe.returncode != 0:
+            self.skipTest(f"base commit {BASE[:10]} is not available here")
         for launcher in LAUNCHERS:
             with self.subTest(launcher=launcher), tempfile.TemporaryDirectory() as temp:
                 temp_root = Path(temp)
@@ -155,11 +162,29 @@ class StartupSummaryTest(unittest.TestCase):
                     base_block, executable, base_capture
                 )
                 current_argv, current_output = self._run_launch_block(
-                    current_block, executable, current_capture
+                    current_block, executable, current_capture,
+                    # The chosen RAM cache size is now a variable the recipe
+                    # guards; with no choice made it must expand to the same
+                    # qualified literal the base block still hardcodes, so the
+                    # two argvs stay byte-identical.
+                    hicache_size=self._qualified_hicache_size(current_source),
                 )
                 self.assertNotIn("Pennyroyal startup — requested settings", base_output)
                 self.assertIn("Pennyroyal startup — requested settings", current_output)
                 self.assertEqual(base_argv, current_argv)
+
+    @staticmethod
+    def _qualified_hicache_size(current_source: str) -> str:
+        import re
+
+        match = re.search(
+            r'^HICACHE_SIZE_GB="\$\{PENNY_HICACHE_SIZE_GB:-([0-9]+)\}"$',
+            current_source,
+            re.MULTILINE,
+        )
+        if not match:
+            raise AssertionError("the recipe lost its qualified HiCache default")
+        return match.group(1)
 
     @staticmethod
     def _from_last_line(source: str, prefix: str) -> str:
@@ -170,7 +195,8 @@ class StartupSummaryTest(unittest.TestCase):
         return "\n".join(lines[matches[-1] :]) + "\n"
 
     def _run_launch_block(
-        self, block: str, executable: Path, capture: Path
+        self, block: str, executable: Path, capture: Path,
+        hicache_size: str = "",
     ) -> tuple[list[str], str]:
         scalar_values = {
             "SGLANG_EXE": str(executable),
@@ -189,6 +215,13 @@ class StartupSummaryTest(unittest.TestCase):
             "PREFILL_CHUNK_SIZE": "4096",
             "MAMBA_SSM_DTYPE": "bfloat16",
             "MAMBA_TRACK_INTERVAL": "256",
+            # The Next recipes read these from request-capacity.sh, whose
+            # defaults are the literals the older block still hardcodes, so
+            # giving the fixture the same values compares identical argv.
+            "MAX_RUNNING_REQUESTS": "4",
+            "MAX_MAMBA_CACHE_SIZE": "24",
+            # The integrated release sources this unchanged default separately.
+            "DEFAULT_CHAT_TEMPLATE_KWARGS": '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}',
             "NIXL_CONFIG": "/configs/NIXL config [qualified].json",
             "CHAT_TEMPLATE": "/templates/chat template (tools).jinja",
             "IMAGE_PROCESSOR_BACKEND": "sglang",
@@ -196,6 +229,8 @@ class StartupSummaryTest(unittest.TestCase):
             "DRAFT_TOKENS": "8",
             "DRAFT_WINDOW_SIZE": "32",
         }
+        if hicache_size:
+            scalar_values["HICACHE_SIZE_GB"] = hicache_size
         lines = ["set -euo pipefail"]
         lines.extend(
             f"{name}={shlex.quote(value)}" for name, value in scalar_values.items()

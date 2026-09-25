@@ -12,6 +12,7 @@ import ast
 import json
 import math
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -219,6 +220,35 @@ class ParsingTests(unittest.TestCase):
                     produced[key] = _decode_compose_scalar(stripped[len(key) + 2:])
         self.assertEqual(produced, values)
 
+    def test_hicache_size_and_nixl_budget_labels_keep_their_units_apart(self):
+        # The RAM (HiCache) knob is decimal GB (SGLang sizes the host pool at
+        # size * 1e9 bytes), the NIXL knob is a GiB disk budget whose 0 means
+        # 'no cap', and neither is the compiled-cache folder.
+        specs = pc.specs_for("native")
+        hicache = specs["PENNY_HICACHE_SIZE_GB"]
+        nixl = specs["SGLANG_HICACHE_NIXL_MAX_CACHE_GB"]
+        self.assertIn("1e9 bytes, not GiB", hicache.prompt)
+        self.assertEqual(hicache.kind, "positive-int")
+        self.assertIn("qualified default", hicache.description)
+        self.assertIn("GiB", nixl.prompt)
+        self.assertIn("unlimited", nixl.prompt)
+        self.assertNotIn("HiCache", specs["CACHE_BASE"].prompt)
+        self.assertNotIn("HiCache", specs["CACHE_BASE"].description)
+        # Both cache-size knobs stay in the main wizard: the RAM tier is
+        # user-chosen, not an advanced afterthought.
+        self.assertFalse(hicache.advanced)
+        self.assertFalse(nixl.advanced)
+        # A positive integer is honored at any size; the documented junk is
+        # rejected the same way the capacity knobs already are.
+        for value in ("1", "2", "96", "1024"):
+            self.assertEqual(pc.validate_value(hicache, value, "t"), value)
+        for bad in ("0", "-1", "1.5", "32abc", " 4"):
+            with self.assertRaises(pc.ConfigError):
+                pc.validate_value(hicache, bad, "t")
+        # The NIXL budget keeps accepting a small decimal and 0.
+        for value in ("0", "0.5", "200"):
+            self.assertEqual(pc.validate_value(nixl, value, "t"), value)
+
     def test_validation_accepts_documented_forms(self):
         specs = pc.specs_for("native")
         self.assertEqual(pc.validate_value(specs["SGLANG_SM120_ONLINE_MXFP8"],
@@ -239,6 +269,266 @@ class ParsingTests(unittest.TestCase):
                 pc.validate_value(
                     pc.specs_for("native")["SGLANG_HICACHE_NIXL_MAX_CACHE_GB"],
                     bad, "t")
+
+
+class HiCacheSizePlanTests(FixtureMixin):
+    """The chosen RAM cache size reaches the recipe without touching anything
+    else: an unset key keeps the profile's qualified literal, and the saved
+    blank keeps suppressing an inherited value instead of inventing a default.
+    """
+
+    def summary_has(self, plan: pc.Plan, prefix: str) -> str:
+        return "\n".join(line for line in plan.summary
+                        if line.startswith(prefix))
+
+    def test_unset_size_leaves_the_recipe_default_alone_per_profile(self):
+        for profile, default in (("next", "32"), ("next-plain", "32"),
+                                 ("27b", "96")):
+            with self.subTest(profile=profile):
+                dense = profile == "27b"
+                plan = self.native_plan(
+                    self.native_env(
+                        TARGET_MODEL=str(self.dense_model if dense
+                                         else self.next_model),
+                        DRAFT_MODEL=str(self.draft_model) if dense else None),
+                    profile=profile)
+                self.assertEqual(plan.errors, [])
+                # Nothing is exported: the recipe's own literal still decides.
+                self.assertNotIn("PENNY_HICACHE_SIZE_GB", plan.env)
+                self.assertTrue(self.summary_has(
+                    plan, f"RAM cache (HiCache): {default} GB as "
+                          f"--hicache-size"))
+
+    def test_explicit_small_size_is_exported_and_reported(self):
+        for size in ("1", "2"):
+            with self.subTest(size=size):
+                plan = self.native_plan({**self.native_env(),
+                                         "PENNY_HICACHE_SIZE_GB": size})
+                self.assertEqual(plan.errors, [])
+                self.assertEqual(plan.env["PENNY_HICACHE_SIZE_GB"], size)
+                self.assertTrue(self.summary_has(
+                    plan, f"RAM cache (HiCache): {size} GB as --hicache-size"))
+                # The environment is the only plumbing: the recipe path and its
+                # argv stay exactly what they were.
+                self.assertEqual(
+                    Path(plan.argv[0]).name,
+                    "serve-flash-next-frspec.sh")
+
+    def test_saved_blank_resets_to_the_recipe_default_and_still_suppresses(self):
+        # Blank means 'the recipe decides': no utility default exists, so the
+        # exported value is the empty string and the recipe's own
+        # ${PENNY_HICACHE_SIZE_GB:-32} fires — while an ambient 8 cannot leak
+        # past the saved blank.
+        plan = self.native_plan({**self.native_env(),
+                                 "PENNY_HICACHE_SIZE_GB": ""},
+                                environ={"PENNY_HICACHE_SIZE_GB": "8"})
+        self.assertEqual(plan.env["PENNY_HICACHE_SIZE_GB"], "")
+        self.assertIn("blank", plan.origins["PENNY_HICACHE_SIZE_GB"])
+        self.assertEqual(self.messages(plan, "error"), "")
+        self.assertTrue(self.summary_has(
+            plan, "RAM cache (HiCache): 32 GB as --hicache-size"))
+
+    def test_ambient_small_size_reaches_the_recipe_when_not_saved(self):
+        plan = self.native_plan(self.native_env(),
+                                environ={"PENNY_HICACHE_SIZE_GB": "2"})
+        self.assertEqual(plan.env["PENNY_HICACHE_SIZE_GB"], "2")
+        self.assertEqual(plan.origins["PENNY_HICACHE_SIZE_GB"],
+                         "inherited environment")
+
+    def test_container_passes_the_size_as_one_more_environment_value(self):
+        # The Compose file only gains a pass-through: its own default stays
+        # empty so the recipe's qualified literal still answers when the
+        # operator chose nothing, and no mount, port, or image setting moves.
+        compose_text = (ROOT / pc.COMPOSE_RELPATH).read_text()
+        self.assertIn("PENNY_HICACHE_SIZE_GB: ${PENNY_HICACHE_SIZE_GB:-}\n",
+                      compose_text)
+        self.assertIn("SGLANG_HICACHE_NIXL_MAX_CACHE_GB: "
+                      "${SGLANG_HICACHE_NIXL_MAX_CACHE_GB:-0}", compose_text)
+        self.assertNotIn("version:", compose_text)
+        compose_dir = self.repo / "docker" / "pennyroyal"
+        compose_dir.mkdir(parents=True, exist_ok=True)
+        (compose_dir / "compose.yaml").write_text(compose_text)
+        env_file = compose_dir / ".env"
+        (self.base / "hm").mkdir()
+        values = {"HOST_MODELS_ROOT": str(self.base / "hm"),
+                  "HOST_CACHE_BASE": str(self.cache),
+                  "HOST_NIXL_STORAGE_BASE": str(self.nixl),
+                  "PENNY_HICACHE_SIZE_GB": "2"}
+        env_file.write_text(pc.serialize_env(
+            [("", sorted(values.items()))],
+            header=(f"{pc.PROFILE_KEY}=next",)))
+        config = pc.load_config("container", env_file, {}, self.repo)
+        plan = pc.build_plan("container", config, {}, repo_root=self.repo)
+        self.assertEqual(plan.env["PENNY_HICACHE_SIZE_GB"], "2")
+        self.assertEqual(plan.forced_env["PENNY_HICACHE_SIZE_GB"], "2")
+        self.assertIn("PENNY_HICACHE_SIZE_GB=2", plan.next_command)
+        self.assertTrue(self.summary_has(
+            plan, "RAM cache (HiCache): 2 GB as --hicache-size"))
+
+
+class RecipeHiCacheSizeTests(unittest.TestCase):
+    """The shipped recipes read the chosen size and reject unusable ones.
+
+    Only the guard block and the launch block run (bash, no GPU, no model, no
+    install): an unset or blank choice must keep the profile's qualified
+    literal, which is what the launch argv contained before this knob existed.
+    """
+
+    RECIPES = {"serve-flash-next.sh": "32",
+               "serve-flash-next-frspec.sh": "32",
+               "serve-qwen38-27b-dflash2.sh": "96"}
+
+    def source(self, recipe: str) -> str:
+        return (ROOT / "configs" / "pennyroyal" / recipe).read_text()
+
+    def guard_block(self, recipe: str) -> str:
+        lines = self.source(recipe).splitlines()
+        start = next((index for index, line in enumerate(lines)
+                      if line.startswith("HICACHE_SIZE_GB=")), None)
+        if start is None:
+            raise AssertionError(f"no HiCache size guard in {recipe}")
+        end = next(index for index in range(start, len(lines))
+                   if lines[index] == "fi")
+        return "\n".join(lines[start:end + 1]) + "\n"
+
+    def run_guard(self, block: str, value: str | None
+                  ) -> subprocess.CompletedProcess:
+        env = {key: item for key, item in os.environ.items()
+               if key != "PENNY_HICACHE_SIZE_GB"}
+        if value is not None:
+            env["PENNY_HICACHE_SIZE_GB"] = value
+        return subprocess.run(["bash", "-c",
+                               f"set -euo pipefail\n{block}"
+                               'printf "%s\\n" "$HICACHE_SIZE_GB"'],
+                              capture_output=True, text=True, check=False,
+                              env=env)
+
+    def test_unset_keeps_the_profile_literal_and_a_choice_is_honored(self):
+        for recipe, qualified in self.RECIPES.items():
+            with self.subTest(recipe=recipe):
+                block = self.guard_block(recipe)
+                self.assertIn(f'"${{PENNY_HICACHE_SIZE_GB:-{qualified}}}"',
+                              block)
+                for value, expected in ((None, qualified), ("", qualified),
+                                        ("1", "1"), ("2", "2"),
+                                        ("512", "512")):
+                    run = self.run_guard(block, value)
+                    self.assertEqual(run.returncode, 0, run.stderr)
+                    self.assertEqual(run.stdout.strip(), expected)
+
+    def test_invalid_sizes_fail_before_the_recipe_starts(self):
+        for recipe in self.RECIPES:
+            with self.subTest(recipe=recipe):
+                block = self.guard_block(recipe)
+                for bad in ("0", "-1", "1.5", "two", "32 --hicache-ratio 4"):
+                    run = self.run_guard(block, bad)
+                    self.assertNotEqual(run.returncode, 0)
+                    self.assertIn("must be a positive integer", run.stderr)
+
+    # The scalars the final launch block still expands, so the real block can
+    # run against a capturing stub sglang (same fixture idea the startup
+    # summary tests use: bash only, nothing installed, no GPU, no model).
+    LAUNCH_SCALARS = {
+        "SCRIPT_DIR": str(ROOT / "configs" / "pennyroyal"),
+        "TARGET_MODEL": "/models/target model [v1]",
+        "DRAFT_MODEL": "/models/draft model (small)",
+        "TP_SIZE": "1",
+        "COMPUTE_DTYPE": "bfloat16",
+        "KV_DTYPE": "fp8_e4m3",
+        "TARGET_KV_DTYPE": "fp8_e4m3",
+        "DRAFT_KV_DTYPE": "fp8_e5m2",
+        "CONTEXT_LENGTH": "524288",
+        "TARGET_OVERRIDES": '{"path":"target value"}',
+        "DRAFT_OVERRIDES": '{"path":"draft value"}',
+        "PAGE_SIZE": "64",
+        "PREFILL_CHUNK_SIZE": "4096",
+        "MAMBA_SSM_DTYPE": "bfloat16",
+        "MAMBA_CONV_DTYPE": "bfloat16",
+        "MAMBA_TRACK_INTERVAL": "64",
+        "MAX_MAMBA_CACHE_SIZE": "24",
+        "MAX_RUNNING_REQUESTS": "4",
+        # The integrated release sources the default from reasoning-effort.sh.
+        "DEFAULT_CHAT_TEMPLATE_KWARGS": '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}',
+        "NIXL_CONFIG": "/configs/NIXL config [qualified].toml",
+        "CHAT_TEMPLATE": "/templates/chat template (tools).jinja",
+        "IMAGE_PROCESSOR_BACKEND": "pil",
+        "TOKEN_MAP": "/maps/token map [FR Spec].pt",
+        "DRAFT_TOKENS": "8",
+        "DRAFT_WINDOW_SIZE": "2048",
+        "PLE_NAMESPACE_ARGS": "",
+    }
+
+    def launch_argv(self, recipe: str, chosen: str | None) -> tuple[list[str],
+                                                                    str]:
+        source = self.source(recipe).splitlines()
+        start = next(index for index, line in enumerate(source)
+                     if line.startswith("launch_args=(serve"))
+        block = "\n".join(source[start:])
+        # Drop the summary source/exec tail and print the array instead, so a
+        # stub binary is never needed and nothing is executed.
+        block = block.replace('source "$SCRIPT_DIR/startup-summary.sh"\n', "")
+        self.assertIn('exec "$SGLANG_EXE" "${launch_args[@]}"', block)
+        block = block.replace('exec "$SGLANG_EXE" "${launch_args[@]}"',
+                              'printf \'%s\\0\' "${launch_args[@]}"')
+        lines = ["set -euo pipefail",
+                 "pennyroyal_startup_summary() { :; }"]
+        lines.extend(f"{name}={shlex.quote(value)}"
+                     for name, value in self.LAUNCH_SCALARS.items())
+        lines.append("TOKEN_CAP_ARGS=(--max-total-tokens 824384)")
+        lines.append("PLE_ARGS=(--ple-offload-embedding)")
+        if chosen is not None:
+            lines.append(f"HICACHE_SIZE_GB={shlex.quote(chosen)}")
+        else:
+            # No choice at all: the recipe's own guard must produce the
+            # qualified literal (the environment below never defines it).
+            lines.extend(self.guard_block(recipe).splitlines())
+        lines.append(block)
+        run = subprocess.run(["bash"], input="\n".join(lines) + "\n",
+                             capture_output=True, text=True, check=False,
+                             env={key: value for key, value in os.environ.items()
+                                  if key != "PENNY_HICACHE_SIZE_GB"})
+        self.assertEqual(run.returncode, 0, run.stderr)
+        argv = [item for item in run.stdout.split("\0") if item]
+        return argv, run.stdout
+
+    def test_explicit_size_reaches_the_actual_flag_without_moving_anything(self):
+        # The acceptance pair: unset keeps the qualified literal in the argv we
+        # really build, and a chosen 1 GB / 2 GB reaches --hicache-size while
+        # every other argument keeps its exact place.
+        for recipe, qualified in self.RECIPES.items():
+            with self.subTest(recipe=recipe):
+                base_argv, _ = self.launch_argv(recipe, None)
+                self.assertEqual(base_argv[base_argv.index("--hicache-size") + 1],
+                                 qualified)
+                self.assertIn("--enable-hierarchical-cache", base_argv)
+                for size in ("1", "2"):
+                    argv, _ = self.launch_argv(recipe, size)
+                    at = argv.index("--hicache-size")
+                    self.assertNotEqual(at, -1)
+                    self.assertEqual(argv[at + 1], size)
+                    # Only that one slot differs from the untouched argv.
+                    self.assertEqual(argv[:at + 1] + [qualified] + argv[at + 2:],
+                                     base_argv)
+
+    def test_only_the_hicache_flag_reads_the_new_variable(self):
+        # Every other launch flag keeps its literal: the diff is the size and
+        # nothing else, so hierarchy/NIXL/speculation/backend defaults are
+        # untouched and no cache mode or off switch appeared.
+        for recipe in self.RECIPES:
+            with self.subTest(recipe=recipe):
+                source = self.source(recipe)
+                self.assertIn('--hicache-size "$HICACHE_SIZE_GB"', source)
+                self.assertNotIn("--hicache-size 32", source)
+                self.assertNotIn("--hicache-size 96", source)
+                self.assertIn("--enable-hierarchical-cache", source)
+                self.assertIn("--hicache-storage-backend nixl", source)
+                # The chosen size is read into one local and used once: the
+                # guard reads the environment exactly once and only the flag
+                # consumes the local, so no other flag can drift with it.
+                self.assertEqual(len(re.findall(
+                    r'(?<!PENNY_)HICACHE_SIZE_GB(?![A-Z])', source)), 4)
+                self.assertIn('  echo "PENNY_HICACHE_SIZE_GB must be a positive '
+                              'integer number of GB', source)
 
 
 class DiscoveryTests(FixtureMixin):
@@ -352,6 +642,33 @@ class NativePlanTests(FixtureMixin):
                                 environ={"SGLANG_HICACHE_NIXL_MAX_CACHE_GB":
                                          "200"})
         self.assertEqual(plan.env["SGLANG_HICACHE_NIXL_MAX_CACHE_GB"], "12")
+
+    def test_every_zero_spelling_of_the_nixl_budget_reads_as_no_cap(self):
+        # Accepted zero spellings are the same unlimited budget to the runtime
+        # parser, so the summary must never call any of them a GiB cap. A value
+        # that is not a number at all (hand-edited input) must still be named
+        # without crashing the summary.
+        no_cap = ("NIXL disk budget: 0 GiB = no cap; the persistent NIXL "
+                  "cache stays enabled and keeps growing")
+        parse = runtime_max_cache_gb_parser()
+        nixl = pc.specs_for("native")["SGLANG_HICACHE_NIXL_MAX_CACHE_GB"]
+        for spelling in ("0", "0.0", "0.00", ".0", "00", "0."):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(pc.validate_value(nixl, spelling, "t"),
+                                 spelling)
+                self.assertEqual(parse(spelling, spelling), 0.0)
+                plan = self.native_plan({**self.native_env(),
+                        "SGLANG_HICACHE_NIXL_MAX_CACHE_GB": spelling})
+                self.assertEqual(plan.errors, [])
+                self.assertIn(no_cap, plan.summary)
+        # A real cap is still reported as a cap, and junk never raises.
+        plan = self.native_plan({**self.native_env(),
+                "SGLANG_HICACHE_NIXL_MAX_CACHE_GB": "0.5"})
+        self.assertIn("NIXL disk budget: 0.5 GiB cap on the persistent NIXL "
+                      "cache dirs (the cache stays enabled)", plan.summary)
+        for junk in ("junk", "nan", "inf", "200 GiB"):
+            with self.subTest(junk=junk):
+                self.assertIn(" GiB cap", pc._nixl_budget_line(junk))
 
     def test_saved_blank_suppresses_the_inherited_environment(self):
         # John's confirmed case: MAX_RUNNING_REQUESTS='' saved + ambient 8.
@@ -726,7 +1043,8 @@ class ContainerPlanTests(FixtureMixin):
         self.assertIn("SGLANG_HICACHE_NIXL_MAX_CACHE_GB=0",
                       plan.next_command)
         # Human-readable summary: lines stay separate and show the reset value.
-        self.assertIn("NIXL byte budget: 0 GiB (0 = no budget)", plan.summary)
+        self.assertIn("NIXL disk budget: 0 GiB = no cap; the persistent NIXL "
+                      "cache stays enabled and keeps growing", plan.summary)
         self.assertIn("runtime identity: 1000:1000", plan.summary)
         self.assertTrue(any(line.startswith("API port: ")
                             for line in plan.summary))

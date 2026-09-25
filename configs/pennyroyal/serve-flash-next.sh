@@ -19,6 +19,14 @@ CACHE_BASE="${CACHE_BASE:?Set CACHE_BASE to the durable compiler-cache root}"
 NIXL_STORAGE_BASE="${NIXL_STORAGE_BASE:?Set NIXL_STORAGE_BASE to the FILE cache root}"
 NIXL_CONFIG="${NIXL_CONFIG:-$SCRIPT_DIR/nixl-posix.toml}"
 NAMESPACE_HELPER="$REPO_ROOT/scripts/pennyroyal/derive_namespace.py"
+# Host-RAM HiCache tier: --hicache-size counts decimal GB (SGLang sizes the
+# host pool at size * 1e9 bytes), not GiB. An unset PENNY_HICACHE_SIZE_GB keeps
+# this recipe's qualified default; a chosen value must be a positive integer.
+HICACHE_SIZE_GB="${PENNY_HICACHE_SIZE_GB:-32}"
+if [[ ! "$HICACHE_SIZE_GB" =~ ^[1-9][0-9]*$ ]]; then
+  echo "PENNY_HICACHE_SIZE_GB must be a positive integer number of GB, got '$HICACHE_SIZE_GB'" >&2
+  exit 1
+fi
 source "$SCRIPT_DIR/chat-template.sh"
 source "$SCRIPT_DIR/request-capacity.sh"
 source "$SCRIPT_DIR/reasoning-effort.sh"
@@ -154,7 +162,7 @@ launch_args=(serve \
   --max-mamba-cache-size "$MAX_MAMBA_CACHE_SIZE" --gdn-mtp-cache-mode none \
   --linear-attn-decode-backend flashinfer --linear-attn-prefill-backend flashinfer \
   --mamba-track-interval "$MAMBA_TRACK_INTERVAL" \
-  --enable-hierarchical-cache --hicache-size 32 --hicache-host-memory-mode cache \
+  --enable-hierarchical-cache --hicache-size "$HICACHE_SIZE_GB" --hicache-host-memory-mode cache \
   --hicache-write-policy write_through --hicache-io-backend kernel \
   --hicache-mem-layout page_first --hicache-storage-backend nixl \
   --hicache-storage-prefetch-policy timeout \

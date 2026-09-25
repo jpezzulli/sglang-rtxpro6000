@@ -21,6 +21,14 @@ CACHE_BASE="${CACHE_BASE:?Set CACHE_BASE to the durable compiler-cache root}"
 NIXL_STORAGE_BASE="${NIXL_STORAGE_BASE:?Set NIXL_STORAGE_BASE to the FILE cache root}"
 NIXL_CONFIG="${NIXL_CONFIG:-$SCRIPT_DIR/nixl-posix.toml}"
 NAMESPACE_HELPER="$REPO_ROOT/scripts/pennyroyal/derive_namespace.py"
+# Host-RAM HiCache tier: --hicache-size counts decimal GB (SGLang sizes the
+# host pool at size * 1e9 bytes), not GiB. An unset PENNY_HICACHE_SIZE_GB keeps
+# this recipe's qualified default; a chosen value must be a positive integer.
+HICACHE_SIZE_GB="${PENNY_HICACHE_SIZE_GB:-96}"
+if [[ ! "$HICACHE_SIZE_GB" =~ ^[1-9][0-9]*$ ]]; then
+  echo "PENNY_HICACHE_SIZE_GB must be a positive integer number of GB, got '$HICACHE_SIZE_GB'" >&2
+  exit 1
+fi
 source "$SCRIPT_DIR/chat-template.sh"
 source "$SCRIPT_DIR/reasoning-effort.sh"
 source "$SCRIPT_DIR/tp-devices.sh"
@@ -133,7 +141,7 @@ launch_args=(serve \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \
   --default-chat-template-kwargs "$DEFAULT_CHAT_TEMPLATE_KWARGS" \
-  --enable-hierarchical-cache --hicache-size 96 --hicache-host-memory-mode cache \
+  --enable-hierarchical-cache --hicache-size "$HICACHE_SIZE_GB" --hicache-host-memory-mode cache \
   --hicache-write-policy write_through --hicache-io-backend kernel \
   --hicache-mem-layout page_first --hicache-storage-backend nixl \
   --hicache-storage-prefetch-policy timeout \

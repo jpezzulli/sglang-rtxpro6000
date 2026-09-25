@@ -246,8 +246,9 @@ item is:
 Otherwise the recipe fails at launch with the visible-device count it found
 and this fragment, rather than hanging in NCCL or silently running TP1
 (`SGLANG_MM_PREPROCESS_DEVICE=cuda:N` outside the model range counts as an
-extra needed device). TP2 is experimental and not yet hardware-qualified
-on this image: expect a separate NIXL namespace per TP size, a replicated
+extra needed device). TP2 verification is pending from
+[u/StockSpecialist1707](https://www.reddit.com/user/StockSpecialist1707/).
+Each TP size uses a separate NIXL namespace, a replicated
 FR-Spec draft head, and one scheduler per GPU. Peer access is not verified
 at startup; if NCCL hangs during transport init on a consumer-PCIe host,
 `NCCL_P2P_DISABLE=1` can help isolate a P2P/ACS/IOMMU problem at a possible

@@ -127,11 +127,15 @@ class Prompt:
 
 
 # Prompt order for the wizard: basic section first, advanced on request.
+# The keys a normal first run should not have to think about (the sglang and
+# python programs, the image, the runtime identity, the NIXL prefix, the
+# capacity/FP8/PLE knobs) are all advanced=True in penny_config.py, so they
+# only appear when the operator says yes to the advanced section.
 _BASIC_ORDER = ("REPO_ROOT", "VENV_PATH", "COMPOSE_FILE", "PENNYROYAL_IMAGE",
                 "HOST_MODELS_ROOT", "TARGET_MODEL", "DRAFT_MODEL",
                 "HOST_CACHE_BASE", "HOST_NIXL_STORAGE_BASE", "CACHE_BASE",
                 "NIXL_STORAGE_BASE", "GPU", "NVIDIA_GPU", "PENNYROYAL_PORT",
-                "SGLANG_HICACHE_NIXL_MAX_CACHE_GB")
+                "SGLANG_HICACHE_NIXL_MAX_CACHE_GB", "PENNY_HICACHE_SIZE_GB")
 _ADVANCED_ORDER = ("USER_ID", "GROUP_ID", "PENNY_PLE_BACKEND",
                    "PENNY_PLE_NVME_MODEL", "SGLANG_SM120_ONLINE_MXFP8",
                    "SGLANG_MM_PREPROCESS_DEVICE", "SGLANG_FORWARD_UNKNOWN_TOOLS",
@@ -140,6 +144,90 @@ _ADVANCED_ORDER = ("USER_ID", "GROUP_ID", "PENNY_PLE_BACKEND",
 _ALWAYS_REQUIRED = ("TARGET_MODEL", "DRAFT_MODEL", "REPO_ROOT", "VENV_PATH",
                     "CACHE_BASE", "NIXL_STORAGE_BASE", "HOST_MODELS_ROOT",
                     "HOST_CACHE_BASE", "HOST_NIXL_STORAGE_BASE", "COMPOSE_FILE")
+
+
+# One short plain-English line per question, printed before it. The technical
+# variable name stays in the review listing and in the saved file; the wizard
+# asks about what the thing is for instead of its exported spelling.
+_EXPLANATIONS = {
+    "REPO_ROOT": "the folder you unpacked Pennyroyal into; a first run keeps "
+                 "the suggested path",
+    "VENV_PATH": "the Python environment folder holding the sglang command; a "
+                 "first run keeps the suggested path",
+    "SGLANG_EXE": "the sglang program itself, only worth changing when that "
+                  "folder layout is unusual",
+    "PYTHON": "the python interpreter that starts the server, only worth "
+              "changing for an unusual layout",
+    "TARGET_MODEL": "the folder of the downloaded model you want to serve",
+    "DRAFT_MODEL": "the smaller model the 27b profile drafts tokens with",
+    "COMPOSE_FILE": "the compose file to run; the shipped one is suggested, so "
+                    "a first run keeps it",
+    "PENNYROYAL_IMAGE": "which container image to start; change it only to pin "
+                        "a different published tag",
+    "PENNYROYAL_PORT": "the port on this machine the API listens on",
+    "CACHE_BASE": "the folder for compiled kernels and runtime files. That is "
+                  "not the RAM model cache and nothing here deletes it",
+    "NIXL_STORAGE_BASE": "the folder the persistent NIXL cache writes to on "
+                         "disk",
+    "HOST_MODELS_ROOT": "the folder on this machine that the container sees as "
+                        "its read-only models folder",
+    "HOST_CACHE_BASE": "the folder on this machine that the container uses for "
+                       "compiled kernels and runtime files",
+    "HOST_NIXL_STORAGE_BASE": "the folder on this machine the container uses "
+                              "for its persistent NIXL cache on disk",
+    "GPU": "which physical graphics card the model gets; the menu lists what "
+           "the machine reported",
+    "NVIDIA_GPU": "which physical graphics card the container may use",
+    "SGLANG_MM_PREPROCESS_DEVICE": "where image and audio input is prepared; "
+                                   "the CPU is the qualified default",
+    "PENNY_HICACHE_SIZE_GB": "how much system RAM the KV cache's RAM tier may "
+                             "use, in decimal GB (1 GB = 1e9 bytes, not GiB). "
+                             "This is separate from the PLE embedding table, "
+                             "which has its own RAM or NVMe placement, and "
+                             "separate from the compiled cache folder above",
+    "SGLANG_HICACHE_NIXL_MAX_CACHE_GB": "a cap in GiB on the persistent NIXL "
+                                        "cache folder on disk. 0 means no cap: "
+                                        "the NIXL cache stays enabled and is "
+                                        "not turned off",
+    "PENNY_PLE_BACKEND": "where the PLE embedding table lives (RAM by default, "
+                         "or a prepared NVMe snapshot); it is unrelated to the "
+                         "RAM cache size above",
+    "PENNY_PLE_NVME_MODEL": "the prepared NVMe snapshot folder, when PLE lives "
+                            "on NVMe",
+    "SGLANG_SM120_ONLINE_MXFP8": "read the FP8 guide before switching this on",
+    "SGLANG_FORWARD_UNKNOWN_TOOLS": "pass tool names this build does not know "
+                                    "through to the model",
+    "MAX_RUNNING_REQUESTS": "how many requests are admitted at once; leaving "
+                            "it blank uses the recipe default",
+    "MAX_MAMBA_CACHE_SIZE": "how many recurrent-state slots are kept; blank "
+                            "uses the recipe default",
+    "MAX_TOTAL_TOKENS": "the shared token cap for the KV pool; blank uses the "
+                        "recipe default",
+    "PENNY_BUILD_JOBS": "how many compile jobs the first start may run; blank "
+                        "uses the recipe default",
+    "NIXL_PREFIX": "where NIXL is installed when that is outside the normal "
+                   "linker path",
+    "USER_ID": "the numeric user that owns the writable folders inside the "
+               "container",
+    "GROUP_ID": "the numeric group that owns those folders",
+    "PENNYROYAL_PROFILE": "which model recipe the saved file runs",
+}
+
+# Installer plumbing that only matters when the shipped layout is not the one
+# on this machine, so it waits for the advanced section instead of interrupting
+# a first run.
+_ADVANCED_NOTE = ("the paths of the sglang and python programs, the "
+                  "container image, the runtime user and group, the NIXL "
+                  "install prefix, and the first-start compile jobs")
+
+
+def _explain(prompt: Prompt, name: str, extra: str = "") -> None:
+    """Print the human explanation of a question before asking it."""
+    text = _EXPLANATIONS.get(name, "")
+    if extra:
+        text = f"{text} — {extra}" if text else extra
+    if text:
+        prompt.say(f"  {text}")
 
 
 def ordered_names(mode: str, advanced: bool = False) -> list[str]:
@@ -191,6 +279,7 @@ def _ask_fixed(prompt: Prompt, spec: pc.KeySpec, default: str) -> str:
     edited file) is rejected by the shared validator and re-asked instead of
     being accepted on Enter. Paths and numeric settings stay free text.
     """
+    _explain(prompt, spec.name, extra=f"variable {spec.name}")
     accept = None
     if spec.kind == "bool":
         rows = [("true", "true"), ("false", "false")]
@@ -226,6 +315,7 @@ def _ask_fixed(prompt: Prompt, spec: pc.KeySpec, default: str) -> str:
 
 def _prompt_gpu(prompt: Prompt, answers: dict[str, str], name: str, spec,
                 default: str, gpus: list[pc.Gpu], note: str) -> None:
+    _explain(prompt, name, extra=f"variable {name}")
     # A saved file may hold anything under this key (age, hand edits), so the
     # shared validator decides whether the saved value may act as the menu's
     # Enter default or be assigned from it at all. An invalid one is named and
@@ -296,7 +386,12 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
         prompt.say(f"No saved configuration yet: {config_path}")
 
     prompt.say("")
-    prompt.say("Pennyroyal setup writes one plain text file and starts nothing.")
+    prompt.say("Pennyroyal setup (BETA) writes one plain text file and starts "
+               "nothing.")
+    prompt.say("It will not download, install, start, or delete anything.")
+    prompt.say("The PLE embedding table has its own placement, chosen in the "
+               "advanced section; it is separate from the RAM (HiCache) cache "
+               "size asked below, and from the compiled-cache folders.")
     prompt.say("Typing 'q' (or end of input) cancels; nothing is written until "
                "you confirm.")
 
@@ -318,6 +413,8 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
         # Enter is allowed only once a valid row is the stated default; an
         # unusable saved profile forces an explicit valid choice (choose()
         # has no empty-default problem because the loop always re-asks).
+        _explain(prompt, pc.PROFILE_KEY,
+                 extra=f"variable {pc.PROFILE_KEY}")
         candidate = prompt.choose(
             "Model profile",
             [(name, f"{name} — {pc.PROFILE_LABEL[name]}")
@@ -335,6 +432,13 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
 
     prompt.say("")
     prompt.say("Downloaded model locations, caches, and GPU")
+    prompt.say("  Anything Pennyroyal can infer for a normal first run — the "
+               "repository folder, the Python environment folder, the compose "
+               "file, the cache folders, the graphics card, and the API port — "
+               "is offered with that value already typed in; press Enter to "
+               "keep it. A value already in this file wins over the "
+               "suggestion. The remaining plumbing stays in the advanced "
+               f"section: {_ADVANCED_NOTE}.")
     for name in ordered_names(mode):
         spec = specs[name]
         if spec.kind in ("bool", "choice", "mm-device"):
@@ -361,6 +465,12 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
         if name == "CACHE_BASE" and not default and mode == "native":
             default = str(home / pc.DEFAULT_NATIVE_CACHE_BASE.removeprefix("~/"))
         label = spec.prompt or f"{name} ({spec.description})"
+        extra = ""
+        if name == "PENNY_HICACHE_SIZE_GB":
+            extra = (f"blank keeps this profile's qualified default "
+                     f"{pc.PROFILE_HICACHE_SIZE_GB[profile]} GB; anything from "
+                     f"1 GB up is honored")
+        _explain(prompt, name, extra=f"variable {name}{'; ' + extra if extra else ''}")
         default = default or spec.default
         allow_empty = bool(default) or name not in _ALWAYS_REQUIRED
         answers[name] = prompt.ask_validated(label, spec, default=default,
@@ -369,7 +479,12 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
         answers["DRAFT_MODEL"] = saved["DRAFT_MODEL"]
 
     if prompt.confirm("\nConfigure the advanced section (capacity, online FP8, "
-                      "PLE placement, runtime identity)?", default=False):
+                      "PLE placement, runtime identity, installation "
+                      "overrides)?", default=False):
+        prompt.say(f"  The advanced section covers {_ADVANCED_NOTE}, plus the "
+                   "capacity, FP8, and PLE knobs. Your saved overrides for "
+                   "them are offered as defaults, so Enter keeps what you "
+                   "already chose.")
         for name in ordered_names(mode, advanced=True):
             if name in answers:
                 continue
@@ -379,6 +494,7 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
                 answers[name] = _ask_fixed(prompt, spec, default)
                 continue
             label = spec.prompt or f"{name} ({spec.description})"
+            _explain(prompt, name, extra=f"variable {name}")
             answers[name] = prompt.ask_validated(
                 label, spec, default=default,
                 allow_empty=bool(default) or spec.kind == "positive-int")
