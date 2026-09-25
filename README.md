@@ -87,8 +87,9 @@ are in [FP8.md](FP8.md#credit) and [NVME-PLE.md](NVME-PLE.md#source-and-credit).
   and avoids oversized pinned-RAM allocations for its PLE table.
 - HiCache reclaims only the space it needs. Choose your HiCache RAM size and
   set a NIXL disk-cache budget, including smaller caches on shared systems.
-- The optional **beta configurator** provides numbered choices, explanations,
-  and saved settings for native and container installs.
+- The optional **[beta configurator](RUN.md#configure-and-run)** provides numbered
+  choices, explanations, and saved settings for native and
+  [container installs](docker/pennyroyal/README.md).
 - TP2 work adds shared FR-Spec weights, separate NIXL namespaces and startup
   guidance. **TP2 verification is pending from
   [u/StockSpecialist1707](https://www.reddit.com/user/StockSpecialist1707/).**
