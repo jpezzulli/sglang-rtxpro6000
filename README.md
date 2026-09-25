@@ -14,6 +14,9 @@ Both paths support the two model profiles below.
 An optional [terminal setup utility **(beta)**](CONFIGURE.md) walks through your model,
 GPU, and cache settings; manual configuration remains available.
 
+**Stay updated:** choose **Watch → Custom → Releases** at the top of this
+repository to get notified about new Pennyroyal releases.
+
 Using an AI assistant to set this up? Give it [llms.txt](llms.txt)
 for the short setup map and links to the detailed instructions.
 
