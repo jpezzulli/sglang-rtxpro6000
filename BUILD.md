@@ -29,7 +29,7 @@ Run this sequence in Bash. It creates a new checkout and Python environment,
 installs the build tools, then installs SGLang and its dependencies once:
 
 ```bash
-git clone --branch pennyroyal-v2.5.1 --single-branch \
+git clone --branch pennyroyal-v2.5.2 --single-branch \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
 cd pennyroyal
 
@@ -65,8 +65,8 @@ named `origin`.
 
 ```bash
 cd /path/to/pennyroyal
-git fetch origin tag pennyroyal-v2.5.1
-git switch --detach pennyroyal-v2.5.1
+git fetch origin tag pennyroyal-v2.5.2
+git switch --detach pennyroyal-v2.5.2
 source .venv/bin/activate
 
 source scripts/pennyroyal/build-env.sh
@@ -75,7 +75,7 @@ uv pip install --no-build-isolation --no-deps -e python
 ```
 
 This updates SGLang without re-resolving the existing dependencies.
-v2.5.1 reuses the v2.5.0 PyTorch, `sglang-kernel`, FlashInfer, and NIXL
+v2.5.2 reuses the v2.5.0 PyTorch, `sglang-kernel`, FlashInfer, and NIXL
 dependencies. If build tools are missing, install the bootstrap packages from
 the fresh-install sequence, then retry the final command.
 
@@ -271,7 +271,7 @@ bundled in this wheel.
 
 ### Source and earlier wheels
 
-The exact v2.5.1 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
+The exact v2.5.2 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
 This release uses updated Python/JIT sources on the existing dependency stack;
 no new prebuilt wheel is distributed. The optional NVMe reader is a separate
 isolated install and is not included in the main SGLang wheel.

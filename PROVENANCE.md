@@ -6,17 +6,18 @@
 |---|---|
 | Upstream | `https://github.com/sgl-project/sglang.git` |
 | Public documentation and distribution branch | `pennyroyal-main-sm120-final`; continues above the runtime release tag |
-| Executable source HEAD | `1a8f3e9d1f0b7ac847bfa2701bf0f6b69d54a16e` |
+| Qualified core runtime source | `a670ea2bdde058819b842f7b7437577810575f7b` |
+| Complete release source | Exact commit selected by `pennyroyal-v2.5.2`, including setup and launcher updates |
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Latest runtime additions | Host-cache retention, optional checkpoint donation guard, reasoning/tool parsing, QSA chunk-prefix handling and optional C6 launch settings |
-| Qualification dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.5.1 Python/JIT source |
-| Release | v2.5.1 |
-| Release tag | `pennyroyal-v2.5.1` |
+| Latest runtime additions | PLE allocation fixes, QSA staging/top-k fixes, HiCache shortfall reclamation, TP2 preparation and configurable cache sizes |
+| Qualification dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.5.2 Python/JIT source |
+| Release | v2.5.2 |
+| Release tag | `pennyroyal-v2.5.2` |
 | Container build source | Exact commit selected by the release tag; also recorded in the image's OCI revision label |
-| Container image | `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1`; build digest recorded by the [release workflow](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml) |
+| Container image | `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2`; build digest recorded by the [release workflow](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml) |
 
 The release includes launch recipes, documentation, and measurement summaries.
-v2.5.1 keeps the v2.5.0 dependency stack, optional Flash-Next online FP8 and
+v2.5.2 keeps the v2.5.0 dependency stack, optional Flash-Next online FP8 and
 NVMe PLE, CPU image preprocessing, RAM PLE default, and pinned
 [Froggeric v22.5 template](configs/pennyroyal/templates/README.md). The earlier
 27B release remains available as `qwen38-dflash2-pro6000-20260824`, with its
@@ -38,6 +39,20 @@ graph-lifetime trial remains in history with its complete revert; it contributes
 no change to the released graph implementation. Dependencies and launch
 settings are unchanged. [CHANGES.md](CHANGES.md) records the focused
 two-profile regression scope; existing performance results are not refreshed.
+
+## v2.5.2 source provenance
+
+Core runtime commits `5d68689198`, `ac8d02ad2a`, `2a94c3dd34`,
+`5997c2acd7` and `a670ea2bdd` add the PLE, QSA, cache-reclamation and TP2
+changes above the public v2.5.1 branch without a rebase. The release also
+includes the subsequent NIXL byte-budget and configurator/launcher changes.
+[CHANGES.md](CHANGES.md#v252--memory-cache-and-setup-maintenance) links the
+adapted upstream PRs and contributor credit.
+
+Both TP1 model profiles received live regression. TP2 verification is pending
+from [u/StockSpecialist1707](https://www.reddit.com/user/StockSpecialist1707/).
+The optional setup assistant is beta; configuration and packaging checks are
+separate from model-performance measurements.
 
 ## v2.5.1 source provenance
 

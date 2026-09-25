@@ -10,6 +10,12 @@ prebuilt image or BUILD.md and RUN.md for native installation. Model weights
 are downloaded separately. Detailed settings and dated measurements live in
 the linked documents; this file is an index, not a second set of instructions.
 
+The optional configurator is beta: `./configure-penny --native` or
+`./configure-penny --container`. Use the saved settings and the generated launch
+command; `--check` validates configuration without loading a model. See RUN.md
+for HiCache RAM sizing and the NIXL soft disk budget. Both cache tiers remain
+enabled. TP2 changes await verification from u/StockSpecialist1707.
+
 ## Start here
 
 - [README](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/README.md): Model choices, release summary, performance tables and setup links.

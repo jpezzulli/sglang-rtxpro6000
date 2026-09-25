@@ -1,6 +1,6 @@
 # Cumulative changes and upstream status
 
-The exact v2.5.1 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
+The exact v2.5.2 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
 Its lineage extends the v2.4.1 ordered range
 `e7e78940168f..cf811a8c5988`; all prior runtime commits remain in source
 history, including the graph-lifetime trial and its full revert. The integration
@@ -19,6 +19,36 @@ automatic release-container builds on the same dependency stack.
 
 “Local” identifies changes maintained in this fork. Upstream status and PR
 heads are recorded with the release that used them.
+
+## v2.5.2 — Memory, cache and setup maintenance
+
+- **Flash-Next memory:** avoid constructing the RAM-offloaded PLE table on the
+  GPU first ([SGLang #39928](https://github.com/sgl-project/sglang/pull/39928)),
+  and use exact-sized pinned host backing instead of allocator rounding
+  ([#40626](https://github.com/sgl-project/sglang/pull/40626)).
+- **Long prefill:** gather packed QSA keys and values once rather than making
+  a second full-context copy
+  ([#39333](https://github.com/sgl-project/sglang/pull/39333)).
+- **Cache retention:** reclaim the HiCache allocation shortfall rather than
+  the entire requested allocation
+  ([#40748](https://github.com/sgl-project/sglang/pull/40748)).
+- **QSA selection:** correct overflow handling in the JIT fast top-k path
+  ([#38144](https://github.com/sgl-project/sglang/pull/38144)).
+- **TP2 preparation:** share the FR-Spec head and scales across ranks, include
+  TP size in NIXL namespace validation, and add GPU/P2P startup guidance.
+  Thanks to [u/StockSpecialist1707](https://www.reddit.com/user/StockSpecialist1707/)
+  for the field feedback; his TP2 verification is pending.
+- **Setup:** optional beta terminal configurator, numbered choices, saved
+  configuration, adjustable HiCache RAM size and a soft NIXL disk budget.
+  Existing cache tiers and default sizes remain enabled.
+- **Agent clients:** native unknown-tool calls reach the client for ordinary
+  tool-error recovery. The release also includes the configurable default
+  reasoning effort adapted from [ngg's PR #18](https://github.com/jpezzulli/sglang-rtxpro6000/pull/18).
+
+Both model profiles completed reasoning, streaming-tool, long-context, decode,
+vision/media and host-cache regression. Flash-Next also passed disk-cache
+restore after restart and C6 checks. Existing performance tables are unchanged.
+The dependency stack is unchanged; containers build from the release tag.
 
 ## v2.5.1 — Cache and parser maintenance
 

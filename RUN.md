@@ -11,6 +11,9 @@ Pennyroyal does not include a native systemd service file.
 
 ## Configure and run
 
+The optional setup assistant is **beta**. The existing direct launchers remain
+available below if you prefer manual configuration.
+
 After building Pennyroyal and downloading your model, run this from the checkout:
 
 ```bash
@@ -124,7 +127,7 @@ export DRAFT_MODEL=/path/to/incoai-Qwen3.8-27B-DFlash2
 | Recurrent / convolution state | FP32 GDN SSM / BF16 convolution |
 | DFlash2 shape | 8 draft tokens; 2,048-token window |
 | Attention | TRTLLM-MHA/XQA target decode; FlashInfer target prefill and draft attention; Triton GDN |
-| State and host cache | 24 Mamba slots; 5 retained states per path; 96 GiB HiCache; NIXL POSIX |
+| State and host cache | 24 Mamba slots; 5 retained states per path; 96 GB HiCache by default; NIXL POSIX |
 
 The target is a dense FP8 model; Flash-Next's routed-expert settings do not
 apply.
@@ -165,8 +168,8 @@ normal request cleanup.
 
 | Profile | Configured host cache | Additional host use |
 |---|---:|---|
-| Flash-Next | 32 GiB HiCache | Approximately 47.68 GiB for RAM-backed PLE |
-| 27B/DFlash2 | 96 GiB HiCache | Model loading and runtime overhead |
+| Flash-Next | 32 GB HiCache | Approximately 47.68 GiB for RAM-backed PLE |
+| 27B/DFlash2 | 96 GB HiCache | Model loading and runtime overhead |
 
 Process, driver, filesystem, and page-cache memory are additional. NVMe-backed
 PLE removes Flash-Next's fixed table residency and uses SSD I/O plus reclaimable
@@ -237,6 +240,16 @@ For 27B, confirm:
 [BACKENDS.md](BACKENDS.md) maps each resolved implementation and its evidence.
 
 ## Distinguish cache paths
+
+### Choose HiCache RAM size
+
+Set `PENNY_HICACHE_SIZE_GB` to the amount of system RAM to use for conversation
+cache. It accepts whole GB starting at `1`; leave it blank or unset for the
+existing defaults of 32 GB for Next and 96 GB for 27B. Pool alignment and runtime
+overhead are additional, as are model loading and RAM-backed PLE.
+
+Smaller settings leave less room for reused conversation state. They do not
+disable HiCache or NIXL, and they do not limit the GPU KV pool.
 
 ### Limit NIXL disk use
 

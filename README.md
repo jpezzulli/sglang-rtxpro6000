@@ -11,7 +11,7 @@ model configurations run from the same patched source.
 **Get running:** [Use the prebuilt container](docker/pennyroyal/README.md)
 for the shortest setup, or [build and install natively](BUILD.md).
 Both paths support the two model profiles below.
-An optional terminal setup utility walks through your model, GPU, and cache
+An optional terminal setup utility **(beta)** walks through your model, GPU, and cache
 settings; manual configuration remains available.
 
 Using an AI assistant to set this up? Give it [llms.txt](llms.txt)
@@ -29,7 +29,7 @@ NIXL. No local SGLang build is required; model files and caches stay in mounted
 host directories. Native installation remains supported.
 
 **[Docker and Compose setup](docker/pennyroyal/README.md)** ·
-Image: `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1` ·
+Image: `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2` ·
 [Container build status](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml).
 Images build automatically when a release is published. Model weights are
 downloaded separately.
@@ -77,21 +77,25 @@ at commit `94a68214b77514bc26ef78cee4c01f128162d09b`, especially patches
 with the upstream license and NOTICE retained. Detailed boundaries and credit
 are in [FP8.md](FP8.md#credit) and [NVME-PLE.md](NVME-PLE.md#source-and-credit).
 
-## Current release — Pennyroyal v2.5.1
+<a id="current-release--pennyroyal-v251"></a>
 
-**v2.5.1 is a maintenance release for longer agent sessions and cache reuse.**
-It fixes quoted tool markers interrupting reasoning, preserves fenced tool
-examples as text, improves host-cache reuse, and handles two cache/prefill
-failure cases. Both Qwen profiles retain their existing defaults.
+## Current release — Pennyroyal v2.5.2
 
-Flash-Next also gets an optional **six-request configuration with roughly
-one million shared KV tokens**, keeping 524,288-token context per request.
-See the [C6 setup](RUN.md#optional-six-request-flash-next-profile) and
-[changes and credits](CHANGES.md#v251--cache-and-parser-maintenance).
+**v2.5.2 brings lower memory overhead, cache fixes, and easier setup.**
 
-If you use long conversations, host-only HiCache or an agent client, this is
-worth updating. The performance tables below remain the dated v2.5.0/v2.4
-measurements; this update focuses on reliable reuse and tool handling.
+- Flash-Next uses less temporary GPU memory during loading and long prefills,
+  and avoids oversized pinned-RAM allocations for its PLE table.
+- HiCache reclaims only the space it needs. Choose your HiCache RAM size and
+  set a NIXL disk-cache budget, including smaller caches on shared systems.
+- The optional **beta configurator** provides numbered choices, explanations,
+  and saved settings for native and container installs.
+- TP2 work adds shared FR-Spec weights, separate NIXL namespaces and startup
+  guidance. **TP2 verification is pending from
+  [u/StockSpecialist1707](https://www.reddit.com/user/StockSpecialist1707/).**
+
+The existing model profiles, C6 option and performance tables remain.
+See [changes and upstream credits](CHANGES.md#v252--memory-cache-and-setup-maintenance)
+or [get started](docker/pennyroyal/README.md).
 
 <a id="current-release--pennyroyal-v250"></a>
 
@@ -249,9 +253,10 @@ paths are documented in [BACKENDS.md](BACKENDS.md).
 
 The qualified launchers use a 96 GB GPU and substantial host RAM and disk.
 Flash-Next uses a 47.68 GiB PLE table in addition to its
-configured 32 GiB HiCache tier; RAM placement is the default and the optional
+default 32 GB HiCache tier; RAM placement is the default and the optional
 [NVMe PLE mode](NVME-PLE.md) trades lower fixed host residency for SSD I/O.
-The 27B recipe configures a 96 GiB HiCache tier. Process, filesystem, driver
+The 27B recipe defaults to a 96 GB HiCache tier. Both sizes are adjustable.
+Process, filesystem, driver
 and page-cache overhead add to those configured values. See
 [RUN.md](RUN.md#host-memory-and-first-start) for operating guidance.
 
@@ -364,7 +369,7 @@ If you publish work that uses or builds on Pennyroyal, please link the
 canonical repository and identify the release tag or commit you started from:
 
 - [jpezzulli/sglang-rtxpro6000](https://github.com/jpezzulli/sglang-rtxpro6000)
-- Current release: [`pennyroyal-v2.5.1`](https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v2.5.1)
+- Current release: [`pennyroyal-v2.5.2`](https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v2.5.2)
 
 A short note distinguishing the Pennyroyal source or technique from your own
 changes helps readers reproduce the lineage, understand what you improved, and
@@ -379,8 +384,8 @@ earlier name of this repository and uses the same source history.
 |---|---|
 | Canonical branch | `pennyroyal-main-sm120-final` |
 | Current executable source | Recorded in [PROVENANCE.md](PROVENANCE.md#source-identity) |
-| Current release | **v2.5.1** |
-| Git tag | `pennyroyal-v2.5.1` |
+| Current release | **v2.5.2** |
+| Git tag | `pennyroyal-v2.5.2` |
 | Initial unified dated tag | `sglang-rtxpro6000-20260827` |
 | Earlier 27B dated tag | `qwen38-dflash2-pro6000-20260824` |
 | Upstream integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
@@ -390,7 +395,7 @@ earlier name of this repository and uses the same source history.
 | FlashInfer / NIXL | `0.6.17` / `1.4.0` |
 | GPU / driver | RTX PRO 6000 96 GB, SM120 / `610.57.04` |
 
-Install v2.5.1 from the updated source using [BUILD.md](BUILD.md). Older wheels
+Install v2.5.2 from the updated source using [BUILD.md](BUILD.md). Older wheels
 do not contain these changes. [PROVENANCE.md](PROVENANCE.md) records the exact
 source identity; [CHANGES.md](CHANGES.md) records release and upstream history.
 
@@ -636,7 +641,7 @@ There is one native build procedure and two supported model profiles. Flash-Next
 provides FR-Spec and non-FR launchers:
 
 ```bash
-git clone --branch pennyroyal-v2.5.1 --single-branch \
+git clone --branch pennyroyal-v2.5.2 --single-branch \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
 cd pennyroyal
 # Follow BUILD.md for the fresh or existing-environment native install.
@@ -659,7 +664,7 @@ OpenAI-compatible smoke requests, and cold/radix/NIXL cache distinctions.
 ## Source changes and upstream work
 
 The source line starts with the 2026-08-24 27B release, then adds the unified
-runtime and Flash-Next work. v2.5.1 builds on the v2.5.0/v2.4.1 stack;
+runtime and Flash-Next work. v2.5.2 builds on the v2.5.1/v2.5.0 stack;
 [PROVENANCE.md](PROVENANCE.md) records the exact release source. Major groups
 are:
 

@@ -52,7 +52,7 @@ PROFILE_LABEL = {
     "27b": "Qwen3.8-27B FP8 + DFlash2",
 }
 CONTAINER_MODELS_TARGET = "/models"
-DEFAULT_IMAGE = "ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1"
+DEFAULT_IMAGE = "ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2"
 COMPOSE_RELPATH = "docker/pennyroyal/compose.yaml"
 NATIVE_CONFIG_RELPATH = ".config/pennyroyal/pennyroyal.env"
 RECIPE_DIR_RELPATH = "configs/pennyroyal"

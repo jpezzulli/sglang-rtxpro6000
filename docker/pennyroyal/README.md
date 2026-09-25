@@ -1,12 +1,12 @@
 # Pennyroyal container
 
-This Compose service runs the same Pennyroyal v2.5.1 source and launch recipes
+This Compose service runs the same Pennyroyal v2.5.2 source and launch recipes
 as the native installation. The default is Flash-Next with FR-Spec. Native
 installation remains supported and is documented in [`BUILD.md`](../../BUILD.md)
 and [`RUN.md`](../../RUN.md).
 
-Publishing v2.5.1 builds and uploads
-`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1` through GitHub Actions. Check the
+Publishing v2.5.2 builds and uploads
+`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2` through GitHub Actions. Check the
 [Pennyroyal container workflow](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml)
 for availability. Python, the CUDA toolchain, NIXL POSIX, and prebuilt
 FlashInfer kernels are included; the host supplies the NVIDIA driver. Native
@@ -27,8 +27,8 @@ Container and native profiles use the same host-memory settings:
 
 | Profile | Configured host memory |
 |---|---|
-| Flash-Next | 32 GiB HiCache plus roughly 48 GiB for RAM-backed PLE |
-| 27B/DFlash2 | 96 GiB HiCache plus runtime and draft allocations |
+| Flash-Next | 32 GB HiCache by default, plus roughly 48 GiB for RAM-backed PLE |
+| 27B/DFlash2 | 96 GB HiCache by default, plus runtime and draft allocations |
 
 Leave additional room for loading, the runtime, and the operating system. See
 [host memory and first start](../../RUN.md#host-memory-and-first-start). NVMe
@@ -51,7 +51,7 @@ replace this setting.
 Get the matching launch and Compose files from the release tag:
 
 ```bash
-git clone --depth 1 --branch pennyroyal-v2.5.1 \
+git clone --depth 1 --branch pennyroyal-v2.5.2 \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
 cd pennyroyal
 ```
@@ -60,6 +60,8 @@ This checkout supplies configuration and documentation; Docker pulls the
 prebuilt image; no local SGLang build is involved.
 
 ## Guided setup
+
+The optional setup assistant is **beta**; manual Compose setup is available below.
 
 If Python 3 is available on the host, run:
 
@@ -80,8 +82,12 @@ selected configuration and can be run from any directory. Rerun setup to
 change settings; stop and recreate the container to apply them.
 
 Next needs one target checkpoint. The 27B profile also needs its DFlash2 draft.
-The NIXL size budget is optional and measured in GiB; see
-[what the budget covers](../../RUN.md#limit-nixl-disk-use).
+Choose the HiCache RAM size and optional NIXL disk budget during setup, or set
+`PENNY_HICACHE_SIZE_GB` and `SGLANG_HICACHE_NIXL_MAX_CACHE_GB` in `.env`.
+HiCache accepts whole GB starting at 1; the disk budget uses GiB. A disk budget
+of 0 means unlimited, not disabled. Both cache tiers remain enabled. See
+[RAM sizing](../../RUN.md#choose-hicache-ram-size) and
+[what the disk budget covers](../../RUN.md#limit-nixl-disk-use).
 
 Prefer to edit the configuration yourself? Use the manual path below. No host
 Python is needed for manual Compose setup.
@@ -185,8 +191,8 @@ The entrypoint exposes two non-serving checks. The CPU-only import check skips
 device work:
 
 ```bash
-docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1 --help
-docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1 --check
+docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2 --help
+docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2 --check
 ```
 
 Arbitrary commands require the explicit `exec` boundary:
@@ -195,7 +201,7 @@ Arbitrary commands require the explicit `exec` boundary:
 docker compose run --rm pennyroyal exec .venv/bin/python --version
 ```
 
-The v2.5.1 image build runs the automated CPU installation check shown above.
+The v2.5.2 image build runs the automated CPU installation check shown above.
 Both profiles were regression-tested natively on the release source. The fresh
 container GPU qualification remains the v2.5.0 result: both profiles passed API
 schema/tool checks, 64K prefill, 1,024-token C1/C4 decode, JPEG and static-video
@@ -335,8 +341,8 @@ read-only. Omit the override when the engine does not enforce SELinux labels.
 ## Release builds
 
 Publishing a GitHub release builds its exact tagged source and uploads the
-matching versioned image automatically. For example, `pennyroyal-v2.5.1`
-produces `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1`. Draft releases and ordinary
+matching versioned image automatically. For example, `pennyroyal-v2.5.2`
+produces `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2`. Draft releases and ordinary
 branch pushes do not publish a release image. No moving `latest` tag is used.
 
 The build checks package versions, the source revision and import location,

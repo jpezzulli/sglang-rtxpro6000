@@ -1,6 +1,6 @@
 services:
   pennyroyal:
-    image: ${PENNYROYAL_IMAGE:-ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1}
+    image: ${PENNYROYAL_IMAGE:-ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2}
     command: ["${PENNYROYAL_PROFILE:-next}"]
     user: "${USER_ID:-1000}:${GROUP_ID:-1000}"
     init: true
