@@ -11,8 +11,9 @@ Pennyroyal does not include a native systemd service file.
 
 ## Configure and run
 
-The optional setup assistant is **beta**. The existing direct launchers remain
-available below if you prefer manual configuration.
+The optional setup assistant is **beta**; [CONFIGURE.md](CONFIGURE.md) walks
+through setup, the main choices, and saved settings. The existing direct
+launchers remain available below if you prefer manual configuration.
 
 After building Pennyroyal and downloading your model, run this from the checkout:
 

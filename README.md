@@ -11,8 +11,8 @@ model configurations run from the same patched source.
 **Get running:** [Use the prebuilt container](docker/pennyroyal/README.md)
 for the shortest setup, or [build and install natively](BUILD.md).
 Both paths support the two model profiles below.
-An optional terminal setup utility **(beta)** walks through your model, GPU, and cache
-settings; manual configuration remains available.
+An optional [terminal setup utility **(beta)**](CONFIGURE.md) walks through your model,
+GPU, and cache settings; manual configuration remains available.
 
 Using an AI assistant to set this up? Give it [llms.txt](llms.txt)
 for the short setup map and links to the detailed instructions.
@@ -87,7 +87,7 @@ are in [FP8.md](FP8.md#credit) and [NVME-PLE.md](NVME-PLE.md#source-and-credit).
   and avoids oversized pinned-RAM allocations for its PLE table.
 - HiCache reclaims only the space it needs. Choose your HiCache RAM size and
   set a NIXL disk-cache budget, including smaller caches on shared systems.
-- The optional **[beta configurator](RUN.md#configure-and-run)** provides numbered
+- The optional **[beta configurator](CONFIGURE.md)** provides numbered
   choices, explanations, and saved settings for native and
   [container installs](docker/pennyroyal/README.md).
 - TP2 work adds shared FR-Spec weights, separate NIXL namespaces and startup
@@ -749,6 +749,8 @@ See [LIMITATIONS.md](LIMITATIONS.md) for measurement and reproducibility detail.
 - [BUILD.md](BUILD.md) — one native build and dependency identity.
 - [RUN.md](RUN.md) — native launch paths for both profiles, the non-FR
   Flash-Next alternative, startup checks, and optional settings.
+- [CONFIGURE.md](CONFIGURE.md) — what the beta setup configurator does, how to
+  start it for native and container use, and where its settings are saved.
 - [FP8.md](FP8.md) — online-FP8 precision boundary, activation, evidence and
   limits.
 - [NVME-PLE.md](NVME-PLE.md) — optional reader installation, overlay

@@ -62,6 +62,8 @@ prebuilt image; no local SGLang build is involved.
 ## Guided setup
 
 The optional setup assistant is **beta**; manual Compose setup is available below.
+[CONFIGURE.md](../../CONFIGURE.md) is the dedicated guide to the configurator —
+it walks through setup, the main choices, and saved settings.
 
 If Python 3 is available on the host, run:
 
