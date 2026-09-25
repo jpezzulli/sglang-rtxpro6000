@@ -31,6 +31,10 @@ class FakeGitHub:
                         'collected_at': '2026-09-21T01:00:00Z',
                         'days': {'2026-09-19': {'stars': 8, 'forks': 2},
                                  '2026-09-20': {'stars': 9, 'forks': 2}}},
+            'prior_snapshot': {'traffic': {
+                'referrers': [{'referrer': 'reddit.com', 'count': 3, 'uniques': 2}],
+                'paths': [{'path': '/jpezzulli/sglang-rtxpro6000', 'count': 4, 'uniques': 3}],
+            }},
         }
     def api(self, path):
         if path.startswith('git/ref/heads/'):
@@ -40,6 +44,11 @@ class FakeGitHub:
                 {'path': 'daily.json', 'type': 'blob', 'sha': 'daily'},
                 {'path': 'package-downloads.json', 'type': 'blob', 'sha': 'package'},
                 {'path': 'repository-metrics.json', 'type': 'blob', 'sha': 'metrics'},
+            ]}
+        if path == 'git/trees/head?recursive=1':
+            return {'truncated': False, 'tree': [
+                {'path': 'snapshots/2026-09-20/prior.json', 'type': 'blob', 'sha': 'prior_snapshot'},
+                {'path': 'snapshots/2026-09-21/latest.json', 'type': 'blob', 'sha': 'latest_snapshot'},
             ]}
         if path.startswith('git/blobs/'):
             import base64, json
@@ -72,17 +81,17 @@ class DailyReportTests(unittest.TestCase):
         self.assertEqual(values, {'stars': 9, 'forks': 2, 'views': 15, 'clones': 10,
                                   'daily_unique_cloners': 5, 'package_downloads': 42})
         self.assertIn('Stars: 9 (+1)', body)
-        self.assertIn('Clones: 10 (+2)', body)
-        self.assertIn('sum_of_daily_unique_cloners: 5 (+2)', body)
+        self.assertIn('Clones: 10 (+2 on 2026-09-21)', body)
+        self.assertIn('sum_of_daily_unique_cloners: 5 (+2 on 2026-09-21)', body)
         self.assertIn('does not expose a deduplicated lifetime cloner count', body)
-        self.assertIn('reddit.com: 5 views / 4 unique visitors', body)
+        self.assertIn('reddit.com: 5 views / 4 unique visitors (+2 views, +2 uniques)', body)
 
     def test_first_report_uses_archived_daily_delta(self):
         body, _ = r.report(FakeGitHub(), 'traffic-history')
         self.assertIn('Stars: 9 (+1)', body)
         self.assertIn('Container downloads: 42 (+2)', body)
-        self.assertIn('Views: 15 (+5)', body)
-        self.assertIn('Clones: 10 (+2)', body)
+        self.assertIn('Views: 15 (+5 on 2026-09-21)', body)
+        self.assertIn('Clones: 10 (+2 on 2026-09-21)', body)
 
     def test_incomplete_archive_fails_without_report(self):
         github = FakeGitHub()
@@ -125,6 +134,12 @@ class DailyReportTests(unittest.TestCase):
                               'days': {'2026-09-20': {'count': 8, 'uniques': 3}}}}
         with self.assertRaises(RuntimeError):
             r.current_days(traffic, rolling)
+
+    def test_malformed_previous_snapshot_fails_without_report(self):
+        github = FakeGitHub()
+        del github.blobs['prior_snapshot']['traffic']['paths']
+        with self.assertRaises(RuntimeError):
+            r.report(github, 'traffic-history')
 
 
 

@@ -144,6 +144,41 @@ def top_rows(rows, key, label):
     return result
 
 
+def previous_snapshot_counts(github, head):
+    tree = github.api('git/trees/' + head + '?recursive=1')
+    require(not tree.get('truncated'), 'Truncated traffic-history snapshot tree')
+    paths = sorted(entry['path'] for entry in tree['tree']
+                   if entry['type'] == 'blob' and entry['path'].startswith('snapshots/') and
+                   entry['path'].endswith('.json'))
+    if not paths:
+        return None
+    latest_day = paths[-1].split('/')[1]
+    previous = [path for path in paths if path.split('/')[1] < latest_day]
+    if not previous:
+        return None
+    entry = next(entry for entry in tree['tree'] if entry['path'] == previous[-1])
+    blob = github.api('git/blobs/' + entry['sha'])
+    require(blob.get('encoding') == 'base64' and blob.get('content'),
+            'Malformed previous traffic snapshot blob')
+    try:
+        snapshot = json.loads(base64.b64decode(blob['content']))
+    except (ValueError, UnicodeError):
+        raise RuntimeError('Malformed previous traffic snapshot JSON') from None
+    traffic = snapshot.get('traffic')
+    require(isinstance(traffic, dict), 'Malformed previous traffic snapshot')
+    result = {}
+    for kind, key in [('referrers', 'referrer'), ('paths', 'path')]:
+        rows = traffic.get(kind)
+        require(isinstance(rows, list), f'Malformed previous snapshot {kind} list')
+        values = {}
+        for row in rows:
+            require(isinstance(row.get(key), str) and row[key] and row[key] not in values,
+                    f'Malformed previous snapshot {kind}')
+            values[row[key]] = counts(row, f'previous snapshot {kind}')
+        result[kind] = values
+    return result
+
+
 def delta(current, previous):
     return '—' if previous is None else f'{current - previous:+,}'
 
@@ -151,11 +186,6 @@ def delta(current, previous):
 def report(github, branch):
     head, traffic, package, metrics = read_archive(github, branch)
     rolling = live_traffic(github)
-    archived_totals = {
-        'views': sum(row['views']['count'] for row in traffic['days'].values()),
-        'clones': sum(row['clones']['count'] for row in traffic['days'].values()),
-        'daily_unique_cloners': sum(row['clones']['uniques'] for row in traffic['days'].values()),
-    }
     days = current_days(traffic, rolling)
     latest_day = max(days)
     latest = days[latest_day]
@@ -169,6 +199,7 @@ def report(github, branch):
     _, package_latest = latest_metric(package, ('total_downloads',), 'package')
     referrers = top_rows(github.api('traffic/popular/referrers?per=day'), 'referrer', 'referrer')
     paths = top_rows(github.api('traffic/popular/paths?per=day'), 'path', 'path')
+    snapshot_prior = previous_snapshot_counts(github, head)
     values = {
         'stars': adoption['stars'], 'forks': adoption['forks'],
         'views': totals['views'], 'clones': totals['clones'],
@@ -178,7 +209,9 @@ def report(github, branch):
     prior = {
         **previous_metric(metrics, ('stars', 'forks')),
         'package_downloads': previous_metric(package, ('total_downloads',))['total_downloads'],
-        **archived_totals,
+        'views': totals['views'] - latest['views']['count'],
+        'clones': totals['clones'] - latest['clones']['count'],
+        'daily_unique_cloners': totals['daily_unique_cloners'] - latest['clones']['uniques'],
     }
     lines = [
         'Pennyroyal daily GitHub report', '',
@@ -190,10 +223,10 @@ def report(github, branch):
         f'- Container downloads: {values["package_downloads"]:,} '
         f'({delta(values["package_downloads"], prior.get("package_downloads"))})', '',
         'Traffic since launch',
-        f'- Views: {values["views"]:,} ({delta(values["views"], prior.get("views"))})',
-        f'- Clones: {values["clones"]:,} ({delta(values["clones"], prior.get("clones"))})',
+        f'- Views: {values["views"]:,} ({delta(values["views"], prior.get("views"))} on {latest_day})',
+        f'- Clones: {values["clones"]:,} ({delta(values["clones"], prior.get("clones"))} on {latest_day})',
         f'- sum_of_daily_unique_cloners: {values["daily_unique_cloners"]:,} '
-        f'({delta(values["daily_unique_cloners"], prior.get("daily_unique_cloners"))})',
+        f'({delta(values["daily_unique_cloners"], prior.get("daily_unique_cloners"))} on {latest_day})',
         '  GitHub does not expose a deduplicated lifetime cloner count.', '',
         f'{latest_day} activity',
         f'- Views: {latest["views"]["count"]:,} from {latest["views"]["uniques"]:,} daily unique visitors',
@@ -203,10 +236,20 @@ def report(github, branch):
         f'- Clones: {rolling["clones"]["total"]["count"]:,}; unique cloners: {rolling["clones"]["total"]["uniques"]:,}', '',
         'Top referrers',
     ]
-    lines += [f'- {name}: {count:,} views / {uniques:,} unique visitors'
+    def snapshot_delta(kind, name, count, uniques):
+        if snapshot_prior is None:
+            return '—'
+        prior_row = snapshot_prior[kind].get(name)
+        if prior_row is None:
+            return 'new'
+        return f'{delta(count, prior_row["count"])} views, {delta(uniques, prior_row["uniques"])} uniques'
+
+    lines += [f'- {name}: {count:,} views / {uniques:,} unique visitors '
+              f'({snapshot_delta("referrers", name, count, uniques)})'
               for name, count, uniques in referrers] or ['- None returned by GitHub']
     lines += ['', 'Top paths']
-    lines += [f'- {name}: {count:,} views / {uniques:,} unique visitors'
+    lines += [f'- {name}: {count:,} views / {uniques:,} unique visitors '
+              f'({snapshot_delta("paths", name, count, uniques)})'
               for name, count, uniques in paths] or ['- None returned by GitHub']
     lines += ['', f'https://github.com/{github.repository}/tree/{branch}']
     return '\n'.join(lines) + '\n', values
