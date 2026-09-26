@@ -14,6 +14,7 @@ from sglang.srt.mem_cache.memory_pool import KVCache
 from sglang.srt.mem_cache.pool_host.common import (
     _cuda_host_unregister,
     get_allocator_from_storage,
+    use_torch_pinned_host_allocator,
 )
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import is_cuda, is_hip
@@ -221,7 +222,12 @@ class HostKVCache(abc.ABC):
             return
         self._destroyed = True
         buffers = getattr(self, "kv_buffer", None)
-        if buffers is not None and self.pin_memory and (_is_cuda or _is_hip):
+        if (
+            buffers is not None
+            and self.pin_memory
+            and (_is_cuda or _is_hip)
+            and not use_torch_pinned_host_allocator()
+        ):
             if not isinstance(buffers, (list, tuple)):
                 buffers = [buffers]
             for buf in buffers:

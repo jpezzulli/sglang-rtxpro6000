@@ -517,6 +517,11 @@ class HiCacheNixl(HiCacheStorage):
     def _get_hybrid_key_multiplier(
         self, pool_name: PoolName, host_pool: HostKVCache
     ) -> int:
+        component_names = getattr(
+            host_pool, "get_storage_component_names", lambda: None
+        )()
+        if component_names:
+            return len(component_names)
         if pool_name == PoolName.MAMBA:
             return 1 + len(getattr(host_pool, "conv_buffer", []) or [])
         if hasattr(host_pool, "v_buffer"):

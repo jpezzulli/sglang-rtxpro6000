@@ -6,6 +6,25 @@
 
 namespace sglang {
 
+// WSL2 gives registered host memory a CUDA device alias that differs from
+// Tensor.data_ptr(). Native Linux usually returns the same address. Fall
+// back to the original pointer when the driver has no alias.
+inline void* pinned_host_device_ptr(void* host_ptr) {
+  void* device_ptr = nullptr;
+#ifndef USE_ROCM
+  if (cudaHostGetDevicePointer(&device_ptr, host_ptr, 0) == cudaSuccess &&
+      device_ptr != nullptr) {
+    return device_ptr;
+  }
+#else
+  if (hipHostGetDevicePointer(&device_ptr, host_ptr, 0) == hipSuccess &&
+      device_ptr != nullptr) {
+    return device_ptr;
+  }
+#endif
+  return host_ptr;
+}
+
 constexpr int kBlockSize = 1024;
 constexpr int kBlockQuotaBackup = 2;
 constexpr int kBlockQuotaLoad = 2;
@@ -115,7 +134,7 @@ struct TransferMambaKernel {
     dim3 grid(grid_x);
 
     const auto params = MambaTransferParams{
-        .src_base = static_cast<const char*>(src.data_ptr()),
+        .src_base = static_cast<const char*>(pinned_host_device_ptr(src.data_ptr())),
         .dst_base = static_cast<char*>(dst.data_ptr()),
         .layer_ptrs = nullptr,
         .src_indices = static_cast<const int64_t*>(src_indices.data_ptr()),
@@ -169,7 +188,7 @@ struct TransferMambaKernel {
 
     const auto params = MambaTransferParams{
         .src_base = nullptr,
-        .dst_base = static_cast<char*>(dst.data_ptr()),
+        .dst_base = static_cast<char*>(pinned_host_device_ptr(dst.data_ptr())),
         .layer_ptrs = static_cast<const uintptr_t*>(src_ptrs.data_ptr()),
         .src_indices = static_cast<const int64_t*>(src_indices.data_ptr()),
         .dst_indices = static_cast<const int64_t*>(dst_indices.data_ptr()),

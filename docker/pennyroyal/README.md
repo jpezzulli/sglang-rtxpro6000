@@ -322,6 +322,34 @@ newer and replaces the default device reservation. The model stays on
 `cuda:0`; only preprocessing uses `cuda:1`. Use GPU UUIDs in `device_ids` when
 stable device selection matters.
 
+### WSL2
+
+WSL2 does not give `cudaHostRegister`'d mmap memory the same device pointer as
+`Tensor.data_ptr()`. Mamba host backup uses that pointer. Set this before
+starting the container so HiCache host pools use Torch's pinned allocator:
+
+```dotenv
+SGLANG_HICACHE_TORCH_PINNED_ALLOC=1
+```
+
+Leave it unset on native Linux. The qualified scripts keep their defaults.
+
+Docker Desktop on WSL2 still shows every GPU inside the container when
+`NVIDIA_VISIBLE_DEVICES` is set. Hide the extra GPU with
+`CUDA_VISIBLE_DEVICES` so SGLang sees only the PRO 6000.
+
+The hybrid Mamba pool is not 4K-aligned, so NIXL `use_direct_io=true` falls
+back to bounce buffers on WSL2. Point `NIXL_CONFIG` at a copy of the bundled
+toml with `use_direct_io=false` and `use_uring=true`.
+
+The qualified scripts use HiCache `write_through` and NIXL prefetch `timeout`.
+A WSL2 agent host that already measured an earlier release with `write_back`
+and `wait_complete` can keep that pair: lazy host writes, and prefetch that
+finishes before the request runs. `wait_complete` avoids treating a late
+prefetch as a miss. These are overrides of the qualified recipe, not a new
+default. The published launch scripts still hardcode `write_through` and
+`timeout`.
+
 ### SELinux hosts
 
 If your container engine enables SELinux confinement, UID/GID ownership alone

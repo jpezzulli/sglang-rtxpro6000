@@ -144,6 +144,10 @@ def _cuda_host_unregister(buffer: torch.Tensor) -> None:
         )
 
 
+def use_torch_pinned_host_allocator() -> bool:
+    return os.environ.get("SGLANG_HICACHE_TORCH_PINNED_ALLOC", "0") == "1"
+
+
 def alloc_with_host_register(
     dims: tuple,
     dtype: torch.dtype,
@@ -155,6 +159,12 @@ def alloc_with_host_register(
     Allocate tensor and register host memory with cudaHostRegister.
     CudaHostRegister only applies when pin_memory=True.
     """
+    if use_torch_pinned_host_allocator():
+        # WSL2 gives cudaHostRegister'd mmap memory a distinct CUDA device
+        # alias. HiCache kernels consume Tensor.data_ptr() directly, so use
+        # cudaHostAlloc-backed tensors whose UVA pointer is device-visible.
+        return torch.empty(dims, dtype=dtype, device=device, pin_memory=pin_memory)
+
     buffer = allocator.allocate(dims, dtype=dtype, device=device)
     if pin_memory:
         _cuda_host_register(buffer)
