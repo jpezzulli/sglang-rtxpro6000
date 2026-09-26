@@ -1,0 +1,9 @@
+services:
+  pennyroyal:
+    volumes:
+      - type: bind
+        source: ./.penny-bf16-hotfix/backend.py
+        target: /opt/pennyroyal/.ple-nvme/sglang_ssd_stream/backend.py
+        read_only: true
+        bind:
+          create_host_path: false
