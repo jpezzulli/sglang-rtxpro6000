@@ -24,6 +24,11 @@ from torch import nn
 from ._io import PageReader
 from .config import SSDStreamConfig
 
+# Staging capacity is a row budget, not a byte budget: a lookup requests one
+# row per token and ngram head, so the dtype's element size decides how many
+# bytes those rows need. _STAGING_MIB is the FP8 (one-byte element) budget and
+# scales with the storage element size, which keeps the row capacity identical
+# for BF16 tables instead of halving it and rejecting default prefill lookups.
 _STAGING_MIB = 16
 _STAGING_SLOTS = 2
 
@@ -179,7 +184,8 @@ class SSDStreamEmbedding(VocabParallelEmbedding):
         self.register_buffer("weight_scale", embedding.weight_scale, persistent=True)
         del embedding.weight
 
-        staging_nbytes = max(self._row_nbytes, _STAGING_MIB * 1024**2)
+        staging_budget_nbytes = _STAGING_MIB * 1024**2 * self._element_size
+        staging_nbytes = max(self._row_nbytes, staging_budget_nbytes)
         self._staging_capacity_rows = staging_nbytes // self._row_nbytes
         self._slots = [
             _StagingSlot(
