@@ -1,7 +1,7 @@
 # GitHub traffic archive
 
 Repository: `jpezzulli/sglang-rtxpro6000`. Launch: **2026-08-24**.
-Collected: **2026-09-30T00:18:34Z**. Coverage through **2026-09-28** (UTC).
+Collected: **2026-09-30T05:32:16Z**. Coverage through **2026-09-28** (UTC).
 
 Counts are exact sums of GitHub-reported daily counts for the covered dates; the newest dates may be partial and GitHub can revise the overlapping window.
 
@@ -15,7 +15,7 @@ Counts are exact sums of GitHub-reported daily counts for the covered dates; the
 | Current rolling-window clones | 9,114 |
 | Current rolling-window unique cloners | 703 |
 | clones: `sum_of_daily_uniques` | 1,963 |
-| Current stars | 116 |
+| Current stars | 117 |
 | Current forks | 16 |
 
 **No exact lifetime unique-person count is available.** Daily unique values and rolling-window unique values are GitHub metrics. Summing daily uniques does not deduplicate people across days or windows.
@@ -94,7 +94,7 @@ Not yet exposed: 2026-09-29, 2026-09-30.
 | /jpezzulli/sglang-rtxpro6000/commits/pennyroyal-main-sm120-final | 54 | 22 |
 | /jpezzulli/sglang-rtxpro6000/pulls | 51 | 33 |
 
-[Latest full snapshot](snapshots/2026-09-30/2026-09-30T001834Z-36649676979-1.json) · [Daily JSON](daily.json) · [Repository stars and forks](repository-metrics.json) · [GHCR package downloads](PACKAGE-DOWNLOADS.md) · [Immutable first-run raw responses](raw/first-run/)
+[Latest full snapshot](snapshots/2026-09-30/2026-09-30T053216Z-36673853001-1.json) · [Daily JSON](daily.json) · [Repository stars and forks](repository-metrics.json) · [GHCR package downloads](PACKAGE-DOWNLOADS.md) · [Immutable first-run raw responses](raw/first-run/)
 
 Snapshots retain the aggregate totals, daily arrays, referrers and popular paths as reported together in each collection. They overlap and must not be added together.
 
