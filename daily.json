@@ -1,19 +1,15 @@
 {
   "api_version": "2022-11-28",
-  "collected_at": "2026-09-29T05:43:43Z",
+  "collected_at": "2026-09-30T00:18:34Z",
   "coverage": {
     "complete_through_latest_exposed": true,
     "first_date": "2026-08-24",
     "missing_dates_through_latest_exposed": [],
     "not_yet_exposed_dates": [
-      "2026-09-24",
-      "2026-09-25",
-      "2026-09-26",
-      "2026-09-27",
-      "2026-09-28",
-      "2026-09-29"
+      "2026-09-29",
+      "2026-09-30"
     ],
-    "through_date": "2026-09-23"
+    "through_date": "2026-09-28"
   },
   "days": {
     "2026-08-24": {
@@ -263,7 +259,7 @@
         "count": 164,
         "uniques": 87
       },
-      "last_collected_at": "2026-09-29T05:43:43Z",
+      "last_collected_at": "2026-09-30T00:18:34Z",
       "views": {
         "count": 362,
         "uniques": 151
@@ -274,7 +270,7 @@
         "count": 394,
         "uniques": 71
       },
-      "last_collected_at": "2026-09-29T05:43:43Z",
+      "last_collected_at": "2026-09-30T00:18:34Z",
       "views": {
         "count": 392,
         "uniques": 135
@@ -285,7 +281,7 @@
         "count": 78,
         "uniques": 56
       },
-      "last_collected_at": "2026-09-29T05:43:43Z",
+      "last_collected_at": "2026-09-30T00:18:34Z",
       "views": {
         "count": 314,
         "uniques": 105
@@ -296,7 +292,7 @@
         "count": 292,
         "uniques": 67
       },
-      "last_collected_at": "2026-09-29T05:43:43Z",
+      "last_collected_at": "2026-09-30T00:18:34Z",
       "views": {
         "count": 365,
         "uniques": 94
@@ -307,7 +303,7 @@
         "count": 764,
         "uniques": 60
       },
-      "last_collected_at": "2026-09-29T05:43:43Z",
+      "last_collected_at": "2026-09-30T00:18:34Z",
       "views": {
         "count": 274,
         "uniques": 86
@@ -318,7 +314,7 @@
         "count": 274,
         "uniques": 47
       },
-      "last_collected_at": "2026-09-29T05:43:43Z",
+      "last_collected_at": "2026-09-30T00:18:34Z",
       "views": {
         "count": 250,
         "uniques": 97
@@ -329,7 +325,7 @@
         "count": 67,
         "uniques": 38
       },
-      "last_collected_at": "2026-09-29T05:43:43Z",
+      "last_collected_at": "2026-09-30T00:18:34Z",
       "views": {
         "count": 350,
         "uniques": 134
@@ -340,7 +336,7 @@
         "count": 1594,
         "uniques": 44
       },
-      "last_collected_at": "2026-09-29T05:43:43Z",
+      "last_collected_at": "2026-09-30T00:18:34Z",
       "views": {
         "count": 206,
         "uniques": 68
@@ -351,10 +347,65 @@
         "count": 275,
         "uniques": 40
       },
-      "last_collected_at": "2026-09-29T05:43:43Z",
+      "last_collected_at": "2026-09-30T00:18:34Z",
       "views": {
         "count": 252,
         "uniques": 104
+      }
+    },
+    "2026-09-24": {
+      "clones": {
+        "count": 81,
+        "uniques": 39
+      },
+      "last_collected_at": "2026-09-30T00:18:34Z",
+      "views": {
+        "count": 199,
+        "uniques": 86
+      }
+    },
+    "2026-09-25": {
+      "clones": {
+        "count": 98,
+        "uniques": 77
+      },
+      "last_collected_at": "2026-09-30T00:18:34Z",
+      "views": {
+        "count": 306,
+        "uniques": 68
+      }
+    },
+    "2026-09-26": {
+      "clones": {
+        "count": 4759,
+        "uniques": 57
+      },
+      "last_collected_at": "2026-09-30T00:18:34Z",
+      "views": {
+        "count": 123,
+        "uniques": 59
+      }
+    },
+    "2026-09-27": {
+      "clones": {
+        "count": 98,
+        "uniques": 49
+      },
+      "last_collected_at": "2026-09-30T00:18:34Z",
+      "views": {
+        "count": 59,
+        "uniques": 33
+      }
+    },
+    "2026-09-28": {
+      "clones": {
+        "count": 176,
+        "uniques": 69
+      },
+      "last_collected_at": "2026-09-30T00:18:34Z",
+      "views": {
+        "count": 229,
+        "uniques": 78
       }
     }
   },
