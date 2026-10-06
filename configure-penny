@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# Optional interactive setup: native launcher or Compose service.
+# Optional interactive setup: the native launcher or the prebuilt container.
 #
 # Writes exactly the same validated files as the non-interactive path, because
 # scripts/pennyroyal/penny_setup.py shares scripts/pennyroyal/penny_config.py.
-# It only writes configuration and prints the next command: no downloads, no
-# package installs, no service or container start, no model load, no cache
-# deletion, no ownership change, no sudo, no network access.
+# It only writes configuration (plus, for --container, the run.sh and startup
+# files) and prints the next command: no downloads, no package installs, no
+# service or container start, no model load, no cache deletion, no ownership
+# change, no sudo, no network access.
 #
 # Usage: ./configure-penny [--container] [--config PATH] [--check] [--yes]
 #   (no arguments)   interactive setup for the native launcher
-#   --container      interactive setup for the Compose service and its .env
+#   --container      setup for the prebuilt container: writes the launch files
 #   --config PATH    read and write this file instead of the default one
 #   --check          validate a saved config without a GPU and exit
 #   --show-config    print the resolved configuration and launch command

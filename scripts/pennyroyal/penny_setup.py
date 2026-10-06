@@ -7,7 +7,9 @@ format, validation, and command generation. Rerunning loads existing choices;
 unrecognized advanced keys are preserved; cancelling, EOF, or a declined
 confirmation writes nothing; an existing file is never replaced without consent.
 
-This utility only writes configuration and prints the next command. It does not
+This utility only writes configuration, and for --container the ordinary
+launch files those settings describe (see the generated run.sh contract in
+scripts/pennyroyal/penny_config.py), then prints the next command. It does not
 download models, install packages, start or restart anything, load a model,
 delete caches, change ownership, run sudo, or touch the network.
 """
@@ -131,20 +133,22 @@ class Prompt:
 # python programs, the image, the runtime identity, the NIXL prefix, the
 # capacity/FP8/PLE knobs) are all advanced=True in penny_config.py, so they
 # only appear when the operator says yes to the advanced section.
-_BASIC_ORDER = ("REPO_ROOT", "VENV_PATH", "COMPOSE_FILE", "PENNYROYAL_IMAGE",
-                "HOST_MODELS_ROOT", "TARGET_MODEL", "DRAFT_MODEL",
+_BASIC_ORDER = ("REPO_ROOT", "VENV_PATH", "LAUNCH_DIR", "PENNYROYAL_IMAGE",
+                "HOST_MODELS_ROOT", "TARGET_MODEL", "DRAFT_MODEL", "NIXL",
                 "HOST_CACHE_BASE", "HOST_NIXL_STORAGE_BASE", "CACHE_BASE",
-                "NIXL_STORAGE_BASE", "GPU", "NVIDIA_GPU", "PENNYROYAL_PORT",
-                "SGLANG_HICACHE_NIXL_MAX_CACHE_GB", "PENNY_HICACHE_SIZE_GB")
+                "NIXL_STORAGE_BASE", "GPU", "NVIDIA_GPU",
+                "PENNYROYAL_PORT", "SGLANG_HICACHE_NIXL_MAX_CACHE_GB",
+                "PENNY_HICACHE_SIZE_GB")
 _ADVANCED_ORDER = ("USER_ID", "GROUP_ID", "PENNY_PLE_BACKEND",
                    "PENNY_PLE_NVME_MODEL", "SGLANG_SM120_ONLINE_MXFP8",
                    "SGLANG_HICACHE_TORCH_PINNED_ALLOC",
                    "SGLANG_MM_PREPROCESS_DEVICE", "SGLANG_FORWARD_UNKNOWN_TOOLS",
                    "MAX_RUNNING_REQUESTS", "MAX_MAMBA_CACHE_SIZE",
-                   "MAX_TOTAL_TOKENS", "PENNY_BUILD_JOBS", "NIXL_PREFIX")
+                   "MAX_TOTAL_TOKENS", "TP_SIZE", "PENNY_BUILD_JOBS",
+                   "NIXL_PREFIX")
 _ALWAYS_REQUIRED = ("TARGET_MODEL", "DRAFT_MODEL", "REPO_ROOT", "VENV_PATH",
                     "CACHE_BASE", "NIXL_STORAGE_BASE", "HOST_MODELS_ROOT",
-                    "HOST_CACHE_BASE", "HOST_NIXL_STORAGE_BASE", "COMPOSE_FILE")
+                    "HOST_CACHE_BASE", "HOST_NIXL_STORAGE_BASE", "LAUNCH_DIR")
 
 
 # One short plain-English line per question, printed before it. The technical
@@ -161,11 +165,20 @@ _EXPLANATIONS = {
               "changing for an unusual layout",
     "TARGET_MODEL": "the folder of the downloaded model you want to serve",
     "DRAFT_MODEL": "the smaller model the 27b profile drafts tokens with",
-    "COMPOSE_FILE": "the compose file to run; the shipped one is suggested, so "
-                    "a first run keeps it",
+    "LAUNCH_DIR": "the folder this setup writes your container files into: "
+                  "run.sh plus the config folder it mounts; save here, and "
+                  "afterwards ./run.sh runs those files with no Python, "
+                  "Compose or checkout involved",
     "PENNYROYAL_IMAGE": "which container image to start; change it only to pin "
                         "a different published tag",
     "PENNYROYAL_PORT": "the port on this machine the API listens on",
+    "NIXL": "the persistent disk cache tier (the NIXL FILE backend). on is the "
+            "qualified default; off simply drops the disk tier: the GPU radix "
+            "cache, the RAM cache, the model and the speculation settings all "
+            "stay as they are, and nothing on disk is deleted. A 0 budget below "
+            "is an uncapped cache, not this switch",
+    "TP_SIZE": "how many GPUs one model is split across; blank keeps the "
+               "profile's qualified TP1 (TP2 also needs run.sh --gpu 0,1)",
     "CACHE_BASE": "the folder for compiled kernels and runtime files. That is "
                   "not the RAM model cache and nothing here deletes it",
     "NIXL_STORAGE_BASE": "the folder the persistent NIXL cache writes to on "
@@ -175,7 +188,9 @@ _EXPLANATIONS = {
     "HOST_CACHE_BASE": "the folder on this machine that the container uses for "
                        "compiled kernels and runtime files",
     "HOST_NIXL_STORAGE_BASE": "the folder on this machine the container uses "
-                              "for its persistent NIXL cache on disk",
+                              "for its persistent NIXL cache on disk; not "
+                              "mounted, and not asked about again, when the "
+                              "disk tier is off",
     "GPU": "which physical graphics card the model gets; the menu lists what "
            "the machine reported",
     "NVIDIA_GPU": "which physical graphics card the container may use",
@@ -338,8 +353,8 @@ def _prompt_gpu(prompt: Prompt, answers: dict[str, str], name: str, spec,
     if gpus:
         # Menu numbers are UI positions; each row names the device index it
         # actually selects, so choice [1] can clearly mean GPU 0.
-        prompt.say("  Multi-GPU Compose topology overrides stay an advanced "
-                   "manual edit; this setup does not generate them.")
+        prompt.say("  Multi-GPU topology overrides stay an advanced manual "
+                   "edit; this setup does not generate them.")
         answer = prompt.choose(
             "GPU index or UUID to use",
             [(gpu.index, f"GPU index {gpu.index} — {gpu.name}")
@@ -438,12 +453,12 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
     prompt.say("")
     prompt.say("Downloaded model locations, caches, and GPU")
     prompt.say("  Anything Pennyroyal can infer for a normal first run — the "
-               "repository folder, the Python environment folder, the compose "
-               "file, the cache folders, the graphics card, and the API port — "
-               "is offered with that value already typed in; press Enter to "
-               "keep it. A value already in this file wins over the "
-               "suggestion. The remaining plumbing stays in the advanced "
-               f"section: {_ADVANCED_NOTE}.")
+               "repository folder, the Python environment folder, the folder "
+               "the container launch files go in, the cache folders, the "
+               "graphics card, and the API port — is offered with that value "
+               "already typed in; press Enter to keep it. A value already in "
+               "this file wins over the suggestion. The remaining plumbing "
+               f"stays in the advanced section: {_ADVANCED_NOTE}.")
     for name in ordered_names(mode):
         spec = specs[name]
         if spec.kind in ("bool", "choice", "mm-device"):
@@ -451,6 +466,11 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
                                        saved.get(name, "") or spec.default)
             continue
         default = saved.get(name, "")
+        if name in ("HOST_NIXL_STORAGE_BASE", "NIXL_STORAGE_BASE"):
+            # The disk tier is off, so this root is neither mounted nor
+            # written: never make an operator name a path nothing uses.
+            if answers.get("NIXL", "on") == "off" and not default:
+                continue
         if name in ("GPU", "NVIDIA_GPU"):
             _prompt_gpu(prompt, answers, name, spec, default, gpus, gpu_note)
             continue
@@ -463,10 +483,12 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
             default = str(repo_root / ".venv")
         if name == "DRAFT_MODEL" and profile != "27b":
             continue  # this profile does not use a draft; the value is preserved
-        if name == "COMPOSE_FILE" and not default:
-            default = str(repo_root / pc.COMPOSE_RELPATH)
         if name == "NIXL_STORAGE_BASE" and not default and mode == "native":
             default = str(home / pc.DEFAULT_NATIVE_NIXL_BASE.removeprefix("~/"))
+        if name == "LAUNCH_DIR" and not default:
+            # The shipped default is ~/, resolved here through the caller's home
+            # so a scripted run never lands in the real account.
+            default = str(home / pc.DEFAULT_CONTAINER_LAUNCH_DIR.removeprefix("~/"))
         if name == "CACHE_BASE" and not default and mode == "native":
             default = str(home / pc.DEFAULT_NATIVE_CACHE_BASE.removeprefix("~/"))
         label = spec.prompt or f"{name} ({spec.description})"
@@ -492,6 +514,11 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
                    "already chose.")
         for name in ordered_names(mode, advanced=True):
             if name in answers:
+                continue
+            if pc.profile_unavailable(profile, name):
+                # The recipe for this profile has no such knob (27b capacity,
+                # TP, PLE placement); asking would offer tuning that cannot
+                # reach the server. A saved value still comes through below.
                 continue
             spec = specs[name]
             default = saved.get(name, "") or spec.default
@@ -570,8 +597,31 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
                 f"  new value for {match.key}", spec, default=current,
                 allow_empty=spec.kind == "positive-int")
 
+    # One consent gate covers everything this save touches: the saved settings
+    # file and the launch files generated from them. Asking after the first
+    # write is what left a declined overwrite with a saved file on the new
+    # choice and a startup script on the old one, and a cancelled 'q' with a
+    # changed file it never agreed to.
+    generated = []
+    try:
+        generated = _generated_container_files(mode, plan)
+    except pc.ConfigError as exc:
+        # Nothing in this save can be written, so nothing is: a broken template
+        # is named instead of half-saving the settings next to old launch files.
+        prompt.say(f"\nCannot write the container launch files: {exc}")
+        prompt.say("Nothing was written; correct the template folder and save "
+                   "again.")
+        return 4
+    edited = [path for path, content in generated
+              if path.is_file()
+              and path.read_text(encoding="utf-8") != content]
     verb = "Replace" if config_path.exists() else "Save"
-    if not prompt.confirm(f"\n{verb} {config_path}?", default=True):
+    question = f"\n{verb} {config_path}?"
+    if edited:
+        question += (" Overwrite the launch file(s) you edited so the whole set "
+                     "matches these settings [{}]?".format(
+                         ", ".join(path.name for path in edited)))
+    if not prompt.confirm(question, default=True):
         prompt.say("Cancelled; nothing was written.")
         return 3
 
@@ -599,9 +649,40 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
     )
     pc.write_env_file(config_path, pc.serialize_env(sections, header=header))
     prompt.say(f"Saved {config_path}")
+    # Rebuild from the file that was just written: the plan printed below is then
+    # the plan run-penny (or the generated run.sh) will build from it, and its
+    # notes speak about the state after the save, not before it.
+    plan = pc.build_plan(mode, pc.load_config(mode, config_path, environ,
+                                             repo_root), environ,
+                         repo_root=repo_root)
+    if mode == "container":
+        # Generation belongs to the save, never to the launch: the operator
+        # edits run.sh and the startup script by hand afterwards, and nothing
+        # here rewrites them when the container starts. The overwrite above was
+        # agreed before anything was written, so the saved settings and the
+        # files that decide the launch always change together.
+        prompt.say("")
+        prompt.say(f"Writing the launch files in {plan.launch_dir}")
+        for written, outcome in pc.container_write_plan(plan, generated):
+            prompt.say(f"  {outcome}: {written}")
+        prompt.say(f"Start it with: cd "
+                   f"{pc.quote_command_arg(str(plan.launch_dir))}"
+                   " && ./run.sh")
     prompt.say("")
     prompt.say(pc.format_plan(plan))
     return 0
+
+
+def _generated_container_files(mode: str, plan: pc.Plan) -> list[tuple[Path, str]]:
+    """The launch files this save would write, or [] when it writes none.
+
+    Reading them here (not inside the writer) is what lets one confirmation name
+    every file the save touches before a single byte changes. A broken template
+    is a ConfigError, which the caller already surfaces as a failure to save.
+    """
+    if mode != "container":
+        return []
+    return pc.container_launch_files(plan)
 
 
 def _candidate_config(mode: str, profile: str, answers: dict[str, str],
@@ -634,7 +715,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     group.add_argument("--native", action="store_const", const="native",
                        dest="mode", help="configure the native launcher (default)")
     group.add_argument("--container", action="store_const", const="container",
-                       dest="mode", help="configure the Compose service")
+                       dest="mode", help="configure the prebuilt container "
+                                          "launch files (run.sh + startup "
+                                          "script)")
     parser.add_argument("--config", type=Path, default=None,
                         help="explicit config path instead of the default one")
     parser.add_argument("--yes", action="store_true",

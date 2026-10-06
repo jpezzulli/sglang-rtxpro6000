@@ -62,6 +62,11 @@ class FixtureMixin(unittest.TestCase):
         for recipe in pc.RECIPE_BY_PROFILE.values():
             stub = self.repo / "configs" / "pennyroyal" / recipe
             make_executable(stub, "#!/usr/bin/env bash\nexit 0\n")
+        # The beta configurator generates the container launch files from the
+        # shipped examples, so the fixture repo carries them (by reference).
+        (self.repo / "docker" / "pennyroyal").mkdir(parents=True)
+        (self.repo / "docker" / "pennyroyal" / "launch").symlink_to(
+            ROOT / "docker" / "pennyroyal" / "launch")
         self.venv = base / "venv with space"
         make_executable(self.venv / "bin" / "sglang", "#!/usr/bin/env bash\nexit 0\n")
         make_executable(self.venv / "bin" / "python", "#!/usr/bin/env bash\nexit 0\n")
@@ -133,14 +138,16 @@ class SetupSessionTests(FixtureMixin):
         return code, out.getvalue(), path
 
     def basics(self, target: str, *, draft: str | None = None,
-               hicache: str = "") -> list[str]:
-        """Answers for REPO_ROOT, VENV_PATH, TARGET[_DRAFT], CACHE_BASE,
-        NIXL_STORAGE_BASE, GPU, the NIXL byte budget, the RAM (HiCache) size,
-        and the media menu; defaults stay blank. hicache '' means 'keep the
-        profile's recipe default'."""
+               hicache: str = "", nixl: str = "") -> list[str]:
+        """Answers for REPO_ROOT, VENV_PATH, TARGET[_DRAFT], the NIXL disk-tier
+        menu, CACHE_BASE, NIXL_STORAGE_BASE, GPU, the NIXL byte budget, the RAM
+        (HiCache) size, and the media menu; defaults stay blank. hicache ''
+        means 'keep the profile's recipe default' and nixl '' keeps the disk
+        tier on, the qualified default."""
         answers = ["", str(self.venv), target]
         if draft is not None:
             answers.append(draft)
+        answers.append(nixl)
         return answers + ["", str(self.nixl), "0", "0", hicache, ""]
 
     def test_full_flow_writes_a_file_the_launcher_accepts(self):
@@ -196,7 +203,7 @@ class SetupSessionTests(FixtureMixin):
                     f"CACHE_BASE={pc.quote_value(str(self.cache))}\n"
                     f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n")
         code, output, path = self.run_setup(
-            ["", "", str(self.venv), "", "", "", "0", "0", "", "", "n", "n"],
+            ["", "", str(self.venv), "", "", "", "", "0", "0", "", "", "n", "n"],
             existing=existing)
         self.assertEqual(code, 3, output)
         self.assertIn("Replace", output)
@@ -240,7 +247,7 @@ class SetupSessionTests(FixtureMixin):
                 [pc.Gpu(index="0", name="NVIDIA RTX PRO 6000"),
                  pc.Gpu(index="1", name="NVIDIA Secondary")], "")):
             gpu_answers = self.basics(str(self.next_model))
-            gpu_answers[5] = "2"          # menu row 2 = GPU index 1
+            gpu_answers[6] = "2"          # menu row 2 = GPU index 1
             code, output, path = self.run_setup(
                 ["next"] + gpu_answers + ["n", "y"])
             self.assertEqual(code, 0, output)
@@ -250,11 +257,11 @@ class SetupSessionTests(FixtureMixin):
             self.assertEqual(pc.read_env_file(path)["GPU"], "1")
             # Manual row accepts a UUID verbatim.
             gpu_answers = self.basics(str(self.next_model))
-            gpu_answers[5] = "3"          # manual row, then the UUID
+            gpu_answers[6] = "3"          # manual row, then the UUID
             code, output, path = self.run_setup(
-                ["next"] + gpu_answers[:5] +
+                ["next"] + gpu_answers[:6] +
                 ["3", "GPU-abcdef01-2345-6789-abcd-ef0123456789"] +
-                gpu_answers[6:] + ["n", "y"])
+                gpu_answers[7:] + ["n", "y"])
             self.assertEqual(code, 0, output)
             self.assertEqual(
                 pc.read_env_file(path)["GPU"],
@@ -268,7 +275,7 @@ class SetupSessionTests(FixtureMixin):
         with mock.patch.object(pc, "discover_gpus", return_value=(
                 [pc.Gpu(index="0", name="NVIDIA RTX PRO 6000")], "")):
             gpu_answers = self.basics("")
-            gpu_answers[5] = ""           # Enter keeps the saved GPU=1
+            gpu_answers[6] = ""           # Enter keeps the saved GPU=1
             code, output, path = self.run_setup(
                 [""] + gpu_answers + ["n", "y"], existing=existing)
             self.assertEqual(code, 0, output)
@@ -345,7 +352,7 @@ class SetupSessionTests(FixtureMixin):
         with mock.patch.object(pc, "discover_gpus", return_value=(
                 [pc.Gpu(index="0", name="NVIDIA RTX PRO 6000")], "")):
             answers = self.basics("")
-            answers[5] = ""            # Enter at the GPU menu
+            answers[6] = ""            # Enter at the GPU menu
             code, output, path = self.run_setup(
                 [""] + answers + ["n", "y"], existing=existing)
             self.assertEqual(code, 0, output)
@@ -354,17 +361,17 @@ class SetupSessionTests(FixtureMixin):
             self.assertEqual(pc.read_env_file(path)["GPU"], "0")
             # Retry path: the operator can still override with a typed value.
             answers = self.basics("")
-            answers[5] = "2"           # manual row, then an explicit UUID
+            answers[6] = "2"           # manual row, then an explicit UUID
             code, output, path = self.run_setup(
-                [""] + answers[:5] + ["2", "GPU-deadbeef-0000"]
-                + answers[6:] + ["n", "y"], existing=existing)
+                [""] + answers[:6] + ["2", "GPU-deadbeef-0000"]
+                + answers[7:] + ["n", "y"], existing=existing)
             self.assertEqual(code, 0, output)
             self.assertEqual(pc.read_env_file(path)["GPU"],
                              "GPU-deadbeef-0000")
             # Cancellation at the GPU menu still writes nothing.
             stale = self.base / "stale-gpu.env"
             answers = self.basics("")
-            answers[5] = "q"
+            answers[6] = "q"
             with self.assertRaises(ps.Cancelled):
                 self.run_setup([""] + answers[:6] + ["q"], existing=existing,
                                config_path=stale)
@@ -382,7 +389,7 @@ class SetupSessionTests(FixtureMixin):
         with mock.patch.object(pc, "discover_gpus", return_value=(
                 [pc.Gpu(index="0", name="NVIDIA RTX PRO 6000")], "")):
             answers = self.basics("")
-            answers[5] = ""            # Enter
+            answers[6] = ""            # Enter
             code, output, path = self.run_setup(
                 [""] + answers + ["n", "y"], existing=existing)
             self.assertEqual(code, 0, output)
@@ -409,14 +416,14 @@ class SetupSessionTests(FixtureMixin):
         # the manual row asks for a NUMERIC logical index and stores cuda:N;
         # 'cuda:1' typed by hand also lands on cuda:1; junk is re-asked.
         code, output, path = self.run_setup(
-            ["next"] + base[:8] + ["3", "junk", "1"] +
+            ["next"] + base[:9] + ["3", "junk", "1"] +
             ["y",                       # yes to the advanced section
              "",                        # PLE placement menu: Enter keeps ram
              "/nvme-unused-with-ram",   # free-text path stays free text
              "true",                    # online FP8 chosen from its menu
              "",                        # WSL2 host memory: Enter keeps false
              "",                        # forward tools: Enter keeps true
-             "", "", "", "",            # capacity/build jobs: Enter = blank
+             "", "", "", "", "",        # capacity/TP/build jobs: Enter = blank
              "/opt/nixl",               # advanced free-text paths below...
              str(self.venv / "bin" / "sglang"),
              str(self.venv / "bin" / "python"),
@@ -487,7 +494,7 @@ class SetupSessionTests(FixtureMixin):
         # 'q' at the media menu cancels through the shared _read contract and
         # the existing file stays byte-for-byte as it was.
         with self.assertRaises(ps.Cancelled):
-            self.run_setup([""] + self.basics("")[:8] + ["q"],
+            self.run_setup([""] + self.basics("")[:9] + ["q"],
                            existing=existing)
         self.assertEqual(path.read_text(), existing)
         # A junk saved value cannot be kept by Enter: the menu rejects and
@@ -497,7 +504,7 @@ class SetupSessionTests(FixtureMixin):
         # First Enter would keep the junk saved value; it is rejected, the
         # second Enter is refused outright, and only an explicit pick passes.
         code, output, path = self.run_setup(
-            [""] + self.basics("")[:8] + ["", "", "1"] + ["n", "y"],
+            [""] + self.basics("")[:9] + ["", "", "1"] + ["n", "y"],
             existing=broken)
         self.assertEqual(code, 0, output)
         self.assertIn("must be cpu or cuda:N, got 'GPUs'", output)
@@ -607,7 +614,7 @@ class SetupSessionTests(FixtureMixin):
                     f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n"
                     "MAX_RUNNING_REQUESTS=\n")
         code, output, path = self.run_setup(
-            ["", "", str(self.venv), "", "", "", "0", "0", "", "", "n", "y"],
+            ["", "", str(self.venv), "", "", "", "", "0", "0", "", "", "n", "y"],
             existing=existing)
         self.assertEqual(code, 0, output)
         saved = pc.read_env_file(path)
@@ -731,9 +738,9 @@ class SetupSessionTests(FixtureMixin):
             self.assertEqual(plan.env["PENNY_HICACHE_SIZE_GB"], size)
         fields = self.basics(str(self.next_model))
         code, output, path = self.run_setup(
-            ["next"] + fields[:7]
+            ["next"] + fields[:8]
             + ["0", "-1", "1.5", "two", ""]   # junk is re-asked, Enter = blank
-            + fields[8:] + ["n", "y"],
+            + fields[9:] + ["n", "y"],
             config_path=self.base / "junk-hicache.env")
         self.assertEqual(code, 0, output)
         for junk in ("0", "-1", "1.5", "two"):
@@ -777,7 +784,7 @@ class SetupSessionTests(FixtureMixin):
                                       "false",                  # online FP8
                                       "",                       # WSL2 pinned host memory
                                       "true",                   # unknown tools
-                                      "", "", "", "",           # capacity + jobs
+                                      "", "", "", "", "",       # capacity + TP + jobs
                                       "/opt/nixl",              # NIXL prefix
                                       str(self.venv / "bin" / "sglang"),
                                       str(self.venv / "bin" / "python")] + ["y"],
@@ -786,6 +793,149 @@ class SetupSessionTests(FixtureMixin):
         self.assertIn("Build jobs for first-start compilation (empty = recipe "
                       "default) [8]", output)
         self.assertEqual(pc.read_env_file(path)["PENNY_BUILD_JOBS"], "8")
+
+    def test_container_save_generates_the_ordinary_launch_files(self):
+        # The beta configurator writes the same files the manual guide ships
+        # (run.sh + a startup script + the NIXL TOML) with the saved settings in
+        # their own settings block, so the launch afterwards needs no host
+        # Python, no checkout, no Compose and no .env.
+        code, output, launch_dir, files = self.run_container_setup()
+        self.assertEqual(code, 0, output)
+        self.assertIn("Writing the launch files in", output)
+        self.assertEqual(sorted(files),
+                         ["nixl-posix-frspec.toml", "start-flash-next-frspec.sh"])
+        run_sh = (launch_dir / "run.sh").read_text()
+        startup = files["start-flash-next-frspec.sh"].read_text()
+        self.assertEqual((launch_dir / "run.sh").stat().st_mode & 0o111,
+                         0o111)
+        self.assertIn('HOST_MODELS_ROOT=', run_sh)
+        self.assertIn(str(self.base / "host models"), run_sh)
+        self.assertIn('\nNIXL=on\n', run_sh)
+        self.assertIn('\nNIXL=on\n', startup)
+        self.assertIn('TARGET_MODEL=/models/RadixArk-Qwen3.8-Flash-Next-NVFP4',
+                      startup)
+        # The generated launcher starts the generated script, by name.
+        self.assertIn("$SCRIPT_DIR/config/start-flash-next-frspec.sh", run_sh)
+        self.assertIn("Start it with:", output)
+
+    def test_declining_the_save_changes_neither_settings_nor_launch_files(self):
+        # The changed decision is the case that matters: the saved tier goes on
+        # to off while the startup script must follow. Declining at the one gate
+        # has to leave BOTH the saved file and the launch files byte-identical,
+        # and must not advertise a launch built from the rejected settings.
+        code, output, launch_dir, files = self.run_container_setup()
+        self.assertEqual(code, 0, output)
+        config_before = self.config_path.read_bytes()
+        run_sh = launch_dir / "run.sh"
+        startup = files["start-flash-next-frspec.sh"]
+        run_before, startup_before = run_sh.read_bytes(), startup.read_bytes()
+        self.assertIn(b"NIXL=on", run_before)
+        self.assertIn(b"NIXL=on", startup_before)
+
+        code, output, _dir, _files = self.run_container_setup(
+            existing=True, answers={"NIXL": "2"}, save="2")     # off, then 'no'
+        self.assertEqual(code, 3, output)
+        self.assertIn("Cancelled; nothing was written", output)
+        # The question named what it covered, so the answer was informed.
+        self.assertIn(str(self.config_path), output)
+        self.assertIn("launch file(s) you edited", output)
+        self.assertIn("start-flash-next-frspec.sh", output)
+        self.assertEqual(self.config_path.read_bytes(), config_before)
+        self.assertEqual(run_sh.read_bytes(), run_before)
+        self.assertEqual(startup.read_bytes(), startup_before)
+        # Nothing on screen offers the launch the operator just refused.
+        self.assertNotIn("--no-nixl", output)
+        self.assertNotIn("Start it with:", output)
+
+    def test_cancel_at_the_save_gate_leaves_the_previous_choice_in_place(self):
+        # 'q' (or EOF) is a decline with no write at all: the previous save and
+        # its launch files stay exactly as they were.
+        code, _output, launch_dir, files = self.run_container_setup()
+        self.assertEqual(code, 0)
+        config_before = self.config_path.read_bytes()
+        run_before = (launch_dir / "run.sh").read_bytes()
+        startup = files["start-flash-next-frspec.sh"]
+        startup_before = startup.read_bytes()
+
+        with self.assertRaises(ps.Cancelled):
+            self.run_container_setup(existing=True, answers={"NIXL": "2"},
+                                     save="q")
+        self.assertEqual(self.config_path.read_bytes(), config_before)
+        self.assertEqual((launch_dir / "run.sh").read_bytes(), run_before)
+        self.assertEqual(startup.read_bytes(), startup_before)
+
+    def test_confirming_the_gate_changes_the_settings_and_files_together(self):
+        # The same on-to-off decision, agreed: no half-applied state anywhere.
+        _code, _output, launch_dir, files = self.run_container_setup()
+        startup = files["start-flash-next-frspec.sh"]
+        code, output, _dir, _files = self.run_container_setup(
+            existing=True, answers={"NIXL": "2"}, save="")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(pc.read_env_file(self.config_path)["NIXL"], "off")
+        self.assertIn("\nNIXL=off\n", (launch_dir / "run.sh").read_text())
+        self.assertIn("\nNIXL=off\n", startup.read_text())
+        # run.sh and the startup script agree; the unmounted tier's TOML stays
+        # on disk untouched because the operator owns that directory and may
+        # have edited it (the generated set simply does not reference it).
+        self.assertIn("Start it with:", output)
+
+    def test_container_disk_tier_off_asks_no_nixl_root_and_writes_no_toml(self):
+        code, output, launch_dir, files = self.run_container_setup(
+            answers={"NIXL": "2"}, drop=("HOST_NIXL_STORAGE_BASE",))
+        self.assertEqual(code, 0, output)
+        # No root question at all, so there is no path nobody would use.
+        self.assertNotIn("HOST_NIXL_STORAGE_BASE", output.split("Review")[0])
+        self.assertNotIn("HOST_NIXL_STORAGE_BASE", pc.read_env_file(self.config_path))
+        self.assertEqual(sorted(files), ["start-flash-next-frspec.sh"])
+        self.assertIn("\nNIXL=off\n", (launch_dir / "run.sh").read_text())
+        self.assertIn("\nNIXL=off\n", files["start-flash-next-frspec.sh"].read_text())
+        # The budget question stays where it is: a cap is not this switch.
+        self.assertIn("0 = unlimited budget, not an off switch",
+                      output.split("Review")[0])
+
+    def run_container_setup(self, answers: dict[str, str] | None = None,
+                            drop: tuple[str, ...] = (), existing: bool = False,
+                            save: str = "",
+                            before_save: tuple[str, ...] = ()
+                            ) -> tuple[int, str, Path, dict]:
+        """Drive the container wizard with the listed answers, keeping defaults.
+
+        One gate at the end covers the whole save (the settings file plus the
+        launch files generated from it), so `save` is the only yes/no answer and
+        declining must leave every one of those files as it was.
+
+        Returns the exit code, everything printed, the launch directory the
+        settings named, and the files the save wrote inside its config/.
+        """
+        host_root = self.base / "host models"
+        host_root.mkdir(exist_ok=True)
+        (host_root / "RadixArk-Qwen3.8-Flash-Next-NVFP4").mkdir(exist_ok=True)
+        (self.base / "cache").mkdir(exist_ok=True)
+        (self.base / "nixl").mkdir(exist_ok=True)
+        given = {"HOST_MODELS_ROOT": str(host_root),
+                 "HOST_CACHE_BASE": str(self.base / "cache"),
+                 "HOST_NIXL_STORAGE_BASE": str(self.base / "nixl")}
+        given.update(answers or {})
+        names = [name for name in ps.ordered_names("container")
+                 if name != "DRAFT_MODEL" and name not in drop]
+        # Enter everywhere the defaults are right: profile (kept on a rerun),
+        # the advanced gate, and the save confirmation.
+        lines = ["" if existing else "1"]
+        lines += [given.get(name, "") if name in given else ""
+                  for name in names]
+        # The advanced gate, any answer needed by the validation menu (a saved
+        # proposal that is not ready), then the single save gate that also
+        # covers the generated launch files.
+        lines += ["", *before_save, save]
+        out = io.StringIO()
+        prompt = ps.Prompt(stdin=io.StringIO("".join(line + "\n" for line
+                                                     in lines)), stdout=out)
+        code = ps.run_session("container", self.config_path, {}, prompt,
+                             self.repo, home=self.base / "isolated-home")
+        launch_dir = self.base / "isolated-home" / "pennyroyal-container"
+        files = ({path.name: path for path in (launch_dir / "config").iterdir()}
+                 if (launch_dir / "config").is_dir() else {})
+        return code, out.getvalue(), launch_dir, files
 
     def test_mixup_checkpoint_blocks_save_as_clear_error(self):
         # A dense checkpoint on the next profile is the parent's mixup case.
@@ -797,6 +947,86 @@ class SetupSessionTests(FixtureMixin):
         self.assertFalse(path.exists())
 
 
+
+
+    def test_27b_never_offers_a_knob_its_recipe_pins(self):
+        # The wizard asks about what the selected profile can actually honour:
+        # 27b fixes capacity, TP and PLE placement in its own recipe, so those
+        # questions would promise tuning that never reaches the server.
+        code, output, path = self.run_setup(
+            ["3"] + self.basics(str(self.dense_model),
+                                draft=str(self.draft_model))
+            + ["y",                                  # yes to the advanced section
+               str(self.base / "ple-unused"),        # prepared snapshot path
+               "false",                              # online FP8
+               "",                                   # WSL2 pinned host memory
+               "true",                               # unknown tools
+               "",                                   # build jobs
+               "/opt/nixl",                          # NIXL prefix
+               str(self.venv / "bin" / "sglang"),
+               str(self.venv / "bin" / "python"),
+               "y"])
+        self.assertEqual(code, 0, output)
+        asked = output.split("Review")[0]
+        for absent in ("Max running requests", "Max mamba cache size",
+                       "Max total tokens", "Tensor-parallel ranks",
+                       "PLE placement (ram or nvme)",
+                       "where the PLE embedding table lives"):
+            self.assertNotIn(absent, asked)
+        # A compatible saved value is still preserved, not dropped, and a knob
+        # this profile has never appears in the file.
+        saved = pc.read_env_file(path)
+        self.assertEqual(saved["PENNYROYAL_PROFILE"], "27b")
+        self.assertNotIn("PENNY_PLE_BACKEND", saved)
+        self.assertNotIn("MAX_RUNNING_REQUESTS", saved)
+        self.assertNotIn("TP_SIZE", saved)
+
+    def test_incompatible_saved_27b_value_blocks_the_save_with_a_reason(self):
+        # Hide the knob, but never quietly accept a value the recipe ignores:
+        # an edited-in MAX_RUNNING_REQUESTS on 27b is named, and the file keeps
+        # the shape it had until the operator fixes it or cancels.
+        existing = (f"{pc.PROFILE_KEY}=27b\n"
+                    f"TARGET_MODEL={pc.quote_value(str(self.dense_model))}\n"
+                    f"DRAFT_MODEL={pc.quote_value(str(self.draft_model))}\n"
+                    f"CACHE_BASE={pc.quote_value(str(self.cache))}\n"
+                    f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n"
+                    "MAX_RUNNING_REQUESTS=8\n")
+        code, output, path = self.run_setup(
+            [""] + self.basics("", draft=str(self.draft_model)) + ["n", ""],
+            existing=existing)
+        self.assertEqual(code, 3, output)
+        self.assertIn("MAX_RUNNING_REQUESTS=8", output)
+        self.assertIn("is not a setting of the 27b profile", output)
+        self.assertIn("[1] re-enter MAX_RUNNING_REQUESTS", output)
+        self.assertEqual(path.read_text(), existing)
+
+    def test_broken_template_writes_neither_settings_nor_files(self):
+        # A checkout whose shipped examples are incomplete cannot be half-saved:
+        # the plan can be valid while the generated files are impossible, and
+        # this save must then stop without touching the existing file.
+        _code, _output, _launch_dir, _files = self.run_container_setup()
+        before = self.config_path.read_bytes()
+        templates = self.repo / "docker" / "pennyroyal" / "launch"
+        real = templates.resolve()
+        templates.unlink()
+        (templates / "config").mkdir(parents=True)
+        for name in ("run.sh", "start-flash-next-frspec.sh"):
+            source = real / ("run.sh" if name == "run.sh"
+                             else f"config/{name}")
+            target = templates / ("run.sh" if name == "run.sh"
+                                  else f"config/{name}")
+            target.write_text(source.read_text())
+        try:
+            code, output, _dir, _files = self.run_container_setup(
+                existing=True, before_save=("1",),   # save despite the errors
+                save="")
+            self.assertEqual(code, 4, output)
+            self.assertIn("Cannot write the container launch files", output)
+            self.assertIn("Nothing was written", output)
+            self.assertEqual(self.config_path.read_bytes(), before)
+        finally:
+            shutil.rmtree(templates)
+            templates.symlink_to(real)
 
 
 if __name__ == "__main__":

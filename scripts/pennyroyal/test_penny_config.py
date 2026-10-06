@@ -71,6 +71,36 @@ def compose_command() -> list[str] | None:
     return None
 
 
+# Shell variables the generated run.sh reads as fallbacks; a developer's own
+# export must never change what a test expects the launch to be.
+LAUNCH_ENV_KEYS = ("PENNYROYAL_IMAGE", "PENNYROYAL_STARTUP",
+                   "PENNYROYAL_NIXL_CONFIG", "PENNYROYAL_PORT",
+                   "PENNYROYAL_USER", "HOST_MODELS_ROOT", "HOST_CACHE_BASE",
+                   "HOST_NIXL_STORAGE_BASE", "NVIDIA_GPU", "TARGET_MODEL",
+                   "DRAFT_MODEL", "NIXL", "USER_ID", "GROUP_ID", "TP_SIZE",
+                   "PENNYROYAL_PROFILE")
+
+
+def docker_stub(directory: Path) -> tuple[Path, Path]:
+    """A docker on PATH that records its argv instead of talking to a daemon."""
+    capture = directory / f"docker-argv-{os.urandom(4).hex()}"
+    bin_dir = directory / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "docker"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        ': > "$DOCKER_CAPTURE"\n'
+        'for argument in "$@"; do printf "%s\\n" "$argument" '
+        '>> "$DOCKER_CAPTURE"; done\n')
+    stub.chmod(0o755)
+    return bin_dir, capture
+
+
+class _Cancelled(Exception):
+    """Stand-in for the wizard's cancellation (its 'q'/EOF Cancelled signal)."""
+
+
 def make_executable(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body)
@@ -357,11 +387,18 @@ class HiCacheSizePlanTests(FixtureMixin):
         env_file.write_text(pc.serialize_env(
             [("", sorted(values.items()))],
             header=(f"{pc.PROFILE_KEY}=next",)))
+        # The fixture repo needs the shipped examples to generate from.
+        (compose_dir / "launch").symlink_to(ROOT / pc.LAUNCH_RELPATH)
         config = pc.load_config("container", env_file, {}, self.repo)
         plan = pc.build_plan("container", config, {}, repo_root=self.repo)
         self.assertEqual(plan.env["PENNY_HICACHE_SIZE_GB"], "2")
         self.assertEqual(plan.forced_env["PENNY_HICACHE_SIZE_GB"], "2")
-        self.assertIn("PENNY_HICACHE_SIZE_GB=2", plan.next_command)
+        # The size is a line in the operator's own startup file, not an
+        # environment variable the container has to be told about.
+        startup = dict(pc.container_launch_files(plan))[
+            plan.launch_dir / "config" / "start-flash-next-frspec.sh"]
+        self.assertIn("\nHICACHE_SIZE_GB=2\n", startup)
+        self.assertNotIn("PENNY_HICACHE_SIZE_GB", " ".join(plan.argv))
         self.assertTrue(self.summary_has(
             plan, "RAM cache (HiCache): 2 GB as --hicache-size"))
 
@@ -546,8 +583,16 @@ class DiscoveryTests(FixtureMixin):
         self.assertEqual(origin, "default location")
         self.assertEqual(found.name, "pennyroyal.env")
         container, _ = pc.discover_config_path("container", {}, self.repo)
-        self.assertEqual(container, self.repo / pc.COMPOSE_RELPATH.replace(
-            "compose.yaml", ".env"))
+        # The configurator's own saved file, not the manual Compose .env: the
+        # generated launch files carry the settings themselves, so nothing has
+        # to read this file when the container starts.
+        self.assertEqual(container,
+                         Path.home() / pc.CONTAINER_CONFIG_RELPATH)
+        self.assertNotIn("compose.yaml", str(container))
+        self.assertEqual(pc.default_config_path(
+                             "container", self.repo, home=Path("/fixture-home")),
+                         Path("/fixture-home/.config/pennyroyal"
+                              "/pennyroyal-container.env"))
 
     def test_missing_file_uses_defaults_instead_of_failing(self):
         config = pc.load_config("native", self.base / "nope.env", {}, self.repo)
@@ -995,9 +1040,13 @@ class LauncherTests(FixtureMixin):
 
 class ContainerPlanTests(FixtureMixin):
     def setUp(self) -> None:
-        super().setUp()
+        FixtureMixin.setUp(self)   # shared with the generation checks below
         self.compose_dir = self.repo / "docker" / "pennyroyal"
         self.compose_dir.mkdir(parents=True)
+        # The beta configurator generates the launch files from the shipped
+        # examples, so the fixture repo carries them (by reference).
+        (self.compose_dir / "launch").symlink_to(
+            ROOT / "docker" / "pennyroyal" / "launch")
         # Use the real repository Compose file so `config` renders the same
         # interpolation the deployment relies on.
         (self.compose_dir / "compose.yaml").write_text(
@@ -1025,12 +1074,46 @@ class ContainerPlanTests(FixtureMixin):
         (self.base / "nixl").mkdir(exist_ok=True)
         return {"HOST_MODELS_ROOT": str(self.host_root),
                 "HOST_CACHE_BASE": str(self.base / "cache"),
-                "HOST_NIXL_STORAGE_BASE": str(self.base / "nixl")}
+                "HOST_NIXL_STORAGE_BASE": str(self.base / "nixl"),
+                "LAUNCH_DIR": str(self.base / "launch out")}
+
+    def generated(self, plan: pc.Plan) -> dict[Path, str]:
+        """The ordinary files a saved container setup would write."""
+        return dict(pc.container_launch_files(plan))
+
+    def run_printed_command(self, plan: pc.Plan) -> list[str]:
+        """Run the printed command for real, with a docker that only records.
+
+        The generated run.sh is the file an operator starts, so the command the
+        plan prints must reach docker with exactly the validated image, mounts,
+        port and GPU. The ambient shell deliberately lacks the saved keys (see
+        LAUNCH_ENV_KEYS), so nothing but the printed command can supply them.
+        No daemon, model or GPU is involved here.
+        """
+        pc.write_container_files(plan)
+        bin_dir, capture = docker_stub(self.base)
+        env = {key: value for key, value in os.environ.items()
+               if key not in LAUNCH_ENV_KEYS}
+        env.update({"PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "DOCKER_CAPTURE": str(capture),
+                    "HOME": str(self.base / "isolated-home")})
+        run = subprocess.run(plan.next_command, shell=True, cwd="/",
+                             capture_output=True, text=True, check=False,
+                             env=env)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        return capture.read_text().splitlines()
 
     def test_default_target_follows_the_selected_profile(self):
         plan = self.container_plan(self.base_values(), profile="next")
         self.assertEqual(plan.env["TARGET_MODEL"],
                          "/models/RadixArk-Qwen3.8-Flash-Next-NVFP4")
+        self.assertEqual(Path(plan.argv[plan.argv.index("--startup") + 1]).name,
+                         "start-flash-next-frspec.sh")
+        plan = self.container_plan(self.base_values(), profile="next-plain")
+        self.assertEqual(Path(plan.argv[plan.argv.index("--startup") + 1]).name,
+                         "start-flash-next.sh")
+        self.assertEqual(Path(plan.argv[plan.argv.index("--nixl-config") + 1]).name,
+                         "nixl-posix.toml")
         self.assertNotIn("DRAFT_MODEL", plan.env)
         plan = self.container_plan(self.base_values(), profile="27b")
         self.assertEqual(plan.env["TARGET_MODEL"], "/models/Qwen3.8-27B-FP8")
@@ -1061,30 +1144,59 @@ class ContainerPlanTests(FixtureMixin):
         plan = self.container_plan(values)
         self.assertIn("absolute host path", self.messages(plan, "error"))
 
-    def test_compose_command_is_absolute_and_environment_matches_the_file(self):
+    def test_launch_command_names_the_generated_run_sh_and_its_options(self):
         plan = self.container_plan(self.base_values(), profile="27b")
-        self.assertEqual(plan.argv[0:2], ["docker", "compose"])
-        self.assertIn("--env-file", plan.argv)
-        self.assertEqual(plan.argv[plan.argv.index("-f") + 1],
-                         str(self.compose_dir / "compose.yaml"))
-        self.assertEqual(plan.argv[plan.argv.index("--env-file") + 1],
-                         str(self.env_file))
-        self.assertTrue(plan.next_command.endswith(
-            " ".join(pc.quote_command_arg(arg) for arg in plan.argv)))
-        self.assertIn("TARGET_MODEL=", plan.next_command)
-        self.assertEqual(plan.forced_env["TARGET_MODEL"], "/models/Qwen3.8-27B-FP8")
-        self.assertEqual(shlex.split(plan.next_command)[
-            shlex.split(plan.next_command).index("docker"):], plan.argv)
+        launch_dir = self.base / "launch out"
+        self.assertEqual(Path(plan.argv[0]), launch_dir / "run.sh")
+        for option, wanted in (
+                ("--startup", str(launch_dir / "config" / "start-27b-dflash2.sh")),
+                ("--image", pc.DEFAULT_IMAGE),
+                ("--models", str(self.host_root)),
+                ("--cache", str(self.base / "cache")),
+                ("--port", "8001"),
+                ("--gpu", "0"),
+                ("--user", "1000:1000"),
+                ("--nixl-root", str(self.base / "nixl")),
+                ("--nixl-config", str(launch_dir / "config" / "nixl-posix.toml"))):
+            self.assertEqual(plan.argv[plan.argv.index(option) + 1], wanted,
+                             option)
+        # The printed command is exactly that argv: run.sh options beat its own
+        # settings, so the launch cannot drift onto an ambient value.
+        self.assertEqual(shlex.split(plan.next_command), plan.argv)
         self.assertEqual(plan.env["PENNYROYAL_PROFILE"], "27b")
-        self.assertEqual(plan.env["NVIDIA_GPU"], "0")
-        self.assertEqual(plan.env["PENNYROYAL_PORT"], "8001")
-        self.assertEqual(plan.env["USER_ID"], "1000")
-        self.assertEqual(plan.env["PENNYROYAL_IMAGE"], pc.DEFAULT_IMAGE)
+        self.assertEqual(plan.env["TARGET_MODEL"], "/models/Qwen3.8-27B-FP8")
+        # No release number is pinned in the tests: the generated run.sh
+        # must carry whatever the default and the saved file resolve to.
+        self.assertIn(pc.DEFAULT_IMAGE,
+                      self.generated(plan)[self.base / "launch out" / "run.sh"])
+
+    def test_printed_command_reaches_docker_with_the_validated_launch(self):
+        plan = self.container_plan({**self.base_values(),
+                                    "PENNYROYAL_PORT": "8099",
+                                    "NVIDIA_GPU": "1"},
+                                   environ={"HOST_MODELS_ROOT": "/bad/ambient",
+                                            "PENNYROYAL_PORT": "9999"})
+        argv = self.run_printed_command(plan)
+        self.assertEqual(argv[0], "run")
+        self.assertEqual(argv[argv.index("--user") + 1], "1000:1000")
+        self.assertEqual(argv[argv.index("--publish") + 1], "8099:8001")
+        self.assertEqual(argv[argv.index("--gpus") + 1], '"device=1"')
+        volumes = [argv[item_index + 1] for item_index, item in enumerate(argv)
+                   if item == "--volume"]
+        self.assertEqual(volumes, [
+            f"{self.base / 'launch out' / 'config'}:/config:ro",
+            f"{self.host_root}:/models:ro",
+            f"{self.base / 'cache'}:/cache",
+            f"{self.base / 'nixl'}:/nixl",
+        ])
+        self.assertNotIn("/bad/ambient", " ".join(argv))
+        self.assertEqual(argv[-3:], ["exec", "bash",
+                                     "/config/start-flash-next-frspec.sh"])
 
     def test_container_blank_quota_resets_to_zero_for_the_runtime(self):
-        # Same contract in the container: the .env gets the real default so
-        # the entrypoint's parser never sees '' (which it rejects), while an
-        # ambient 200 cannot override the saved reset decision.
+        # Same contract in the container: the generated launch gets the real
+        # default so the entrypoint's parser never sees '' (which it rejects),
+        # while an ambient 200 cannot override the saved reset decision.
         parse = runtime_max_cache_gb_parser()
         plan = self.container_plan({**self.base_values(),
                                     "SGLANG_HICACHE_NIXL_MAX_CACHE_GB": ""},
@@ -1096,8 +1208,10 @@ class ContainerPlanTests(FixtureMixin):
         self.assertEqual(
             parse(plan.forced_env["SGLANG_HICACHE_NIXL_MAX_CACHE_GB"],
                   "SGLANG_HICACHE_NIXL_MAX_CACHE_GB"), 0.0)
-        self.assertIn("SGLANG_HICACHE_NIXL_MAX_CACHE_GB=0",
-                      plan.next_command)
+        # The startup script never mentions the budget, so run.sh has to carry
+        # it: nothing outside the launch directory is read at container start.
+        self.assertIn("  -e SGLANG_HICACHE_NIXL_MAX_CACHE_GB=0",
+                      self.generated(plan)[self.base / "launch out" / "run.sh"])
         # Human-readable summary: lines stay separate and show the reset value.
         self.assertIn("NIXL disk budget: 0 GiB = no cap; the persistent NIXL "
                       "cache stays enabled and keeps growing", plan.summary)
@@ -1105,19 +1219,18 @@ class ContainerPlanTests(FixtureMixin):
         self.assertTrue(any(line.startswith("API port: ")
                             for line in plan.summary))
 
-    def test_container_blank_override_ships_in_the_printed_command(self):
-        # An empty saved override must ride in the printed command as KEY=''
-        # so compose's ${KEY:-default} fires despite a conflicting export.
+    def test_container_blank_override_keeps_the_scripts_qualified_value(self):
+        # A saved blank is 'the recipe decides': the generated startup script
+        # keeps its shipped qualified value rather than an empty string, and a
+        # conflicting export never reaches it either.
         plan = self.container_plan({**self.base_values(),
                                     "MAX_RUNNING_REQUESTS": ""},
                                    environ={"MAX_RUNNING_REQUESTS": "8"})
         self.assertEqual(plan.env["MAX_RUNNING_REQUESTS"], "")
-        self.assertEqual(plan.forced_env["MAX_RUNNING_REQUESTS"], "")
-        self.assertIn("MAX_RUNNING_REQUESTS=''", plan.next_command)
-        with mock.patch.dict(os.environ, {"MAX_RUNNING_REQUESTS": "8"}):
-            rendered = self.run_printed_command(plan)
-        self.assertIn('MAX_RUNNING_REQUESTS: "4"', rendered)
-        self.assertNotIn('"8"', rendered)
+        startup = self.generated(plan)[
+            self.base / "launch out" / "config" / "start-flash-next-frspec.sh"]
+        self.assertIn("\nMAX_RUNNING_REQUESTS=4\n", startup)
+        self.assertNotIn("MAX_RUNNING_REQUESTS=8", startup)
 
     def test_saved_values_win_and_ambient_values_pass_through(self):
         plan = self.container_plan({**self.base_values(), "PENNYROYAL_PORT": "8123"},
@@ -1125,38 +1238,8 @@ class ContainerPlanTests(FixtureMixin):
         self.assertEqual(plan.env["PENNYROYAL_PORT"], "8123")
         self.assertEqual(plan.env["SGLANG_FORWARD_UNKNOWN_TOOLS"], "false")
 
-    def run_printed_command(self, plan: Plan) -> str:
-        """Run the printed command verbatim from / with `up -d` -> `config`.
-
-        The ambient shell deliberately lacks (and sometimes conflicts with) the
-        saved keys, so this proves the printed command alone delivers the plan.
-        The compose renderer comes from compose_command(), so a host with only
-        the standalone docker-compose binary runs that instead of a hardcoded
-        'docker compose' pair.
-        """
-        compose_cmd = compose_command()
-        if compose_cmd is None:
-            self.skipTest("docker compose CLI not installed on this host")
-        tokens = shlex.split(plan.next_command)
-        body_start = len(tokens) - len(plan.argv)
-        assignments = tokens[:body_start]
-        self.assertEqual(tokens[body_start:], plan.argv)
-        # Compare canonical parses: printed assignments must decode to the plan.
-        decoded = dict(item.split("=", 1) for item in assignments)
-        self.assertEqual(decoded, plan.forced_env)
-        # Same -f/--env-file arguments as printed, with `up -d` replaced by
-        # `config`: render only, no daemon, no service start.
-        command = (list(compose_cmd) + plan.argv[2:plan.argv.index("up")]
-                   + ["config"])
-        env = {key: value for key, value in os.environ.items()
-               if key not in pc.COMPOSE_CRITICAL_KEYS}
-        env.update(decoded)
-        run = subprocess.run(command, capture_output=True, text=True,
-                             check=False, cwd="/", env=env)
-        self.assertEqual(run.returncode, 0, run.stderr)
-        return run.stdout
-
     def test_saved_root_wins_over_conflicting_ambient_env(self):
+        (self.host_root / "ambient").mkdir()
         plan = self.container_plan(self.base_values(),
                                    environ={"HOST_MODELS_ROOT": "/bad/ambient",
                                             "TARGET_MODEL": "/models/ambient"})
@@ -1165,25 +1248,26 @@ class ContainerPlanTests(FixtureMixin):
         self.assertEqual(plan.env["HOST_MODELS_ROOT"], str(self.host_root))
         self.assertEqual(plan.env["TARGET_MODEL"], "/models/ambient")
         self.assertEqual(plan.origins["HOST_MODELS_ROOT"], "saved file")
-        self.assertEqual(plan.forced_env["HOST_MODELS_ROOT"], str(self.host_root))
         self.assertNotIn("/bad/ambient", plan.next_command)
-        rendered = self.run_printed_command(plan)
-        self.assertIn(str(self.host_root), rendered)
-        self.assertNotIn("/bad/ambient", rendered)
-        self.assertIn("/models/ambient", rendered)
+        argv = self.run_printed_command(plan)
+        self.assertIn(f"{self.host_root}:/models:ro", argv)
+        self.assertNotIn("/bad/ambient", " ".join(argv))
+        startup = self.generated(plan)[
+            self.base / "launch out" / "config" / "start-flash-next-frspec.sh"]
+        self.assertIn("TARGET_MODEL=/models/ambient", startup)
 
-    def test_27b_unset_target_reaches_compose_via_printed_command(self):
+    def test_27b_profile_defaults_land_in_the_generated_startup_script(self):
         plan = self.container_plan(self.base_values(), profile="27b")
-        # The compose file itself defaults TARGET_MODEL to the Next path, so
-        # only the forced prefix can deliver the profile-appropriate default.
-        self.assertEqual(plan.forced_env["TARGET_MODEL"],
-                         "/models/Qwen3.8-27B-FP8")
-        self.assertEqual(plan.forced_env["DRAFT_MODEL"],
-                         "/models/Qwen3.8-27B-DFlash2")
-        rendered = self.run_printed_command(plan)
-        self.assertIn("TARGET_MODEL: /models/Qwen3.8-27B-FP8", rendered)
-        self.assertIn("DRAFT_MODEL: /models/Qwen3.8-27B-DFlash2", rendered)
-        self.assertNotIn("RadixArk", rendered)
+        self.assertEqual(plan.env["TARGET_MODEL"], "/models/Qwen3.8-27B-FP8")
+        self.assertEqual(plan.env["DRAFT_MODEL"], "/models/Qwen3.8-27B-DFlash2")
+        startup = self.generated(plan)[
+            self.base / "launch out" / "config" / "start-27b-dflash2.sh"]
+        self.assertIn("TARGET_MODEL=/models/Qwen3.8-27B-FP8", startup)
+        self.assertIn("DRAFT_MODEL=/models/Qwen3.8-27B-DFlash2", startup)
+        self.assertNotIn("RadixArk", startup)
+        # The host path with a space survives the generated file and docker.
+        argv = self.run_printed_command(plan)
+        self.assertIn(f"{self.host_root}:/models:ro", argv)
 
     def test_missing_compose_cli_is_detected_not_raised(self):
         # The parent host has no docker CLI at all; probing must answer
@@ -1223,7 +1307,7 @@ class ContainerPlanTests(FixtureMixin):
                                         "config"], capture_output=True,
                              text=True, check=False, cwd=str(ROOT),
                              env={**{key: value for key, value in os.environ.items()
-                                     if key not in pc.COMPOSE_CRITICAL_KEYS},
+                                     if key not in LAUNCH_ENV_KEYS},
                                   "HOST_MODELS_ROOT": str(self.host_root),
                                   "HOST_CACHE_BASE": str(self.host_root),
                                   "HOST_NIXL_STORAGE_BASE": str(self.host_root)})
@@ -1282,10 +1366,10 @@ class ContainerPlanTests(FixtureMixin):
                          [str(self.repo / "run-penny"), "--config",
                           str(self.config_path.absolute()), "--profile", "27b"])
 
-    def test_relative_selected_config_prints_an_absolute_reload_path(self):
-        # --config (or PENNYROYAL_CONFIG) given as a relative path must not
-        # leak into the printed --env-file, where a later cwd would read a
-        # different file; the selected path is resolved at load time.
+    def test_relative_selected_config_is_resolved_once(self):
+        # A relative --config (or PENNYROYAL_CONFIG) must be resolved at load,
+        # so the file the plan names and validates is the same one a later cwd
+        # would not find.
         self.env_file.write_text(pc.serialize_env(
             [("basic", list(self.base_values().items()))],
             header=(f"{pc.PROFILE_KEY}=next",)))
@@ -1293,18 +1377,403 @@ class ContainerPlanTests(FixtureMixin):
         with contextlib.chdir(self.env_dir):
             config = pc.load_config("container", Path(".env"), {}, self.repo)
             plan = pc.build_plan("container", config, {}, repo_root=self.repo)
-        self.assertEqual(
-            plan.argv[plan.argv.index("--env-file") + 1], str(self.env_file))
-        self.assertTrue(Path(plan.argv[plan.argv.index("--env-file") + 1])
-                        .is_absolute())
-        # Running the printed command from / still resolves the same mounts.
-        rendered = self.run_printed_command(plan)
-        self.assertIn(str(self.host_root), rendered)
+        self.assertEqual(config.path, self.env_file)
+        self.assertIn(str(self.env_file), "\n".join(plan.summary))
+        argv = self.run_printed_command(plan)
+        self.assertIn(f"{self.host_root}:/models:ro", argv)
 
     def test_missing_env_file_is_a_warning_not_a_crash(self):
         config = pc.load_config("container", self.env_dir / ".env", {}, self.repo)
         plan = pc.build_plan("container", config, {}, repo_root=self.repo)
-        self.assertIn("does not exist yet", self.messages(plan, "warn"))
+        self.assertIn("not exist yet", self.messages(plan, "warn"))
+        # Nothing generated yet is a note about the next step, not an error:
+        # the only errors are the roots this fixture never set.
+        self.assertIn("no generated launch yet", self.messages(plan, "warn"))
+        self.assertEqual({issue.key for issue in plan.errors},
+                         {"HOST_MODELS_ROOT", "HOST_CACHE_BASE",
+                          "HOST_NIXL_STORAGE_BASE"})
+
+
+class ContainerLaunchGenerationTests(FixtureMixin):
+    """The generated files, and the disk-tier choice that has to agree in both.
+
+    run.sh decides whether /nixl is mounted; the startup script decides whether
+    the NIXL storage backend is passed at all. One saved switch drives both, so
+    this shares the container fixture and its helpers instead of a second one.
+    """
+
+    setUp = ContainerPlanTests.setUp
+    container_plan = ContainerPlanTests.container_plan
+    base_values = ContainerPlanTests.base_values
+    generated = ContainerPlanTests.generated
+    run_printed_command = ContainerPlanTests.run_printed_command
+
+    def test_disk_tier_is_on_by_default_in_both_generated_files(self):
+        plan = self.container_plan(self.base_values())
+        self.assertEqual(plan.env["NIXL"], "on")
+        files = self.generated(plan)
+        self.assertIn("\nNIXL=on\n", files[self.base / "launch out" / "run.sh"])
+        startup = files[self.base / "launch out" / "config"
+                        / "start-flash-next-frspec.sh"]
+        self.assertIn("\nNIXL=on\n", startup)
+        # on is the qualified default: the NIXL TOML is written next to it.
+        self.assertTrue((self.base / "launch out" / "config"
+                         / "nixl-posix-frspec.toml") in files)
+        self.assertIn("--nixl-root", plan.argv)
+
+    def test_disk_tier_off_aligns_the_mount_and_the_runtime_arguments(self):
+        for profile, script in (("next", "start-flash-next-frspec.sh"),
+                                ("next-plain", "start-flash-next.sh"),
+                                ("27b", "start-27b-dflash2.sh")):
+            with self.subTest(profile=profile):
+                plan = self.container_plan(
+                    {**self.base_values(), "NIXL": "off",
+                     "HOST_NIXL_STORAGE_BASE": ""}, profile=profile)
+                # No root is required, so nothing about a missing one is held
+                # against the launch, and nothing in it is deleted either.
+                self.assertEqual(plan.errors, [])
+                self.assertNotIn("NIXL", self.messages(plan, "warn"))
+                self.assertIn("--no-nixl", plan.argv)
+                self.assertNotIn("--nixl-root", plan.argv)
+                self.assertNotIn("--nixl-config", plan.argv)
+                files = self.generated(plan)
+                run_sh = files[self.base / "launch out" / "run.sh"]
+                startup = files[self.base / "launch out" / "config" / script]
+                self.assertIn("\nNIXL=off\n", run_sh)
+                self.assertIn("\nNIXL=off\n", startup)
+                # The backend config the startup script drops is not shipped
+                # either, and the RAM tier line it keeps is untouched.
+                self.assertFalse(any(path.name.startswith("nixl-")
+                                    for path in files))
+                self.assertNotIn("SGLANG_HICACHE_NIXL_MAX_CACHE_GB", run_sh)
+                self.assertIn("--enable-hierarchical-cache", startup)
+                self.assertIn("GPU radix cache and host-RAM HiCache stay on",
+                              "\n".join(plan.summary))
+                self.assertEqual(self.run_printed_command(plan)
+                                 [-3:], ["exec", "bash", f"/config/{script}"])
+
+    def test_disk_tier_off_is_not_an_unlimited_budget(self):
+        # A 0 budget means the cache is on with no cap; only NIXL=off removes
+        # it, and the summary must never call the two the same thing.
+        plan = self.container_plan({**self.base_values(), "NIXL": "off",
+                                    "SGLANG_HICACHE_NIXL_MAX_CACHE_GB": "0"})
+        self.assertNotIn("NIXL disk budget", "\n".join(plan.summary))
+        plan = self.container_plan({**self.base_values(), "NIXL": "on",
+                                    "SGLANG_HICACHE_NIXL_MAX_CACHE_GB": "0"})
+        summary = "\n".join(plan.summary)
+        self.assertIn("NIXL disk tier: on", summary)
+        self.assertIn("NIXL disk budget: 0 GiB = no cap", summary)
+
+    def test_qualified_27b_knobs_stay_with_their_recipe(self):
+        # The 27b recipe pins its capacity, TP and PLE placement in its own
+        # launch line, so a saved choice there cannot move the server: the plan
+        # refuses it and the generated file keeps the shipped literals instead of
+        # pretending the operator's value is in charge.
+        plan = self.container_plan({**self.base_values(),
+                                    "MAX_RUNNING_REQUESTS": "6",
+                                    "TP_SIZE": "2"}, profile="27b")
+        self.assertIn("is not a setting of the 27b profile",
+                      self.messages(plan, "error"))
+        startup = self.generated(plan)[
+            self.base / "launch out" / "config" / "start-27b-dflash2.sh"]
+        self.assertNotIn("MAX_RUNNING_REQUESTS=6", startup)
+        self.assertIn("\nTP_SIZE=1\n", startup)
+        self.assertNotIn("--nvme-ple", plan.argv)
+        # On the Next profile the same saved TP is a real setting and is written.
+        plan = self.container_plan({**self.base_values(), "TP_SIZE": "2"})
+        self.assertEqual(plan.errors, [])
+        startup = self.generated(plan)[
+            self.base / "launch out" / "config" / "start-flash-next-frspec.sh"]
+        self.assertIn("\nTP_SIZE=2\n", startup)
+
+    def test_nvme_ple_keeps_its_own_independent_choice(self):
+        (self.base / "ple snapshot").mkdir()
+        plan = self.container_plan({**self.base_values(), "NIXL": "off",
+                                    "PENNY_PLE_BACKEND": "nvme",
+                                    "PENNY_PLE_NVME_MODEL":
+                                        str(self.base / "ple snapshot")})
+        self.assertIn("--nvme-ple", plan.argv)
+        run_sh = self.generated(plan)[self.base / "launch out" / "run.sh"]
+        self.assertIn("\nNVME_PLE=on\n", run_sh)
+        self.assertIn("\nNIXL=off\n", run_sh)
+        # io_uring stays permitted for the PLE reader without the disk tier.
+        self.assertIn("seccomp=unconfined", " ".join(self.run_printed_command(plan)))
+
+    def test_host_paths_with_spaces_and_dollars_survive_generation(self):
+        odd = self.base / "share $models [v1]"
+        odd.mkdir()
+        (odd / "RadixArk-Qwen3.8-Flash-Next-NVFP4").mkdir()
+        values = {**self.base_values(), "HOST_MODELS_ROOT": str(odd)}
+        plan = self.container_plan(values)
+        self.assertEqual(plan.errors, [])
+        run_sh = self.generated(plan)[self.base / "launch out" / "run.sh"]
+        self.assertIn(f"HOST_MODELS_ROOT={shlex.quote(str(odd))}", run_sh)
+        argv = self.run_printed_command(plan)
+        self.assertIn(f"{odd}:/models:ro", argv)
+
+    def test_a_broken_template_is_named_and_never_guessed(self):
+        empty = self.base / "no-templates"
+        (empty / "configs" / "pennyroyal").mkdir(parents=True)
+        config = pc.load_config("container", self.env_file, {}, self.repo)
+        plan = pc.build_plan("container", config, {}, repo_root=empty)
+        self.assertIn("launch template is missing", self.messages(plan, "error"))
+        with self.assertRaises(pc.ConfigError):
+            pc.container_launch_files(plan)
+
+    def test_saving_twice_does_not_clobber_an_edited_file(self):
+        plan = self.container_plan(self.base_values())
+        pc.write_container_files(plan)
+        run_sh = self.base / "launch out" / "run.sh"
+        original = run_sh.read_text()
+        run_sh.write_text(original + "\n# operator edit\n")
+        asked: list[str] = []
+        outcomes = dict(pc.write_container_files(
+            plan, confirm=lambda text: asked.append(text) or False))
+        self.assertEqual(len(asked), 1, asked)
+        self.assertIn("run.sh", asked[0])
+        self.assertEqual(outcomes[run_sh], "kept your edited copy")
+        self.assertEqual(run_sh.read_text(), original + "\n# operator edit\n")
+        # A file whose content already matches is never rewritten at all.
+        startup = (self.base / "launch out" / "config"
+                   / "start-flash-next-frspec.sh")
+        started = startup.stat().st_mtime_ns
+        self.assertEqual(dict(pc.write_container_files(plan))[startup],
+                         "unchanged")
+        self.assertEqual(startup.stat().st_mtime_ns, started)
+        # Confirming the overwrite is what replaces the operator's edit.
+        run_sh.write_text(original + "\n# operator edit\n")
+        outcomes = dict(pc.write_container_files(plan, confirm=lambda text: True))
+        self.assertEqual(outcomes[run_sh], "written")
+        self.assertEqual(run_sh.read_text(), original)
+
+
+    def test_saved_forward_unknown_tools_reaches_the_container(self):
+        # A saved false must arrive as false in the launched process, not be
+        # rewritten to the script's qualified default on the way.
+        plan = self.container_plan({**self.base_values(),
+                                    "SGLANG_FORWARD_UNKNOWN_TOOLS": "false"},
+                                   environ={"SGLANG_FORWARD_UNKNOWN_TOOLS":
+                                            "true"})
+        self.assertEqual(plan.env["SGLANG_FORWARD_UNKNOWN_TOOLS"], "false")
+        run_sh = self.generated(plan)[self.base / "launch out" / "run.sh"]
+        self.assertIn("  -e SGLANG_FORWARD_UNKNOWN_TOOLS=false", run_sh)
+        startup = self.generated(plan)[
+            self.base / "launch out" / "config" / "start-flash-next-frspec.sh"]
+        # The mounted script keeps the value it was handed instead of exporting
+        # its own literal over it.
+        self.assertIn('export SGLANG_FORWARD_UNKNOWN_TOOLS='
+                      '"${SGLANG_FORWARD_UNKNOWN_TOOLS:-true}"', startup)
+        self.assertNotIn("export SGLANG_FORWARD_UNKNOWN_TOOLS=true\n", startup)
+        argv = self.run_printed_command(plan)
+        # docker is handed the saved value as its own -e argument.
+        self.assertIn("-e", argv)
+        self.assertIn("SGLANG_FORWARD_UNKNOWN_TOOLS=false", argv)
+        self.assertNotIn("SGLANG_FORWARD_UNKNOWN_TOOLS=true", argv)
+
+    def test_unsupported_27b_settings_are_refused_not_ignored(self):
+        # The 27b recipe pins 4/24, TP1 and RAM PLE in its own launch line, so a
+        # saved choice there would be forwarded and then quietly dropped.
+        for name, value in (("MAX_RUNNING_REQUESTS", "8"),
+                            ("MAX_MAMBA_CACHE_SIZE", "48"),
+                            ("MAX_TOTAL_TOKENS", "262144"),
+                            ("TP_SIZE", "2"),
+                            ("PENNY_PLE_BACKEND", "nvme")):
+            with self.subTest(name=name):
+                plan = self.container_plan({**self.base_values(), name: value},
+                                           profile="27b")
+                messages = self.messages(plan, "error")
+                self.assertIn(f"{name}={value}", messages)
+                self.assertIn("is not a setting of the 27b profile", messages)
+                if value != "262144":
+                    # Where the recipe does have a literal, name it: the
+                    # operator learns what actually runs.
+                    self.assertIn("launches with", messages)
+
+    def test_27b_accepts_what_its_recipe_actually_uses(self):
+        # Compatible saved values (the profile's own numbers) and an unset key
+        # stay silent: nothing here invents 27b tuning or blocks an older file.
+        plan = self.container_plan({**self.base_values(),
+                                    "MAX_RUNNING_REQUESTS": "4",
+                                    "MAX_MAMBA_CACHE_SIZE": "24",
+                                    "TP_SIZE": "1"}, profile="27b")
+        self.assertEqual(plan.errors, [])
+        plan = self.container_plan(self.base_values(), profile="27b")
+        self.assertEqual(plan.errors, [])
+        # The Next profiles read every one of these, so they stay available.
+        plan = self.container_plan({**self.base_values(),
+                                    "MAX_RUNNING_REQUESTS": "8",
+                                    "MAX_MAMBA_CACHE_SIZE": "48",
+                                    "MAX_TOTAL_TOKENS": "262144",
+                                    "TP_SIZE": "2"})
+        self.assertEqual(plan.errors, [])
+        startup = self.generated(plan)[
+            self.base / "launch out" / "config" / "start-flash-next-frspec.sh"]
+        self.assertIn("\nMAX_RUNNING_REQUESTS=8\n", startup)
+        self.assertIn("\nTP_SIZE=2\n", startup)
+        run_sh = self.generated(plan)[self.base / "launch out" / "run.sh"]
+        self.assertIn("  -e MAX_TOTAL_TOKENS=262144", run_sh)
+
+    def test_nvme_ple_snapshot_is_checked_like_a_model_path(self):
+        # The snapshot is read inside the container, so an arbitrary host
+        # directory has to fail here and not at the first cache miss.
+        plan = self.container_plan({**self.base_values(),
+                                    "PENNY_PLE_BACKEND": "nvme",
+                                    "PENNY_PLE_NVME_MODEL": "/srv/elsewhere/ple"})
+        self.assertIn("PENNY_PLE_NVME_MODEL must live under /models/",
+                      self.messages(plan, "error"))
+        plan = self.container_plan({**self.base_values(),
+                                    "PENNY_PLE_BACKEND": "nvme",
+                                    "PENNY_PLE_NVME_MODEL": "/models/not-prepared"})
+        self.assertIn("does not exist under the models mount",
+                      self.messages(plan, "error"))
+        plan = self.container_plan({**self.base_values(),
+                                    "PENNY_PLE_BACKEND": "nvme"})
+        self.assertIn("PENNY_PLE_BACKEND=nvme needs PENNY_PLE_NVME_MODEL",
+                      self.messages(plan, "error"))
+        prepared = self.host_root / "flash-next-ple"
+        prepared.mkdir(exist_ok=True)
+        plan = self.container_plan({**self.base_values(),
+                                    "PENNY_PLE_BACKEND": "nvme",
+                                    "PENNY_PLE_NVME_MODEL":
+                                        "/models/flash-next-ple"})
+        self.assertEqual(plan.errors, [])
+        self.assertIn("--nvme-ple", plan.argv)
+        run_sh = self.generated(plan)[self.base / "launch out" / "run.sh"]
+        self.assertIn("\nNVME_PLE=on\n", run_sh)
+        self.assertIn("  -e PENNY_PLE_NVME_MODEL=/models/flash-next-ple", run_sh)
+
+    def test_nvme_ple_stays_independent_of_the_disk_tier(self):
+        # Turning the disk tier off must not ask for a NIXL root the PLE reader
+        # never uses, and must not drop the io_uring permission it does need.
+        (self.host_root / "flash-next-ple").mkdir(exist_ok=True)
+        plan = self.container_plan({**self.base_values(), "NIXL": "off",
+                                    "HOST_NIXL_STORAGE_BASE": "",
+                                    "PENNY_PLE_BACKEND": "nvme",
+                                    "PENNY_PLE_NVME_MODEL":
+                                        "/models/flash-next-ple"})
+        self.assertEqual(plan.errors, [])
+        self.assertIn("--no-nixl", plan.argv)
+        self.assertIn("--nvme-ple", plan.argv)
+        files = self.generated(plan)
+        run_sh = files[self.base / "launch out" / "run.sh"]
+        self.assertIn("  -e PENNY_PLE_NVME_MODEL=/models/flash-next-ple", run_sh)
+        self.assertFalse(any(path.name.startswith("nixl-") for path in files))
+
+
+# --- generated launch files are written as one set -------------------------
+
+
+    def test_generated_launch_keeps_every_knob_the_compose_path_forwards(self):
+        # The manual compose file is the existing contract for what a container
+        # may be told. Anything it forwards has to arrive by one of the two
+        # generated routes, or the beta path silently loses a supported setting.
+        compose = (ROOT / pc.COMPOSE_RELPATH).read_text()
+        block = compose.split("environment:", 1)[1].split("volumes:", 1)[0]
+        forwarded = [line.split(":")[0].strip() for line in block.splitlines()
+                     if line.strip() and not line.strip().startswith("#")
+                     and ":" in line]
+        # Settings the startup script states in its own block instead.
+        owned_by_script = {
+            "TARGET_MODEL", "DRAFT_MODEL", "CACHE_BASE", "NIXL_STORAGE_BASE",
+            "PENNY_HICACHE_SIZE_GB", "PENNY_PLE_BACKEND",
+            "SGLANG_MM_PREPROCESS_DEVICE", "TP_SIZE", "MAX_RUNNING_REQUESTS",
+            "MAX_MAMBA_CACHE_SIZE", pc.PROFILE_KEY.upper()}
+        missing = [name for name in forwarded
+                   if name not in owned_by_script
+                   and name not in pc.CONTAINER_PASSTHROUGH_KEYS]
+        self.assertEqual(missing, [], f"dropped knobs: {missing}")
+
+        # And the two that are neither managed keys nor script settings still
+        # reach the container as a saved or inherited value would.
+        plan = self.container_plan({**self.base_values(),
+                                    "PENNY_REASONING_EFFORT": "high",
+                                    "NCCL_P2P_DISABLE": "1"},
+                                   environ={"PENNY_REASONING_EFFORT": "low"})
+        self.assertEqual(plan.env["PENNY_REASONING_EFFORT"], "high")
+        run_sh = self.generated(plan)[self.base / "launch out" / "run.sh"]
+        self.assertIn("  -e PENNY_REASONING_EFFORT=high", run_sh)
+        self.assertIn("  -e NCCL_P2P_DISABLE=1", run_sh)
+        argv = self.run_printed_command(plan)
+        self.assertIn("PENNY_REASONING_EFFORT=high", argv)
+        self.assertIn("NCCL_P2P_DISABLE=1", argv)
+
+    def test_a_saved_key_nothing_reads_is_named_not_promise(self):
+        # plan.env carries unknown keys for the native launcher; in the
+        # container they cannot silently become part of the launch.
+        plan = self.container_plan({**self.base_values(),
+                                    "MY_OWN_KNOB": "yes"})
+        self.assertEqual(plan.errors, [])
+        self.assertIn("MY_OWN_KNOB=yes is saved but no Pennyroyal container "
+                      "launch file reads it", self.messages(plan, "warn"))
+
+    def test_the_nixl_toml_is_only_required_while_the_tier_is_mounted(self):
+        # A checkout without the profile's NIXL TOML still plans an off launch:
+        # nothing in that path reads the file, so it must not be demanded.
+        empty = self.base / "partial-templates"
+        (empty / "docker" / "pennyroyal" / "launch" / "config").mkdir(
+            parents=True)
+        for relative in ("run.sh", "config/start-flash-next.sh"):
+            source = ROOT / pc.LAUNCH_RELPATH / relative
+            target = empty / "docker" / "pennyroyal" / "launch" / relative
+            target.write_text(source.read_text())
+        values = {**self.base_values(), "NIXL": "off",
+                  "HOST_NIXL_STORAGE_BASE": ""}
+        path = self.base / "partial.env"
+        path.write_text(pc.serialize_env([("", sorted(values.items()))],
+                                         header=(f"{pc.PROFILE_KEY}=next-plain",)))
+        config = pc.load_config("container", path, {}, empty)
+        plan = pc.build_plan("container", config, {}, repo_root=empty)
+        self.assertEqual([issue.message for issue in plan.errors], [])
+        self.assertIn("\nNIXL=off\n",
+                      dict(pc.container_launch_files(plan))[
+                          plan.launch_dir / "run.sh"])
+        values["NIXL"] = "on"
+        path.write_text(pc.serialize_env([("", sorted(values.items()))],
+                                         header=(f"{pc.PROFILE_KEY}=next-plain",)))
+        on_plan = pc.build_plan(
+            "container", pc.load_config("container", path, {}, empty), {},
+            repo_root=empty)
+        self.assertIn("launch template is missing", self.messages(on_plan,
+                                                                 "error"))
+
+
+class NativeDiskTierPlanTests(FixtureMixin):
+    """The same on/off choice on the native path: the recipe decides nothing
+    about the disk tier by itself when the saved settings say otherwise."""
+
+    def test_disk_tier_is_on_by_default(self):
+        plan = self.native_plan(self.native_env())
+        self.assertEqual(plan.env["NIXL"], "on")
+        self.assertIn("NIXL disk tier: on", "\n".join(plan.summary))
+        self.assertIn("NIXL disk budget: 0 GiB = no cap", "\n".join(plan.summary))
+
+    def test_off_needs_no_nixl_root_and_keeps_everything_else(self):
+        plan = self.native_plan({**self.native_env(), "NIXL": "off",
+                                 "NIXL_STORAGE_BASE": ""})
+        self.assertEqual(plan.errors, [])
+        self.assertEqual(plan.env["NIXL"], "off")
+        summary = "\n".join(plan.summary)
+        self.assertIn("NIXL disk tier: off", summary)
+        self.assertNotIn("NIXL disk budget", summary)
+        # The RAM tier and the recipe choice are untouched by the switch.
+        self.assertIn("RAM cache (HiCache): 32 GB as --hicache-size", summary)
+        self.assertEqual(Path(plan.argv[0]).name, "serve-flash-next-frspec.sh")
+
+    def test_off_does_not_report_a_missing_nixl_root(self):
+        blocker = self.base / "nixl blocker"
+        blocker.write_text("x")
+        plan = self.native_plan({**self.native_env(), "NIXL": "off",
+                                 "NIXL_STORAGE_BASE": str(blocker)})
+        self.assertEqual(self.messages(plan, "error"), "")
+        plan = self.native_plan({**self.native_env(), "NIXL": "on",
+                                 "NIXL_STORAGE_BASE": str(blocker)})
+        self.assertIn("not-a-directory", self.messages(plan, "error"))
+
+    def test_gpu_index_and_capacity_still_reach_the_recipe(self):
+        plan = self.native_plan({**self.native_env(), "NIXL": "off",
+                                 "TP_SIZE": "2", "GPU": "1"})
+        self.assertEqual(plan.env["TP_SIZE"], "2")
+        self.assertEqual(plan.env["CUDA_VISIBLE_DEVICES"], "1")
 
     # --- WSL2 host-memory workaround (SGLANG_HICACHE_TORCH_PINNED_ALLOC) -----
 
@@ -1395,6 +1864,91 @@ class BuildEnvTests(unittest.TestCase):
                                   "PENNY_BUILD_JOBS": "8"})
         values = dict(line.split("=", 1) for line in run.stdout.splitlines())
         self.assertEqual(values["MAX_JOBS"], "8")
+
+
+class ContainerGenerationConsentTests(FixtureMixin):
+    """Consent covers the related set, so a decline cannot half-apply it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.repo / "docker" / "pennyroyal").mkdir(parents=True, exist_ok=True)
+        (self.repo / "docker" / "pennyroyal" / "launch").symlink_to(
+            ROOT / "docker" / "pennyroyal" / "launch")
+        self.host_root = self.base / "host models"
+        self.host_root.mkdir()
+        (self.host_root / "RadixArk-Qwen3.8-Flash-Next-NVFP4").mkdir()
+        (self.base / "cache").mkdir(exist_ok=True)
+        (self.base / "nixl").mkdir(exist_ok=True)
+        self.launch_dir = self.base / "launch out"
+
+    def plan(self, nixl: str) -> pc.Plan:
+        values = {"HOST_MODELS_ROOT": str(self.host_root),
+                  "HOST_CACHE_BASE": str(self.base / "cache"),
+                  "HOST_NIXL_STORAGE_BASE": str(self.base / "nixl"),
+                  "LAUNCH_DIR": str(self.launch_dir), "NIXL": nixl}
+        path = self.base / f"{nixl}.env"
+        path.write_text(pc.serialize_env([("", sorted(values.items()))],
+                                         header=(f"{pc.PROFILE_KEY}=next",)))
+        return pc.build_plan("container", pc.load_config("container", path, {},
+                                                         self.repo), {},
+                             repo_root=self.repo)
+
+    def tracked(self) -> list[Path]:
+        return [self.launch_dir / "run.sh",
+                self.launch_dir / "config" / "start-flash-next-frspec.sh"]
+
+    def test_declining_leaves_the_whole_set_exactly_as_it_was(self):
+        # The repro: run.sh wants the new disk-tier choice, the startup script
+        # was edited by hand. Consent is for the set, before anything is
+        # written, so a decline cannot pair run.sh's new choice with the old
+        # startup file -- the two would disagree about the mount and the flags.
+        on = self.plan("on")
+        pc.write_container_files(on)
+        before = {path: path.read_text() for path in self.tracked()}
+        assert "NIXL=on" in before[self.launch_dir / "run.sh"]
+        startup = self.launch_dir / "config" / "start-flash-next-frspec.sh"
+        startup.write_text(before[startup] + "\n# my own edit\n")
+        before = {path: path.read_text() for path in self.tracked()}
+        asked: list[str] = []
+        outcomes = dict(pc.write_container_files(
+            self.plan("off"),
+            confirm=lambda text: asked.append(text) or False))
+        # One question naming every file that would be replaced, asked once.
+        self.assertEqual(len(asked), 1, asked)
+        self.assertIn("run.sh", asked[0])
+        self.assertIn("start-flash-next-frspec.sh", asked[0])
+        for path, text in before.items():
+            self.assertEqual(path.read_text(), text, path)
+        self.assertEqual(set(outcomes.values()), {"kept your edited copy"})
+        # Nothing half-applied: the launcher still matches the kept script.
+        self.assertIn("NIXL=on", (self.launch_dir / "run.sh").read_text())
+
+    def test_cancel_at_the_question_writes_nothing(self):
+        on = self.plan("on")
+        pc.write_container_files(on)
+        edited = self.launch_dir / "run.sh"
+        edited.write_text(edited.read_text() + "\n# mine\n")
+        before = {path: path.read_text() for path in self.tracked()}
+
+        def cancel(_text: str) -> bool:
+            # The wizard's Prompt raises this on 'q' or end of input.
+            raise _Cancelled()
+
+        with self.assertRaises(_Cancelled):
+            pc.write_container_files(self.plan("off"), confirm=cancel)
+        for path, text in before.items():
+            self.assertEqual(path.read_text(), text, path)
+
+    def test_confirming_replaces_the_whole_set_together(self):
+        pc.write_container_files(self.plan("on"))
+        startup = self.launch_dir / "config" / "start-flash-next-frspec.sh"
+        startup.write_text(startup.read_text() + "\n# mine\n")
+        outcomes = dict(pc.write_container_files(self.plan("off"),
+                                                confirm=lambda _text: True))
+        self.assertEqual(set(outcomes.values()), {"written"})
+        self.assertIn("NIXL=off", (self.launch_dir / "run.sh").read_text())
+        self.assertIn("NIXL=off", startup.read_text())
+        self.assertNotIn("# mine", startup.read_text())
 
 
 if __name__ == "__main__":
