@@ -52,6 +52,39 @@ class QSATokenToKVPool(HybridLinearKVPool):
         )
         return index_k_bytes // compress_ratio * num_layers
 
+    @staticmethod
+    def pending_ring_num_groups(
+        *, max_num_draft_tokens: Optional[int], compress_ratio: int
+    ) -> int:
+        """Groups the pending ring must hold so one verify window fits.
+
+        A speculative-paged forward publishes EVERY new position into the
+        ring before compressing any group it completes (the paged rows carry
+        no compress_member_rows, so the extend path's consume-before-publish
+        protection does not run), and the first completed group may still
+        read up to ``compress_ratio - 1`` members retained from the private
+        prefix. Those live positions span the retained partial group plus the
+        whole window; at an unaligned start that covers
+        ``(draft_tokens - 1) // ratio + 2`` distinct ring groups (exactly the
+        arithmetic below), one more than a bare window round-up would give.
+        The shipped single-group window (draft_tokens <= ratio, i.e. W4)
+        keeps its existing one-group layout: this task only ADDS fixed W8 and
+        deliberately does not re-size the shipped W4 runtime, so the
+        inherited prefix-tail alias at that width is preserved unchanged and
+        separately recorded for the supervisor's discussion -- it is not
+        claimed correct here, and this change neither fixes nor worsens it.
+        """
+        if compress_ratio < 1:
+            raise ValueError(
+                f"QSA pending ring needs a positive compress ratio, "
+                f"got {compress_ratio}"
+            )
+        if max_num_draft_tokens is None or max_num_draft_tokens <= 0:
+            return 1
+        if max_num_draft_tokens <= compress_ratio:
+            return 1
+        return (max_num_draft_tokens - 1) // compress_ratio + 2
+
     def __init__(
         self,
         *,
@@ -68,6 +101,7 @@ class QSATokenToKVPool(HybridLinearKVPool):
         qsa_compress_ratio: int,
         qsa_token_topk: int,
         num_request_slots: int,
+        qsa_num_groups: int = 1,
         enable_memory_saver: bool = False,
         enable_kv_cache_copy: bool = False,
         start_layer: Optional[int] = None,
@@ -133,17 +167,33 @@ class QSATokenToKVPool(HybridLinearKVPool):
         # per-token cache: once a group's compressed key is written, its raw
         # members are never read again. Radix-shared prefixes are page-aligned,
         # but a request's private chunk tail can end inside a group. The state
-        # that must survive a forward is that pending group's members -- at most
-        # ``ratio`` tokens per request, addressed as
-        # ``req_pool_idx * ratio + position % ratio``. Request slot 0 is
+        # that must survive a forward is the groups a forward may still
+        # touch -- ``ratio * qsa_num_groups`` slots per request, addressed as
+        # ``req_pool_idx * ratio * num_groups + group * ratio + position % ratio``
+        # (see qsa.metadata.pending_ring_slot; the in-graph row-metadata
+        # kernel must derive the same slot). Request slot 0 is
         # never allocated, so ring rows [0, ratio) double as the inert dump
-        # for tokens whose group already compressed in the same forward.
+        # for tokens whose group already compressed in the same forward, and
+        # that region stays free for any group count.
         if num_request_slots <= 0:
             raise ValueError(
                 f"QSA pending ring needs request slots, got {num_request_slots}"
             )
+        if qsa_num_groups < 1:
+            raise ValueError(f"QSA pending ring needs groups, got {qsa_num_groups}")
         self.qsa_num_request_slots = int(num_request_slots)
-        ring_slots = self.qsa_num_request_slots * self.qsa_compress_ratio
+        # A verify window of ``num_draft_tokens`` positions is written whole
+        # before any of it is compressed, and the first completed group may
+        # still read retained prefix members, so the ring must not wrap a
+        # live member onto itself within one forward -- see
+        # pending_ring_num_groups for the exact span and for why the
+        # qualified single-group window (W4, num_groups 1) keeps its layout.
+        # The count is fixed at pool construction because CUDA graphs bind
+        # these buffers for the graph's lifetime.
+        self.qsa_num_groups = int(qsa_num_groups)
+        ring_slots = (
+            self.qsa_num_request_slots * self.qsa_compress_ratio * self.qsa_num_groups
+        )
         self.qsa_key_state_buffer_pool = [
             torch.zeros(
                 (ring_slots, self.qsa_index_kv_heads, self.qsa_index_head_dim),

@@ -3,7 +3,7 @@
   "modules": {
     "sglang.srt.layers.attention.qsa.kernel": "4892126cf6dfbf1a528929764460b09ca18836362b7651b25423b444ebbb6e76",
     "sglang.srt.layers.attention.qsa.sparse_attn": "c7052125569f3c0fa9a0a4d62d2f57433faec636ad82a1d99c3b39e267b7904c",
-    "sglang.srt.layers.attention.qwen_sparse_attn_backend": "2ce24d66d6a0bff0e22ff0819291649a4169937f32c5c28241215c6eb119ad54",
+    "sglang.srt.layers.attention.qwen_sparse_attn_backend": "ecdc4472dc34cc4512d1f626057df6b440f674dbff4949fff6038717e6e41248",
     "sglang.srt.models.qwen4_exp": "35a1785ce4c287821f00f1518b3880ab6838ef58d42fd51ece86d8098b2ed666",
     "sglang.srt.models.qwen3_5": "a0d3cd208f54a089856d850ad22aa81a4c7a056c251a18aa9001f2aeed17cd17",
     "sglang.srt.model_executor.runner.decode_cuda_graph_runner": "ed359b9f3a0ad36bf290c4e71237fa9103e2b6ba82b28f4ef07ad2fe23e61140",
