@@ -24,14 +24,18 @@ from sglang.kernels.ops.gemm.sm120_online_fp8 import (
     replace_linear_weight_rowwise_fp8,
     rowwise_scale_of,
 )
-from sglang.srt.layers.logits_processor import should_apply_lm_head_quant_method
-from sglang.srt.layers.quantization import marlin_utils_fp4
+from sglang.srt.layers.logits_processor import (
+    LogitsProcessor,
+    should_apply_lm_head_quant_method,
+)
+from sglang.srt.layers.quantization import marlin_utils_fp4, modelopt_quant
 from sglang.srt.layers.quantization.modelopt_quant import (
     ModelOptFp4Config,
     ModelOptNvFp4A16LinearMethod,
 )
 from sglang.srt.speculative import proposal_head
 from sglang.srt.speculative.eagle_worker_v2 import EagleDraftWorker
+from sglang.srt.utils.common import use_intel_amx_backend
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=10, suite="base-a-test-cpu")
@@ -233,6 +237,84 @@ def test_the_logits_processor_predicate_is_the_prepared_contract_check(monkeypat
         layer.weight.view(torch.uint8), requires_grad=False
     )
     assert not should_apply_lm_head_quant_method(layer, method)
+
+
+def _kernel_recorder(calls):
+    """Stand in for the CUDA-only Marlin GEMM custom op (same fake shape rule
+    as ``fake_apply_fp4_marlin_linear``), recording what was forwarded."""
+
+    def kernel(*args, **kwargs):
+        calls.append(kwargs)
+        hidden = kwargs["input"]
+        return hidden.new_zeros(tuple(hidden.shape[:-1]) + (kwargs["size_n"],))
+
+    return kernel
+
+
+def test_compute_lm_head_dispatches_the_prepared_head_through_the_marlin_kernel(
+    monkeypatch,
+):
+    """The real ``LogitsProcessor._compute_lm_head`` decides, not just the predicate.
+
+    Only the Marlin GEMM custom op is faked: the test asserts that the dispatch
+    picks the installed ``quant_method``, forwards this batch's hidden states and
+    the layer's own packed scales/geometry unchanged, and therefore keeps the hot
+    vocab width instead of the 248,320-row target width or a BF16 matmul.
+    """
+    monkeypatch.setenv(ENV, "nvfp4")
+    records = []
+    monkeypatch.setattr(proposal_head, "_nvfp4_quantize", _fake_quantizer(records))
+    layer = _draft_head_layer(_bf16_head())
+    with _fake_cuda_kernels():
+        proposal_head.prepare_nvfp4_proposal_head(layer)
+
+    calls = []
+    monkeypatch.setattr(
+        modelopt_quant, "apply_fp4_marlin_linear", _kernel_recorder(calls)
+    )
+    hidden = _bf16_head(rows=3, columns=COLUMNS, seed=11)
+    processor = SimpleNamespace(use_fp32_lm_head=False, rl_on_policy_target=None)
+
+    logits = LogitsProcessor._compute_lm_head(processor, hidden, layer)
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["input"] is hidden
+    assert call["weight"] is layer.weight
+    assert call["weight_scale"] is layer.weight_scale
+    assert call["weight_global_scale"] is layer.weight_global_scale
+    assert call["workspace"] is layer.workspace
+    assert (call["size_n"], call["size_k"]) == (ROWS, COLUMNS)
+    assert call["bias"] is None
+    # Hot width survives the dispatch: [rows, num_hot], not [rows, target vocab].
+    assert logits.shape == (3, ROWS)
+
+
+def test_compute_lm_head_keeps_the_existing_computation_for_an_unprepared_head(
+    monkeypatch,
+):
+    """A stale FP4 method over un-packed weights must not hijack the projection.
+
+    This is the fallback the FR-Spec share is designed around: the head keeps the
+    ordinary BF16 matmul (which is also what the default/off mode runs), so a
+    half-prepared head projects correct values rather than an int32 blob.
+    """
+    layer = _draft_head_layer(_bf16_head())
+    layer.quant_method = ModelOptNvFp4A16LinearMethod(
+        ModelOptFp4Config(is_checkpoint_nvfp4_serialized=False, group_size=16)
+    )
+    calls = []
+    monkeypatch.setattr(
+        modelopt_quant, "apply_fp4_marlin_linear", _kernel_recorder(calls)
+    )
+    hidden = _bf16_head(rows=3, columns=COLUMNS, seed=12)
+    processor = SimpleNamespace(use_fp32_lm_head=False, rl_on_policy_target=None)
+
+    logits = LogitsProcessor._compute_lm_head(processor, hidden, layer)
+
+    assert not calls
+    assert not use_intel_amx_backend(layer), "AMX would own this branch here"
+    torch.testing.assert_close(logits, hidden @ layer.weight.T)
 
 
 def test_a_rowwise_fp8_head_is_requantized_from_its_own_rows(monkeypatch):

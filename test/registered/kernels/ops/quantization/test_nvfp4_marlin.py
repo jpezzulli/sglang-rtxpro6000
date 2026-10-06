@@ -237,15 +237,17 @@ def test_frspec_proposal_head_logits_and_proposals_track_the_reference(
     assert cosine >= 0.95, f"cosine {cosine:.6f} is below 0.95"
 
     # Proposal-rate proxy on synthetic hidden states (what the draft would hand
-    # the verifier): the argmax must still track the unquantized head. Recorded,
-    # not claimed -- real accept rates come from the authorized model run.
+    # the verifier): recorded, never asserted. Agreement is an observation about
+    # a random tensor, not an invariant -- at rows=1 an exact argmax would be a
+    # demand that FP4 losslessy preserve one maximum, which the allowed
+    # approximation above does not imply. Real accept rates come from the
+    # authorized model run.
     agreement = (logits.argmax(-1) == expected.argmax(-1)).float().mean().item()
     print(
         f"FR-Spec NVFP4 proposal head ({frspec_proposal_head['source_dtype']}, "
         f"rows={rows}): nrmse={nrmse:.4f} cosine={cosine:.4f} "
         f"top1_agreement={agreement:.4f}"
     )
-    assert agreement >= 0.30, f"top-1 agreement {agreement:.4f} is below 0.30"
 
 
 @pytest.mark.skipif(

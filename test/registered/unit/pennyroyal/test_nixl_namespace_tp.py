@@ -40,7 +40,12 @@ from sglang.test.test_utils import CustomTestCase
 
 register_cpu_ci(est_time=5, suite="base-a-test-cpu")
 
-SCRIPT = Path(__file__).resolve().parents[4] / "scripts" / "pennyroyal" / "derive_namespace.py"
+SCRIPT = (
+    Path(__file__).resolve().parents[4]
+    / "scripts"
+    / "pennyroyal"
+    / "derive_namespace.py"
+)
 SPEC = importlib.util.spec_from_file_location("derive_namespace", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -356,7 +361,9 @@ class TestFreshNamespaceFullFilesystem(CustomTestCase):
                 return self._vfs(1000, 0)
 
             stderr = io.StringIO()
-            with mock.patch.object(os, "statvfs", side_effect=fake_statvfs), contextlib.redirect_stderr(stderr):
+            with mock.patch.object(
+                os, "statvfs", side_effect=fake_statvfs
+            ), contextlib.redirect_stderr(stderr):
                 MODULE.ensure_manifest(root, self.IDENTITY, "0" * 64)
             self.assertEqual(probed, [td], "nearest existing parent is probed")
             self.assertIn(str(root), stderr.getvalue())
@@ -368,7 +375,9 @@ class TestFreshNamespaceFullFilesystem(CustomTestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "fresh_namespace"
             stderr = io.StringIO()
-            with mock.patch.object(os, "statvfs", return_value=self._vfs(1000, 500)), contextlib.redirect_stderr(stderr):
+            with mock.patch.object(
+                os, "statvfs", return_value=self._vfs(1000, 500)
+            ), contextlib.redirect_stderr(stderr):
                 MODULE.ensure_manifest(root, self.IDENTITY, "0" * 64)
             self.assertEqual(stderr.getvalue(), "")
             self.assertTrue((root / MODULE.MANIFEST_NAME).is_file())
@@ -384,9 +393,17 @@ class TestFreshNamespaceFullFilesystem(CustomTestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "fresh_namespace"
             stderr = io.StringIO()
-            with mock.patch.object(os, "statvfs", return_value=self._vfs(1000, 0)), mock.patch.object(
-                Path, "mkdir", side_effect=OSError(errno.ENOSPC, "No space left on device")
-            ), contextlib.redirect_stderr(stderr), self.assertRaises(OSError) as raised:
+            with mock.patch.object(
+                os, "statvfs", return_value=self._vfs(1000, 0)
+            ), mock.patch.object(
+                Path,
+                "mkdir",
+                side_effect=OSError(errno.ENOSPC, "No space left on device"),
+            ), contextlib.redirect_stderr(
+                stderr
+            ), self.assertRaises(
+                OSError
+            ) as raised:
                 MODULE.ensure_manifest(root, self.IDENTITY, "0" * 64)
             self.assertEqual(raised.exception.errno, errno.ENOSPC)
             self.assertIn("is full", stderr.getvalue(), "warned before the failure")
