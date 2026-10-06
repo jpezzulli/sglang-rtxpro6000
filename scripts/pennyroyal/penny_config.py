@@ -510,17 +510,43 @@ def discover_config_path(mode: str, environ: dict[str, str], repo_root: Path,
     return default_config_path(mode, repo_root), "default location"
 
 
-def load_config(mode: str, path: Optional[Path], environ: dict[str, str],
-                repo_root: Path) -> Config:
-    """Read one saved file; a missing file falls back to defaults, no error."""
+def config_from_text(mode: str, text: str, path: Optional[Path] = None,
+                     source: str = "saved file") -> Config:
+    """Validate one KEY=value body into a Config, the way a saved file is read.
+
+    load_config defers here for the bytes on disk. The beta configurator calls
+    this with the exact text it is about to write, so the settings it validates,
+    the launch files it generates from them and the file a later launch reloads
+    are one resolution of the same text: a knob the body omits is omitted in the
+    generated launch too, never rendered from a half-answered wizard value.
+    """
     specs = specs_for(mode)
     values: dict[str, str] = {}
     unknown: dict[str, str] = {}
-    profile = ""
-    file_profile = ""
-    source = "built-in defaults"
+    saved = parse_env_text(text, source)
+    profile = saved.pop(PROFILE_KEY, "")
+    file_profile = profile
+    for name, value in saved.items():
+        spec = specs.get(name)
+        if spec is None:
+            unknown[name] = value
+            continue
+        values[name] = validate_value(spec, value, source)
+    return Config(mode=mode,
+                  profile=validate_profile(profile or default_profile(mode),
+                                           mode),
+                  values=values, unknown=unknown, path=path, source=source,
+                  file_profile=file_profile,
+                  profile_origin="saved file" if file_profile else "")
+
+
+def load_config(mode: str, path: Optional[Path], environ: dict[str, str],
+                repo_root: Path) -> Config:
+    """Read one saved file; a missing file falls back to defaults, no error."""
     used: Optional[Path] = None
-    if path is not None:
+    if path is None:
+        config = config_from_text(mode, "", None, "built-in defaults")
+    else:
         # Resolve once, at load: relative --config and PENNYROYAL_CONFIG values
         # stay meaningful from any directory, and the paths we print and hand to
         # the launch are the file that was actually read.
@@ -528,30 +554,17 @@ def load_config(mode: str, path: Optional[Path], environ: dict[str, str],
         if used.exists() and not used.is_file():
             raise ConfigError(f"config path is not a file: {used}")
         if used.is_file():
-            saved = read_env_file(used)
-            source = str(used)
-            profile = saved.pop(PROFILE_KEY, "")
-            file_profile = profile
-            for name, value in saved.items():
-                spec = specs.get(name)
-                if spec is None:
-                    unknown[name] = value
-                    continue
-                values[name] = validate_value(spec, value, source)
+            config = config_from_text(mode, used.read_text(), used, str(used))
         else:
-            source = f"built-in defaults ({used} does not exist yet)"
-    profile_origin = "saved file" if file_profile else ""
-    if not profile:
+            config = config_from_text(
+                mode, "", used,
+                f"built-in defaults ({used} does not exist yet)")
+    if not config.file_profile:
         ambient = environ.get(PROFILE_KEY, "").strip()
         if ambient:
-            profile = ambient
-            profile_origin = f"{PROFILE_KEY} environment"
-            source = f"{source} + {PROFILE_KEY} environment"
-    config = Config(mode=mode,
-                    profile=validate_profile(profile or default_profile(mode),
-                                             mode),
-                    values=values, unknown=unknown, path=used, source=source,
-                    file_profile=file_profile, profile_origin=profile_origin)
+            config.profile = validate_profile(ambient, mode)
+            config.profile_origin = f"{PROFILE_KEY} environment"
+            config.source = f"{config.source} + {PROFILE_KEY} environment"
     return config
 
 
@@ -1092,6 +1105,16 @@ def _plan_container(config: Config, environ: dict[str, str],
                  "PENNY_HICACHE_SIZE_GB", "SGLANG_HICACHE_TORCH_PINNED_ALLOC",
                  "USER_ID", "GROUP_ID", "TP_SIZE"):
         _adopt(plan, config, environ, name)
+    # Settings the generated launch forwards but no KeySpec owns: the saved
+    # file wins over the caller's shell, exactly like every other setting, and
+    # an inherited value still reaches the running container, as Compose's
+    # ${VAR:-} forwarding would.
+    for name in CONTAINER_PASSTHROUGH_KEYS:
+        if name in config.unknown:
+            plan.env[name] = config.unknown[name]
+            plan.origins[name] = "saved file"
+        else:
+            _adopt(plan, config, environ, name)
     # The saved names are the variables the generated run.sh writes, so no
     # translation happens here and the file stays the single source of truth.
     gpu = _adopt(plan, config, environ, "NVIDIA_GPU") or "0"

@@ -340,7 +340,8 @@ def _prompt_gpu(prompt: Prompt, answers: dict[str, str], name: str, spec,
     # shared validator decides whether the saved value may act as the menu's
     # Enter default or be assigned from it at all. An invalid one is named and
     # dropped — Enter then keeps the documented default instead of crashing the
-    # later _candidate_config validation with an uncaught ConfigError. A valid
+    # later proposal validation (pc.config_from_text) with an uncaught
+    # ConfigError. A valid
     # off-list value (e.g. a UUID of an unlisted device) is still preserved.
     if default:
         try:
@@ -553,9 +554,45 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
     # Validate the proposal in memory before touching anything: an invalid path
     # must not overwrite a good file or claim success. The user may correct the
     # named key, cancel, or explicitly save a not-ready-but-valid state.
+    def entries(names: list[str]) -> list[tuple[str, str]]:
+        # A blank saved on purpose (a deliberate suppression) must survive the
+        # rerun as an explicit blank line; new optional blanks that were never
+        # in the file stay omitted, so absence keeps meaning 'inherited'.
+        return [(name, answers[name]) for name in names
+                if name in answers
+                and (answers[name] != "" or name in saved)]
+
+    def proposed_text() -> str:
+        """The file body this save would write, as one canonical value.
+
+        The proposal below is parsed back out of these bytes instead of the raw
+        answer dict, so a knob left on Enter is simply absent from both the
+        generated launch and the saved file: what the wizard validated, what it
+        generated and what run-penny later reloads cannot drift apart.
+        """
+        sections = [("basic", entries([name for name in ordered_names(mode)
+                                      if not specs[name].advanced])),
+                    ("advanced (optional)",
+                     entries(ordered_names(mode, advanced=True)))]
+        if preserved:
+            sections.append(("kept from the previous file",
+                             sorted(preserved.items())))
+        header = (
+            "# Pennyroyal saved configuration "
+            f"({mode}); written by ./configure-penny.",
+            "# Plain KEY=value lines. This file is never shell-sourced or eval'd.",
+            "# Saved values win over the inherited environment; unset keys keep the",
+            "# recipe defaults documented in the Pennyroyal guides.",
+            f"{pc.PROFILE_KEY}={pc.quote_value(profile)}",
+        )
+        return pc.serialize_env(sections, header=header)
+
     attempt = 0
+    body = ""
     while True:
-        config = _candidate_config(mode, profile, answers, preserved, config_path)
+        body = proposed_text()
+        config = pc.config_from_text(mode, body, config_path,
+                                     "proposed answers (not saved yet)")
         plan = pc.build_plan(mode, config, environ, repo_root=repo_root)
         if not plan.errors:
             break
@@ -625,29 +662,8 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
         prompt.say("Cancelled; nothing was written.")
         return 3
 
-    def entries(names: list[str]) -> list[tuple[str, str]]:
-        # A blank saved on purpose (a deliberate suppression) must survive the
-        # rerun as an explicit blank line; new optional blanks that were never
-        # in the file stay omitted, so absence keeps meaning 'inherited'.
-        return [(name, answers[name]) for name in names
-                if name in answers
-                and (answers[name] != "" or name in saved)]
-
-    sections = [("basic", entries([name for name in ordered_names(mode)
-                                   if not specs[name].advanced])),
-                ("advanced (optional)",
-                 entries(ordered_names(mode, advanced=True)))]
-    if preserved:
-        sections.append(("kept from the previous file", sorted(preserved.items())))
-    header = (
-        "# Pennyroyal saved configuration "
-        f"({mode}); written by ./configure-penny.",
-        "# Plain KEY=value lines. This file is never shell-sourced or eval'd.",
-        "# Saved values win over the inherited environment; unset keys keep the",
-        "# recipe defaults documented in the Pennyroyal guides.",
-        f"{pc.PROFILE_KEY}={pc.quote_value(profile)}",
-    )
-    pc.write_env_file(config_path, pc.serialize_env(sections, header=header))
+    # Exactly the bytes the proposal above was validated and generated from.
+    pc.write_env_file(config_path, body)
     prompt.say(f"Saved {config_path}")
     # Rebuild from the file that was just written: the plan printed below is then
     # the plan run-penny (or the generated run.sh) will build from it, and its
@@ -683,27 +699,6 @@ def _generated_container_files(mode: str, plan: pc.Plan) -> list[tuple[Path, str
     if mode != "container":
         return []
     return pc.container_launch_files(plan)
-
-
-def _candidate_config(mode: str, profile: str, answers: dict[str, str],
-                      preserved: dict[str, str],
-                      config_path: Path) -> pc.Config:
-    """A Config for the in-memory proposal, using the same shared validator."""
-    specs = pc.specs_for(mode)
-    values: dict[str, str] = {}
-    unknown: dict[str, str] = {}
-    merged = {**preserved, **answers}
-    for name, value in merged.items():
-        spec = specs.get(name)
-        if spec is None:
-            unknown[name] = value
-            continue
-        values[name] = pc.validate_value(spec, value, "proposed answers")
-    config = pc.Config(mode=mode, profile=pc.validate_profile(profile, mode),
-                       values=values, unknown=unknown, path=config_path,
-                       source="proposed answers (not saved yet)",
-                       file_profile=profile, profile_origin="setup answers")
-    return config
 
 
 def main(argv: Optional[list[str]] = None) -> int:

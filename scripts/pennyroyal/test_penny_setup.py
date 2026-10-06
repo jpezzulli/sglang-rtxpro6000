@@ -896,7 +896,8 @@ class SetupSessionTests(FixtureMixin):
     def run_container_setup(self, answers: dict[str, str] | None = None,
                             drop: tuple[str, ...] = (), existing: bool = False,
                             save: str = "",
-                            before_save: tuple[str, ...] = ()
+                            before_save: tuple[str, ...] = (),
+                            environ: dict[str, str] | None = None
                             ) -> tuple[int, str, Path, dict]:
         """Drive the container wizard with the listed answers, keeping defaults.
 
@@ -930,8 +931,9 @@ class SetupSessionTests(FixtureMixin):
         out = io.StringIO()
         prompt = ps.Prompt(stdin=io.StringIO("".join(line + "\n" for line
                                                      in lines)), stdout=out)
-        code = ps.run_session("container", self.config_path, {}, prompt,
-                             self.repo, home=self.base / "isolated-home")
+        code = ps.run_session("container", self.config_path,
+                             dict(environ or {}), prompt, self.repo,
+                             home=self.base / "isolated-home")
         launch_dir = self.base / "isolated-home" / "pennyroyal-container"
         files = ({path.name: path for path in (launch_dir / "config").iterdir()}
                  if (launch_dir / "config").is_dir() else {})
@@ -946,9 +948,6 @@ class SetupSessionTests(FixtureMixin):
         self.assertIn("clear mixup", output)
         self.assertFalse(path.exists())
 
-
-
-
     def test_27b_never_offers_a_knob_its_recipe_pins(self):
         # The wizard asks about what the selected profile can actually honour:
         # 27b fixes capacity, TP and PLE placement in its own recipe, so those
@@ -959,7 +958,6 @@ class SetupSessionTests(FixtureMixin):
             + ["y",                                  # yes to the advanced section
                str(self.base / "ple-unused"),        # prepared snapshot path
                "false",                              # online FP8
-               "",                                   # WSL2 pinned host memory
                "true",                               # unknown tools
                "",                                   # build jobs
                "/opt/nixl",                          # NIXL prefix
@@ -999,6 +997,62 @@ class SetupSessionTests(FixtureMixin):
         self.assertIn("is not a setting of the 27b profile", output)
         self.assertIn("[1] re-enter MAX_RUNNING_REQUESTS", output)
         self.assertEqual(path.read_text(), existing)
+
+    def test_inherited_passthrough_settings_reach_the_generated_files(self):
+        # The review's first defect: the operator never answered these two, the
+        # caller's shell carries them (what Compose would forward with ${VAR:-}),
+        # and the generated launch has to agree with the saved settings.
+        inherited = {"PENNY_REASONING_EFFORT": "high", "NCCL_P2P_DISABLE": "1"}
+        code, output, launch_dir, files = self.run_container_setup(
+            environ=inherited)
+        self.assertEqual(code, 0, output)
+        run_sh = (launch_dir / "run.sh").read_text()
+        reloaded = pc.build_plan(
+            "container", pc.load_config("container", self.config_path,
+                                        inherited, self.repo), inherited,
+            repo_root=self.repo)
+        # run.sh owns the -e forwarding, so the values the caller's shell
+        # carried have to be baked into the generated file; the launch suite
+        # proves a -e line there reaches the captured container command.
+        for name, value in sorted(inherited.items()):
+            self.assertEqual(reloaded.env[name], value, name)
+            self.assertIn(f"  -e {name}={value}\n", run_sh, name)
+        self.assertIn("  -e PENNY_REASONING_EFFORT=high\n", run_sh)
+        self.assertIn("  -e NCCL_P2P_DISABLE=1\n", run_sh)
+
+    def test_a_blank_optional_answer_agrees_after_reload(self):
+        # The review's second defect: the operator leaves an optional knob on
+        # Enter while the caller's shell carries a value. A fresh blank used to
+        # render the shipped literal into the generated startup while the saved
+        # file omitted the key, so the launch a later reload resolved was a
+        # different launch. Saving and generating must resolve once, together.
+        inherited = {"PENNY_HICACHE_SIZE_GB": "64", "MAX_RUNNING_REQUESTS": "7"}
+        code, output, launch_dir, files = self.run_container_setup(
+            environ=inherited)
+        self.assertEqual(code, 0, output)
+        saved = pc.read_env_file(self.config_path)
+        for name in sorted(inherited):
+            self.assertNotIn(name, saved, name)   # left on Enter: never written
+        reloaded = pc.build_plan(
+            "container", pc.load_config("container", self.config_path,
+                                        inherited, self.repo), inherited,
+            repo_root=self.repo)
+        # Row 1 of the profile menu is the qualified FR-Spec default.
+        startup = files["start-flash-next-frspec.sh"].read_text()
+        settings = dict(line.split("=", 1) for line in startup.splitlines()
+                        if line[:1].isupper() and "=" in line)
+        # One effective value per knob: the same number in the file that decides
+        # the container's launch and in the settings a later run reloads. The
+        # shipped literals are 32 and 4, so a stale render fails this.
+        for name, literal, wanted in (("PENNY_HICACHE_SIZE_GB",
+                                       "HICACHE_SIZE_GB", "64"),
+                                      ("MAX_RUNNING_REQUESTS",
+                                       "MAX_RUNNING_REQUESTS", "7")):
+            self.assertEqual(reloaded.env[name], wanted, name)
+            self.assertEqual(settings.get(literal), wanted,
+                             f"{literal} in the generated startup")
+        self.assertIn('--max-running-requests "$MAX_RUNNING_REQUESTS"', startup)
+        self.assertIn('--hicache-size "$HICACHE_SIZE_GB"', startup)
 
     def test_broken_template_writes_neither_settings_nor_files(self):
         # A checkout whose shipped examples are incomplete cannot be half-saved:
