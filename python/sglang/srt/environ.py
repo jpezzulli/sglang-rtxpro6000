@@ -314,6 +314,11 @@ class Envs:
     # index_select-ing K and V separately.  The packed K/V keep the pool dtype,
     # so FP8 staging stays the same size; unsupported shapes fall back.
     SGLANG_OPT_FUSED_QSA_PREFILL_KV = EnvBool(False)
+    # Build the QSA CUDA-graph row metadata page table with one program per
+    # page block (layers/attention/qsa/graph_metadata.py) instead of a single
+    # warp walking all max_pages entries.  Same values at the same addresses;
+    # off until measured at the served graph shapes.
+    SGLANG_QSA_META_PAGE_PARALLEL = EnvBool(False)
     SGLANG_PREFETCH_BLOCK_SIZE_MB = EnvInt(16)
     SGLANG_GEMMA_OUT_OF_PLACE_POSITION_MUTATION = EnvBool(False)
     SGLANG_ENABLE_WEIGHT_LOADER_V2 = EnvBool(False)
