@@ -143,9 +143,7 @@ class TestBuildPendingRingSlots(unittest.TestCase):
             compress_ratio=RATIO,
             is_extend=False,
         )
-        want = _legacy_slots(
-            torch.tensor([1, 1, 1, 1]), torch.tensor(positions), RATIO
-        )
+        want = _legacy_slots(torch.tensor([1, 1, 1, 1]), torch.tensor(positions), RATIO)
         self.assertTrue(torch.equal(got, want))
 
     def test_extend_dump_stays_in_the_inert_region(self):
@@ -361,9 +359,7 @@ class TestPublishedWindowRingLifetime(unittest.TestCase):
         width = 128
         cols = torch.arange(width)
         table = (
-            ((self.REQ + cols // 64) * 64 + cols % 64)
-            .to(torch.int32)
-            .repeat(rows, 1)
+            ((self.REQ + cols // 64) * 64 + cols % 64).to(torch.int32).repeat(rows, 1)
         )
         backend = QwenSparseAttnBackend.__new__(QwenSparseAttnBackend)
         backend.token_to_kv_pool = SimpleNamespace(qsa_compress_ratio=self.R)
@@ -460,9 +456,7 @@ class TestPublishedWindowRingLifetime(unittest.TestCase):
         )
         first_group_loc = int(meta.write_locs[0])
         compressed = pool.get_qsa_compressed_k_buffer(0)[first_group_loc]
-        return float(state[p0_slot].float().mean()), float(
-            compressed.float().mean()
-        )
+        return float(state[p0_slot].float().mean()), float(compressed.float().mean())
 
     def test_derived_capacity_preserves_the_retained_prefix(self):
         num_groups = QSATokenToKVPool.pending_ring_num_groups(
@@ -525,7 +519,9 @@ class TestRequireChainSpeculation(unittest.TestCase):
         backend.compress_ratio = RATIO
         backend.token_to_kv_pool = SimpleNamespace(qsa_num_groups=num_groups)
         spec_info = SimpleNamespace(topk=1, draft_token_num=draft_tokens)
-        backend._require_chain_speculation(TestRequireChainSpeculation._Mode(), spec_info)
+        backend._require_chain_speculation(
+            TestRequireChainSpeculation._Mode(), spec_info
+        )
 
     def test_w4_default_accepted_at_one_group(self):
         self._check(4, 1)
