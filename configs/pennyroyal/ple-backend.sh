@@ -36,6 +36,15 @@ esac
 case "$PENNY_PLE_BACKEND" in
   ram) ;;
   nvme)
+    # The guarded NVMe reader is qualified at the fixed W4 window only; on
+    # wider windows its prepare_ssd_stream_graph_replay -> wait_for_launch
+    # staging crashed on the first community report (see NVME-PLE.md). Fail
+    # loudly instead of letting the adapter fall back or the ring silently
+    # carry unqualified rows. RAM PLE is the initial W8 path.
+    if [[ "${SPEC_WIDTH:-4}" != 4 ]]; then
+      echo "NVMe PLE supports only the qualified W4 window; run W8 with PENNY_PLE_BACKEND=ram (PENNY_SPEC_WIDTH=$SPEC_WIDTH)" >&2
+      exit 1
+    fi
     : "${PENNY_PLE_NVME_MODEL:?Set PENNY_PLE_NVME_MODEL to the prepared NVMe snapshot}"
     PENNY_PLE_PLUGIN_DIR="${PENNY_PLE_PLUGIN_DIR:-$REPO_ROOT/.ple-nvme}"
     [[ -f "$PENNY_PLE_PLUGIN_DIR/sglang_ssd_stream/plugin.py" ]] || {

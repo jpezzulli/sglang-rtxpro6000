@@ -572,6 +572,10 @@ class RecipeHiCacheSizeTests(unittest.TestCase):
         "DRAFT_TOKENS": "8",
         "DRAFT_WINDOW_SIZE": "2048",
         "PLE_NAMESPACE_ARGS": "",
+        # The optional fixed-width knob defaults to the qualified W4 pair,
+        # exactly the literals the recipes' argv blocks must expand to.
+        "SPEC_WIDTH": "4",
+        "SPEC_STEPS": "3",
     }
 
     def launch_argv(self, recipe: str, chosen: str | None) -> tuple[list[str], str]:

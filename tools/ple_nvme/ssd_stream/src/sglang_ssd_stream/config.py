@@ -173,6 +173,57 @@ def configure_cli(*args, **kwargs):
     if commit is not None:
         namespace.revision = commit
     namespace.ple_offload_embedding = False
+    # The NVMe PLE reader is qualified only at the fixed W4 NEXTN window
+    # (speculative_num_steps 3, speculative_num_draft_tokens 4): graph.py
+    # sizes each replay's staged PLE rows to bs * captured_req_width off the
+    # decode runner, and the community report against this adapter shows the
+    # wider adaptive graphs crashing in prepare_ssd_stream_graph_replay ->
+    # ticket.wait_for_launch before the row budget is reached. Rather than
+    # silently fall back to RAM or trust an unqualified wider window, fail
+    # loudly on any wider fixed window here. RAM PLE is the initial W8 path;
+    # genuine W8+NVMe needs a re-qualified adapter/graph interaction.
+    if namespace.speculative_algorithm is not None:
+        # Adaptive spec decoding is not supported or in scope for this
+        # adapter: speculative_hook resolves NEXTN to EAGLE and initializes
+        # the adaptive params, whose default batch-1 candidate_steps [1,3,7]
+        # (adaptive_spec_params.DEFAULT_ADAPTIVE_CONFIG) reach the wider
+        # widths the now-multi-group QSA ring can serve -- exactly the
+        # unqualified NVMe regime the community crash names. Refuse it
+        # explicitly instead of parsing custom step policies here.
+        if getattr(namespace, "speculative_adaptive", False):
+            raise ValueError(
+                "SSD Stream NVMe PLE does not support adaptive speculative "
+                "decoding; the candidate-step policy can widen the verify "
+                "window beyond the qualified fixed W4. Run NVMe with "
+                "--speculative-adaptive off at the fixed W4 window, or use "
+                "RAM PLE for the wider fixed windows."
+            )
+        # This is a BEFORE hook on ServerArgs.from_cli_args, so the raw
+        # --speculative-num-draft-tokens is not yet the effective width:
+        # arg_groups/speculative_hook.py later normalizes it to
+        # speculative_num_steps + 1 whenever eagle_topk <= 1 (and auto-fills
+        # it), so steps=7 with the width omitted or mismatched at 4 still
+        # runs an 8-wide window. Refuse every reading of the arguments that
+        # could resolve wider than the qualified W4 window; an all-unset
+        # width keeps the historical accept (auto params were never
+        # re-checked by this guard and the recipes pin explicit values).
+        raw_tokens = getattr(namespace, "speculative_num_draft_tokens", None)
+        raw_steps = getattr(namespace, "speculative_num_steps", None)
+        raw_topk = getattr(namespace, "speculative_eagle_topk", None)
+        effective_width = 0
+        if raw_tokens is not None:
+            effective_width = max(effective_width, int(raw_tokens))
+        if raw_steps is not None and (raw_topk is None or int(raw_topk) <= 1):
+            effective_width = max(effective_width, int(raw_steps) + 1)
+        if effective_width > 4:
+            raise ValueError(
+                "SSD Stream NVMe PLE is qualified only at the fixed W4 NEXTN "
+                f"window (effective draft-token width <= 4); got "
+                f"{effective_width} from speculative_num_draft_tokens="
+                f"{raw_tokens}, speculative_num_steps={raw_steps}, "
+                f"speculative_eagle_topk={raw_topk}. Use RAM PLE for W8, or "
+                "re-qualify the NVMe adapter's graph replay for the wider window."
+            )
     if namespace.cpu_offload_gb > 0:
         raise ValueError(
             "per-parameter CPU offload is not safe for this model; use grouped offload"

@@ -42,6 +42,21 @@ if [[ ! "$HICACHE_SIZE_GB" =~ ^[1-9][0-9]*$ ]]; then
   echo "PENNY_HICACHE_SIZE_GB must be a positive integer number of GB, got '$HICACHE_SIZE_GB'" >&2
   exit 1
 fi
+# Optional fixed native NEXTN verify window. Unset keeps the qualified W4
+# default; the only published choices are 4 and 8. This is the recipe face
+# of the existing width controls (speculative_num_steps = width - 1,
+# speculative_eagle_topk = 1, speculative_num_draft_tokens = width): the
+# QSA pending index-K ring takes its group count from the same resolved
+# draft-token bound and the CUDA-graph static widths follow the server's
+# derivation, so there is no second width knob. W8 is not GPU-accepted
+# yet: RAM PLE only (ple-backend.sh refuses nvme+W8), and it stays out of
+# the configurator until acceptance.
+SPEC_WIDTH="${PENNY_SPEC_WIDTH:-4}"
+case "$SPEC_WIDTH" in
+  4|8) ;;
+  *) echo "PENNY_SPEC_WIDTH must be 4 or 8; got '$SPEC_WIDTH'" >&2; exit 1 ;;
+esac
+SPEC_STEPS=$((SPEC_WIDTH - 1))
 source "$SCRIPT_DIR/chat-template.sh"
 source "$SCRIPT_DIR/request-capacity.sh"
 source "$SCRIPT_DIR/reasoning-effort.sh"
@@ -192,9 +207,9 @@ else
       --field "compute_dtype=$COMPUTE_DTYPE" \
       --field "target_kv_dtype=$KV_DTYPE" \
       --field "speculative_algorithm=NEXTN" \
-      --field "speculative_num_steps=3" \
+      --field "speculative_num_steps=$SPEC_STEPS" \
       --field "speculative_eagle_topk=1" \
-      --field "speculative_num_draft_tokens=4" \
+      --field "speculative_num_draft_tokens=$SPEC_WIDTH" \
       --field "speculative_draft_quantization=unquant" \
       "${PROPOSAL_HEAD_NAMESPACE_ARGS[@]}" \
       --field "gdn_mtp_cache_mode=none" \
@@ -248,8 +263,8 @@ launch_args=(serve \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \
   --default-chat-template-kwargs "$DEFAULT_CHAT_TEMPLATE_KWARGS" \
-  --speculative-algorithm NEXTN --speculative-num-steps 3 \
-  --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 \
+  --speculative-algorithm NEXTN --speculative-num-steps "$SPEC_STEPS" \
+  --speculative-eagle-topk 1 --speculative-num-draft-tokens "$SPEC_WIDTH" \
   --speculative-draft-model-quantization unquant \
   --speculative-token-map "$TOKEN_MAP" --watchdog-timeout 1800)
 source "$SCRIPT_DIR/startup-summary.sh"

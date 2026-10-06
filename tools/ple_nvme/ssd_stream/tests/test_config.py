@@ -151,6 +151,108 @@ def test_cpu_offload_requires_graphs_and_mtp_disabled(monkeypatch, tmp_path):
         config.configure_cli(namespace)
 
 
+def test_nvme_rejects_wider_fixed_window_without_touching_w4(monkeypatch, tmp_path):
+    """W8+NVMe is an explicit unsupported combination, not a silent fallback.
+
+    The adapter is qualified at the fixed W4 window; a wider draft-token
+    count must raise with the actionable RAM-PLE message while the same
+    launch at W4 keeps working unchanged.
+    """
+    monkeypatch.delenv("SGLANG_SSD_STREAM_CONFIG", raising=False)
+    _, manifest, _ = _artifact(tmp_path)
+    monkeypatch.setattr(
+        config,
+        "_resolve_artifact",
+        lambda model_path, revision: (manifest, "a" * 40),
+    )
+    namespace = Namespace(
+        model_path="prepared",
+        revision=None,
+        ple_offload_embedding=False,
+        cpu_offload_gb=0,
+        offload_group_size=-1,
+        disable_cuda_graph=False,
+        disable_decode_cuda_graph=False,
+        disable_prefill_cuda_graph=False,
+        cuda_graph_backend_decode=None,
+        cuda_graph_backend_prefill=None,
+        speculative_algorithm="NEXTN",
+        speculative_num_draft_tokens=4,
+        startup_weight_load_mode="normal",
+    )
+
+    # W4 (the shipped default) still reaches the normal prepared launch.
+    config.configure_cli(namespace)
+
+    namespace.speculative_num_draft_tokens = 8
+    with pytest.raises(ValueError, match="RAM PLE for W8"):
+        config.configure_cli(namespace)
+
+    # configure_cli is a BEFORE hook: the raw width field is not the
+    # effective window. steps=7 normalizes to steps+1=8 under
+    # arg_groups/speculative_hook.py even when the width is omitted (None)
+    # or mismatched at 4, and both must be refused.
+    namespace.speculative_num_draft_tokens = None
+    namespace.speculative_num_steps = 7
+    namespace.speculative_eagle_topk = 1
+    with pytest.raises(ValueError, match="RAM PLE for W8"):
+        config.configure_cli(namespace)
+    namespace.speculative_num_draft_tokens = 4
+    with pytest.raises(ValueError, match="RAM PLE for W8"):
+        config.configure_cli(namespace)
+
+    # The qualified fixed W4 pair still reaches the normal prepared launch.
+    namespace.speculative_num_steps = 3
+    namespace.speculative_num_draft_tokens = 4
+    config.configure_cli(namespace)
+
+
+def test_nvme_rejects_adaptive_speculation(monkeypatch, tmp_path):
+    """Adaptive spec can resolve wider than W4 (default candidates hit 8).
+
+    Rejected explicitly with the actionable message in every reading --
+    with the width fields omitted entirely and with an initial fixed W4
+    pair -- while the same namespace without the flag still launches.
+    """
+    monkeypatch.delenv("SGLANG_SSD_STREAM_CONFIG", raising=False)
+    _, manifest, _ = _artifact(tmp_path)
+    monkeypatch.setattr(
+        config,
+        "_resolve_artifact",
+        lambda model_path, revision: (manifest, "a" * 40),
+    )
+    namespace = Namespace(
+        model_path="prepared",
+        revision=None,
+        ple_offload_embedding=False,
+        cpu_offload_gb=0,
+        offload_group_size=-1,
+        disable_cuda_graph=False,
+        disable_decode_cuda_graph=False,
+        disable_prefill_cuda_graph=False,
+        cuda_graph_backend_decode=None,
+        cuda_graph_backend_prefill=None,
+        speculative_algorithm="NEXTN",
+        startup_weight_load_mode="normal",
+    )
+
+    # Width omitted entirely: adaptive resolves from the candidate table.
+    namespace.speculative_adaptive = True
+    with pytest.raises(ValueError, match="does not support adaptive"):
+        config.configure_cli(namespace)
+
+    # Initial fixed W4 fields do not disarm the adaptive refusal.
+    namespace.speculative_num_steps = 3
+    namespace.speculative_eagle_topk = 1
+    namespace.speculative_num_draft_tokens = 4
+    with pytest.raises(ValueError, match="does not support adaptive"):
+        config.configure_cli(namespace)
+
+    # Same fixed W4 arguments without the flag keep working.
+    namespace.speculative_adaptive = False
+    config.configure_cli(namespace)
+
+
 def test_manifest_rejects_wrong_table_size(tmp_path):
     _, manifest, _ = _artifact(tmp_path, table_bytes=b"short")
 

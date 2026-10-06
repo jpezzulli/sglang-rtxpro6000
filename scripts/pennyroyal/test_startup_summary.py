@@ -243,6 +243,11 @@ class StartupSummaryTest(unittest.TestCase):
             "TOKEN_MAP": "/maps/token map [FR Spec].npy",
             "DRAFT_TOKENS": "8",
             "DRAFT_WINDOW_SIZE": "32",
+            # The optional fixed-width knob reads these; with no operator
+            # choice the recipe guards expand them to exactly the literals
+            # the older base block still hardcodes, so the argvs compare.
+            "SPEC_WIDTH": "4",
+            "SPEC_STEPS": "3",
         }
         if hicache_size:
             scalar_values["HICACHE_SIZE_GB"] = hicache_size
