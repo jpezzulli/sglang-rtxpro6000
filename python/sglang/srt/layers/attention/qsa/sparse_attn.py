@@ -375,6 +375,48 @@ def sparse_gqa_fwd_interface_triton_ck(q, k, v, indices, cu_q, cu_k, kv_lens, sc
     return out
 
 
+_PACKABLE_DTYPES = (
+    torch.float8_e4m3fn,
+    torch.float8_e5m2,
+    torch.bfloat16,
+    torch.float16,
+    torch.float32,
+)
+
+
+def qsa_prefill_kv_pack_supported(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    req_to_token: torch.Tensor,
+    req_indices: torch.Tensor,
+    sequence_lens,
+) -> bool:
+    """Whether one fused launch may replace the per-request packed-K/V gather.
+
+    ``pack_qsa_prefill_kv`` walks a rectangular ``max_k`` grid with a per-request
+    ``cu_k`` early exit, so every row needs its own device request id and a
+    rectangular, strided-indexable KV pool.  Anything else (an odd dtype, a
+    padded or host-resident request map, a row longer than the request table)
+    stays on the joined-index ``index_select`` path.
+
+    ponytail: upstream's grid is ``max_k`` by batch, so a short request next to
+    a 524288-token one launches masked programs that store nothing.  Per-request
+    split launches (or a length-bucketed batch) are the upgrade path if that
+    wasted work ever shows up in a ragged C6 profile.
+    """
+    if k.ndim != 3 or v.shape != k.shape or v.dtype != k.dtype:
+        return False
+    if k.dtype not in _PACKABLE_DTYPES:
+        return False
+    if req_to_token.ndim != 2:
+        return False
+    if req_indices.ndim != 1 or req_indices.dtype not in (torch.int32, torch.int64):
+        return False
+    if req_indices.shape[0] != len(sequence_lens):
+        return False
+    return all(0 <= int(n) <= req_to_token.shape[1] for n in sequence_lens)
+
+
 @triton.jit
 def _fa2_valid_counts(
     seq_lens,
@@ -514,6 +556,8 @@ def qwen_sparse_kv_extraction_compact_triton(
 
 
 __all__ = [
+    "pack_qsa_prefill_kv",
+    "qsa_prefill_kv_pack_supported",
     "qwen_sparse_fa2_cu_seqlens_triton",
     "qwen_sparse_valid_counts_triton",
     "qwen_sparse_kv_extraction_compact_triton",

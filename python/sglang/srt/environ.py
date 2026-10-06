@@ -308,6 +308,12 @@ class Envs:
     # kernel can bound its scan; that layout is implied by this gate and is not
     # separately selectable.
     SGLANG_OPT_TRITON_DECODE_ATTN = EnvBool(False)
+    # QSA chunk prefill gathers each request's full-context K and V in one
+    # Triton launch (layers/attention/qsa/sparse_attn.py pack_qsa_prefill_kv)
+    # instead of materialising the device request ids as a host list and
+    # index_select-ing K and V separately.  The packed K/V keep the pool dtype,
+    # so FP8 staging stays the same size; unsupported shapes fall back.
+    SGLANG_OPT_FUSED_QSA_PREFILL_KV = EnvBool(False)
     SGLANG_PREFETCH_BLOCK_SIZE_MB = EnvInt(16)
     SGLANG_GEMMA_OUT_OF_PLACE_POSITION_MUTATION = EnvBool(False)
     SGLANG_ENABLE_WEIGHT_LOADER_V2 = EnvBool(False)

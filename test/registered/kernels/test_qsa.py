@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from sglang.srt.configs.qwen4_exp import Qwen4ExpConfig
+from sglang.srt.environ import envs
 from sglang.srt.layers.attention import qwen_sparse_attn_backend as qsa_backend_module
 from sglang.srt.layers.attention.attention_registry import ATTENTION_BACKENDS
 from sglang.srt.layers.attention.qsa import dsa_indexer as dsa_indexer_module
@@ -29,6 +30,7 @@ from sglang.srt.layers.attention.qsa.mqa import (
 from sglang.srt.layers.attention.qsa.qsa_indexer import QSAIndexer
 from sglang.srt.layers.attention.qsa.sparse_attn import (
     pack_qsa_prefill_kv,
+    qsa_prefill_kv_pack_supported,
     sparse_gqa_fwd_interface_triton_ck,
 )
 from sglang.srt.layers.attention.qwen_sparse_attn_backend import (
@@ -2448,6 +2450,187 @@ def test_qsa_large_fp8_prefill_float_reference(head_dim, heads):
             torch.softmax(q[row].double() @ keys.T * head_dim**-0.5, dim=-1) @ values
         )
         torch.testing.assert_close(actual[row].double(), expected, rtol=2e-2, atol=2e-2)
+
+
+class _DeviceReqIndices:
+    """Request rows that only live on device: ``tolist`` is the host sync the
+    fused route is supposed to remove, so the checks observe whether it fires."""
+
+    def __init__(self, rows):
+        self.rows = torch.as_tensor(rows, dtype=torch.int64)
+        self.ndim = self.rows.ndim
+        self.shape = self.rows.shape
+        self.dtype = self.rows.dtype
+        self.synced = False
+
+    def numel(self):
+        return self.rows.numel()
+
+    def tolist(self):
+        self.synced = True
+        return self.rows.tolist()
+
+
+class _PhaseRecorder:
+    def __init__(self):
+        self.phases = []
+
+    def set_phase(self, layer_id, phase):
+        self.phases.append((layer_id, phase))
+
+
+_QSA_PACK_LENS = [8, 0, 3]
+_QSA_PACK_TABLE = torch.arange(3 * 16, dtype=torch.int32).reshape(3, 16)
+
+
+def _qsa_pack_backend(fused):
+    backend = QwenSparseAttnBackend.__new__(QwenSparseAttnBackend)
+    backend._fused_prefill_kv = fused
+    return backend
+
+
+def _qsa_pack_pools(dtype=torch.float8_e4m3fn):
+    pool = torch.randn(48, 2, 128).to(dtype)
+    return pool, torch.randn(48, 2, 128).to(dtype)
+
+
+def _qsa_pack(backend, k, v, req_indices, phases=None, sequence_lens=_QSA_PACK_LENS):
+    return backend._pack_qsa_prefill_kv(
+        k,
+        v,
+        _QSA_PACK_TABLE,
+        SimpleNamespace(req_pool_indices=req_indices),
+        list(sequence_lens),
+        torch.device("cpu"),
+        0,
+        phases,
+    )
+
+
+def test_qsa_fused_prefill_kv_gate_is_off_by_default():
+    assert not envs.SGLANG_OPT_FUSED_QSA_PREFILL_KV.get()
+    assert QwenSparseAttnBackend()._fused_prefill_kv is False
+
+
+def test_qsa_fused_prefill_route_drops_the_host_request_list(monkeypatch):
+    seen = {}
+
+    def fake_pack(k, v, req_to_token, req_indices, cu_k, total_k, max_k, **kwargs):
+        seen["output_dtype"] = kwargs.get("output_dtype")
+        seen["total_k"] = total_k
+        seen["max_k"] = max_k
+        seen["req_indices"] = req_indices
+        return (
+            torch.zeros(total_k, *k.shape[1:], dtype=k.dtype),
+            torch.zeros(total_k, *v.shape[1:], dtype=v.dtype),
+        )
+
+    monkeypatch.setattr(qsa_backend_module, "pack_qsa_prefill_kv", fake_pack)
+    k, v = _qsa_pack_pools()
+    req = _DeviceReqIndices([0, 1, 2])
+    phases = _PhaseRecorder()
+    packed_k, packed_v, cu_k, kv_lens = _qsa_pack(
+        _qsa_pack_backend(True), k, v, req, phases
+    )
+    # The device request rows are handed to the kernel untouched.
+    assert seen["req_indices"] is req and not req.synced
+    # FP8 staging keeps the pool dtype: no silent BF16 full-prefix expansion.
+    assert seen["output_dtype"] is None
+    assert (
+        packed_k.dtype is torch.float8_e4m3fn and packed_v.dtype is torch.float8_e4m3fn
+    )
+    assert (seen["total_k"], seen["max_k"]) == (11, 8)
+    # cumsum widens on CPU; the kernel reads the boundaries, not the width.
+    assert cu_k.tolist() == [0, 8, 8, 11]
+    assert kv_lens.tolist() == _QSA_PACK_LENS
+    assert phases.phases == [
+        (0, "before_fused_kv_pack"),
+        (0, "after_fused_kv_pack"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "default_off",
+        "padded_rows",
+        "row_beyond_table",
+        "pool_dtype",
+        "kv_mismatch",
+    ],
+)
+def test_qsa_fallback_route_packs_the_same_bytes(case):
+    """Every route that is not the fused kernel keeps the joined-index bytes.
+
+    Ragged and zero-length selections included: an empty row contributes no
+    packed token at all, so ``cu_seqlens_k`` and the packed rows stay in step.
+    """
+    k, v = _qsa_pack_pools()
+    rows = [0, 1, 2]
+    lens = list(_QSA_PACK_LENS)
+    fused = case != "default_off"
+    if case == "padded_rows":
+        # CUDA-graph padding: more request rows than semantic sequence rows.
+        rows = [0, 1, 2, 0]
+    elif case == "row_beyond_table":
+        lens = [17, 0, 3]
+    elif case == "pool_dtype":
+        # A raw quantized byte pool is not a [token, head, dim] float layout.
+        k, v = k.view(torch.uint8), v.view(torch.uint8)
+    elif case == "kv_mismatch":
+        v = v.to(torch.bfloat16)
+
+    req = _DeviceReqIndices(rows)
+    phases = _PhaseRecorder()
+    packed_k, packed_v, cu_k, _ = _qsa_pack(
+        _qsa_pack_backend(fused), k, v, req, phases, lens
+    )
+    assert req.synced, "the fallback route is the one that pays the host request list"
+    assert phases.phases == [
+        (0, "before_req_indices_to_list"),
+        (0, "after_req_indices_to_list"),
+    ]
+    used = rows[: len(lens)]
+    expected_k = torch.cat(
+        [
+            k.index_select(0, _QSA_PACK_TABLE[row, :n].long())
+            for row, n in zip(used, lens)
+        ]
+    )
+    expected_v = torch.cat(
+        [
+            v.index_select(0, _QSA_PACK_TABLE[row, :n].long())
+            for row, n in zip(used, lens)
+        ]
+    )
+    torch.testing.assert_close(packed_k, expected_k, rtol=0, atol=0)
+    torch.testing.assert_close(packed_v, expected_v, rtol=0, atol=0)
+    assert cu_k.tolist() == [0, *torch.tensor(lens).cumsum(0).tolist()]
+
+
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("int_table", [False, True])
+def test_qsa_prefill_kv_pack_support_truth_table(strided, int_table):
+    k, v = _qsa_pack_pools(torch.bfloat16)
+    if strided:
+        storage = torch.zeros(48, 2, 256, dtype=torch.bfloat16)
+        storage[..., ::2] = k
+        k = storage[..., ::2]
+        v = torch.zeros_like(storage)[..., ::2]
+        assert k.stride(2) == 2  # strided pools stay supported
+    table = _QSA_PACK_TABLE.to(torch.int32 if int_table else torch.int64)
+    rows = torch.tensor([0, 1, 2], dtype=torch.int64)
+    assert qsa_prefill_kv_pack_supported(k, v, table, rows, _QSA_PACK_LENS)
+    assert not qsa_prefill_kv_pack_supported(k, v, table, rows, [17, 0, 3])
+    assert not qsa_prefill_kv_pack_supported(k, v, table, rows[:2], _QSA_PACK_LENS)
+    assert not qsa_prefill_kv_pack_supported(k, v, table[0], rows, _QSA_PACK_LENS)
+    assert not qsa_prefill_kv_pack_supported(
+        k, v, table, rows.to(torch.float32), _QSA_PACK_LENS
+    )
+    assert not qsa_prefill_kv_pack_supported(
+        k, v.to(torch.float8_e4m3fn), table, rows, _QSA_PACK_LENS
+    )
+    assert not qsa_prefill_kv_pack_supported(k, v, table, rows, [-1, 0, 3])
 
 
 if __name__ == "__main__":

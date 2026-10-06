@@ -41,6 +41,8 @@ from sglang.srt.layers.attention.qsa.metadata import (
     compressed_decode_view,
 )
 from sglang.srt.layers.attention.qsa.sparse_attn import (
+    pack_qsa_prefill_kv,
+    qsa_prefill_kv_pack_supported,
     qwen_sparse_fa2_cu_seqlens_triton,
     qwen_sparse_kv_extraction_compact_triton,
     qwen_sparse_valid_counts_triton,
@@ -322,6 +324,7 @@ class QwenSparseAttnBackend(AttentionBackend):
         self._mtp_shared_sparse_indices = None
         self._trtllm_workspace = None
         self._triton_decode_attn = envs.SGLANG_OPT_TRITON_DECODE_ATTN.get()
+        self._fused_prefill_kv = envs.SGLANG_OPT_FUSED_QSA_PREFILL_KV.get()
         self._decode_attn_workspace: Optional[QSADecodeAttnWorkspace] = None
         self._graph_extend_lens = None
         self._graph_extend_lens_pin = None
@@ -1692,12 +1695,88 @@ class QwenSparseAttnBackend(AttentionBackend):
             diagnostics.mark_before_kv_getters(layer.layer_id, pool)
         k_buffer = pool.get_key_buffer(layer.layer_id)
         v_buffer = pool.get_value_buffer(layer.layer_id)
-        if diagnostics is not None:
-            diagnostics.set_phase(layer.layer_id, "before_req_indices_to_list")
         req_to_token = self.req_to_token_pool.req_to_token
+        packed_k, packed_v, cu_seqlens_k, sequence_lens_tensor = (
+            self._pack_qsa_prefill_kv(
+                k_buffer,
+                v_buffer,
+                req_to_token,
+                forward_batch,
+                sequence_lens,
+                q.device,
+                layer.layer_id,
+                diagnostics,
+            )
+        )
+        if diagnostics is not None:
+            diagnostics.set_phase(layer.layer_id, "before_sparse_attention")
+        output = sparse_gqa_fwd_interface_triton_ck(
+            q.contiguous(),
+            packed_k,
+            packed_v,
+            topk_indices,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            sequence_lens_tensor,
+            layer.scaling,
+        )
+        if diagnostics is not None:
+            diagnostics.set_phase(layer.layer_id, "sparse_attention_enqueued")
+        return self._pad_extend_output(output, num_output_rows)
+
+    def _pack_qsa_prefill_kv(
+        self,
+        k_buffer: torch.Tensor,
+        v_buffer: torch.Tensor,
+        req_to_token: torch.Tensor,
+        forward_batch,
+        sequence_lens: list,
+        device: torch.device,
+        layer_id: int,
+        diagnostics,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Full-context K/V packed per request for the chunk-prefill kernel.
+
+        Default-OFF (SGLANG_OPT_FUSED_QSA_PREFILL_KV) fused route: one Triton
+        launch gathers K and V together straight from the pool through the
+        request table, so the device request ids are never materialised as a
+        host list and no long gather index is built.  The packed tensors keep
+        the pool dtype -- an FP8 pool stays FP8 -- exactly as the joined-index
+        path below produced, so the FP8 staging size of a full 524288-token
+        prefix is unchanged and the attention consumer still converts FP8
+        tiles itself.  Unsupported shapes fall back to the old path.
+        """
+        if self._fused_prefill_kv and qsa_prefill_kv_pack_supported(
+            k_buffer,
+            v_buffer,
+            req_to_token,
+            forward_batch.req_pool_indices,
+            sequence_lens,
+        ):
+            if diagnostics is not None:
+                diagnostics.set_phase(layer_id, "before_fused_kv_pack")
+            sequence_lens_tensor = torch.tensor(
+                sequence_lens, dtype=torch.int32, device=device
+            )
+            cu_seqlens_k = F.pad(sequence_lens_tensor.cumsum(0), (1, 0)).contiguous()
+            packed_k, packed_v = pack_qsa_prefill_kv(
+                k_buffer,
+                v_buffer,
+                req_to_token,
+                forward_batch.req_pool_indices,
+                cu_seqlens_k,
+                sum(sequence_lens),
+                max(sequence_lens, default=1),
+            )
+            if diagnostics is not None:
+                diagnostics.set_phase(layer_id, "after_fused_kv_pack")
+            return packed_k, packed_v, cu_seqlens_k, sequence_lens_tensor
+
+        if diagnostics is not None:
+            diagnostics.set_phase(layer_id, "before_req_indices_to_list")
         req_indices = forward_batch.req_pool_indices.tolist()
         if diagnostics is not None:
-            diagnostics.set_phase(layer.layer_id, "after_req_indices_to_list")
+            diagnostics.set_phase(layer_id, "after_req_indices_to_list")
         # Join the gather INDICES, not the gathered K/V.  An index row is 8 B
         # per token; a K (or V) row is tp_kv_head_num * head_dim bytes.  Gathering
         # per request and then torch.cat-ing the results materialised a SECOND
@@ -1714,24 +1793,15 @@ class QwenSparseAttnBackend(AttentionBackend):
             gather_index[0] if len(gather_index) == 1 else torch.cat(gather_index)
         )
         sequence_lens_tensor = torch.tensor(
-            sequence_lens, dtype=torch.int32, device=q.device
+            sequence_lens, dtype=torch.int32, device=device
         )
         cu_seqlens_k = F.pad(sequence_lens_tensor.cumsum(0), (1, 0)).contiguous()
-        if diagnostics is not None:
-            diagnostics.set_phase(layer.layer_id, "before_sparse_attention")
-        output = sparse_gqa_fwd_interface_triton_ck(
-            q.contiguous(),
+        return (
             k_buffer.index_select(0, gather_index),
             v_buffer.index_select(0, gather_index),
-            topk_indices,
-            cu_seqlens_q,
             cu_seqlens_k,
             sequence_lens_tensor,
-            layer.scaling,
         )
-        if diagnostics is not None:
-            diagnostics.set_phase(layer.layer_id, "sparse_attention_enqueued")
-        return self._pad_extend_output(output, num_output_rows)
 
     @staticmethod
     def _pad_extend_output(output: torch.Tensor, num_rows: int) -> torch.Tensor:
