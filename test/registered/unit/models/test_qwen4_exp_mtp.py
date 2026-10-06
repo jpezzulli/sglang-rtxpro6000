@@ -18,8 +18,8 @@ from sglang.srt.models import qwen4_exp, qwen4_exp_mtp
 from sglang.srt.models.qwen3_5_mtp import Qwen3_5ForCausalLMMTP, _mtp_quant_config
 from sglang.srt.models.qwen4_exp_mtp import (
     Qwen4ExpForCausalLMMTP,
-    _Qwen4ExpDraftModel,
     _placeholder_vocab_weight,
+    _Qwen4ExpDraftModel,
 )
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
@@ -298,9 +298,7 @@ class TestQwen4ExpMTPDraftVocabWeights(CustomTestCase):
         self.assertEqual(tuple(draft.lm_head.weight.shape), (1, HIDDEN))
         self.assertEqual(tuple(draft.model.embed_tokens.weight.shape), (1, HIDDEN))
         full = self._build(flag=False, quant_config=draft_quant)
-        self.assertEqual(
-            _shard_indices(draft.lm_head), _shard_indices(full.lm_head)
-        )
+        self.assertEqual(_shard_indices(draft.lm_head), _shard_indices(full.lm_head))
         freed = _owned_bytes(full) - _owned_bytes(draft)
         self.assertGreater(freed, 3 * TABLE_BYTES // 2)
 
@@ -378,9 +376,7 @@ class TestQwen4ExpMTPDraftVocabWeights(CustomTestCase):
                 self.assertEqual(
                     _shard_indices(draft.lm_head), _shard_indices(full.lm_head)
                 )
-                self.assertEqual(
-                    draft.lm_head.num_embeddings_per_partition, VOCAB // 2
-                )
+                self.assertEqual(draft.lm_head.num_embeddings_per_partition, VOCAB // 2)
                 self.assertEqual(
                     draft.model.embed_tokens.num_embeddings_per_partition, VOCAB // 2
                 )
@@ -398,9 +394,7 @@ class TestQwen4ExpMTPDraftVocabWeights(CustomTestCase):
         self.assertEqual(module.num_embeddings, VOCAB)
 
     def test_handoff_leaves_one_owner_of_each_target_tensor(self):
-        rows = torch.arange(VOCAB * HIDDEN, dtype=torch.float32).reshape(
-            VOCAB, HIDDEN
-        )
+        rows = torch.arange(VOCAB * HIDDEN, dtype=torch.float32).reshape(VOCAB, HIDDEN)
         embed = nn.Parameter(rows)
         head = nn.Parameter(-rows.clone())
         for flag in (True, False):
@@ -466,8 +460,9 @@ class TestQwen4ExpMTPDraftVocabWeights(CustomTestCase):
                     during = list(seen["names"])
                     embed = nn.Parameter(torch.zeros(VOCAB, HIDDEN))
                     head = nn.Parameter(torch.zeros(VOCAB, HIDDEN))
-                    with patch("torch.cuda.empty_cache"), patch(
-                        "torch.cuda.synchronize"
+                    with (
+                        patch("torch.cuda.empty_cache"),
+                        patch("torch.cuda.synchronize"),
                     ):
                         draft.set_embed_and_head(embed, head)
                     draft.load_weights(iter(rows))
