@@ -17,6 +17,8 @@ import torch
 import triton
 import triton.language as tl
 
+from sglang.kernels.ops.gemm import sm120_w8a16_gemv
+
 _MAX_KERNEL_ROWS = 32
 _DEQUANT_TARGET_BYTES = 64 * 1024 * 1024
 _SCALE_ATTR = "_sm120_rowwise_scale"
@@ -125,6 +127,11 @@ def replace_linear_weight_rowwise_fp8(linear: torch.nn.Module) -> int:
             f"SM120 online FP8 expected a BF16 resident weight, got {weight.dtype}"
         )
     original_bytes = weight.numel() * weight.element_size()
+    if sm120_w8a16_gemv.lowrow_gemv_enabled():
+        # Weight installation is the last hook before warm-up and graph capture;
+        # the candidate GEMV's split-K scratch must not be allocated inside a
+        # capture (it would land in that graph's private memory pool).
+        sm120_w8a16_gemv.prealloc(weight.device)
     new_parameter = _rowwise_parameter(weight.data, weight)
     if hasattr(weight, "weight_loader"):
         # A later weight update must recompute both values and scales. Keeping
@@ -325,6 +332,14 @@ def rowwise_fp8_lm_head_logits(
             "SM120 online FP8 lm_head input width does not match its weight"
         )
     rows, columns = hidden_2d.shape[0], weight.shape[0]
+    # Opt-in candidate (SGLANG_FP8_W8A16_GEMV=1): the donor's low-row W8A16 GEMV.
+    # lowrow_gemv_supported() is the whole contract, including its M <= 16 limit;
+    # anything outside it, C6's 24-row verification and prefill included, keeps
+    # the original implementation below, which stays unmodified for comparison.
+    if sm120_w8a16_gemv.lowrow_gemv_supported(hidden_2d, weight, scale):
+        return sm120_w8a16_gemv.lowrow_fp8_gemv(hidden_2d, weight, scale).reshape(
+            *original_shape, columns
+        )
     output = torch.empty(
         (rows, columns), dtype=torch.bfloat16, device=hidden_states.device
     )
