@@ -15,6 +15,10 @@
 #     constexpr, no launch_pdl, so nothing depends on a guessed overlap.
 #   - The shared-tail valid-prefix layout it assumes is built here by
 #     QSAMTPSharedSparseIndices, not by the donor's ST1 lookup kernels.
+#   - Q and K are not cast to F16 for the QK MMA: a finite BF16 query above the
+#     F16 max (~65504) would become Inf and NaN the softmax, while the resident
+#     BF16 path stays finite. The QK MMA runs on BF16 (E4M3 K converts exactly),
+#     the P/V MMA keeps the donor's F16 path (P <= 1, E4M3 V <= 448).
 """Split-KV Triton decode attention over QSA sparse top-k rows.
 
 Opt-in replacement (SGLANG_OPT_TRITON_DECODE_ATTN) for the valid-count, KV
@@ -26,8 +30,9 @@ req_to_token, so nothing is packed. A column is attended iff
 packed path, attending only a valid prefix, mis-handles.
 
 Grid (splits, kv heads, rows). A program covers one contiguous column chunk for
-one kv head and all of its query heads (padded to 16 MMA rows): f16 MMAs on
-e4m3 K/V (exact conversion), fp32 accumulation. Each program stores its
+one kv head and all of its query heads (padded to 16 MMA rows): a BF16 QK MMA on
+e4m3 K (exact conversion, query exponent range preserved) and an F16 P/V MMA on
+e4m3 V (exact conversion), both with fp32 accumulation. Each program stores its
 partial (acc / l in f16, lse = m + log2(l) in fp32); the last arriver per
 (row, kv head), found with one acq_rel atomic, combines the partials in split
 order and resets its counter to 0. The result is deterministic, and the
@@ -214,7 +219,12 @@ def _qsa_decode_attn_kernel(
     qo_off = (grp * GROUP + offs_h)[:, None] * D + offs_d[None, :]
     hd_off = kvh * D + offs_d
 
-    q = tl.load(q_ptr + qo_off, mask=hmask[:, None], other=0.0).to(tl.float16)
+    # Q stays in its own BF16: an F16 cast would turn a finite query above the
+    # F16 max (~65504) into Inf and NaN the softmax, while the resident BF16
+    # path stays finite. E4M3 K converts to BF16 exactly, so the QK MMA keeps
+    # the query's exponent range; the P/V dot below stays F16 (P <= 1, E4M3 V
+    # is at most 448).
+    q = tl.load(q_ptr + qo_off, mask=hmask[:, None], other=0.0)
     length = tl.load(seq_lens_ptr + row)
     req = tl.load(row_req_ptr + row).to(tl.int64)
     # Indexer rows and tail-after-prefix shared rows keep every valid column in front,
@@ -237,7 +247,7 @@ def _qsa_decode_attn_kernel(
         # Invalid columns gather the pool's padding slot 0 and are masked in
         # the scores, so the K/V loads stay unmasked 16-byte cp.async.
         kv_off = slot.to(tl.int64)[:, None] * (HKV * D) + hd_off[None, :]
-        k = tl.load(k_ptr + kv_off).to(tl.float16)
+        k = tl.load(k_ptr + kv_off).to(tl.bfloat16)
         v = tl.load(v_ptr + kv_off)
         if V_ASM:
             v = _e4m3_to_f16(v)

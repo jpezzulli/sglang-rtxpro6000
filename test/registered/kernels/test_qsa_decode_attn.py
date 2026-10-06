@@ -6,6 +6,7 @@ The numerical, CUDA-graph replay and TP-shape checks of the Triton kernel
 itself need SM120 hardware: they are prepared here and skipped without it.
 """
 
+import math
 import sys
 from types import SimpleNamespace
 from unittest import mock
@@ -67,14 +68,20 @@ def _make_backend(triton_decode_attn=None, state=None):
     return backend
 
 
-def _make_state(triton_decode_attn, num_requests=4, tail_width=4):
+def _make_state(
+    triton_decode_attn,
+    num_requests=4,
+    tail_width=4,
+    token_topk=_TOPK,
+    device="cpu",
+):
     with envs.SGLANG_OPT_TRITON_DECODE_ATTN.override(triton_decode_attn):
         return QSAMTPSharedSparseIndices(
             layer_ids=[48],
             num_requests=num_requests,
-            token_topk=_TOPK,
+            token_topk=token_topk,
             tail_width=tail_width,
-            device="cpu",
+            device=device,
         )
 
 
@@ -294,74 +301,203 @@ def test_prefix_valid_follows_the_shared_state_layout():
             assert seen["prefix_valid"] is (gate or not shares_draft_selection)
 
 
+def test_reference_attention_follows_its_host_side_case_spec():
+    """The GPU numerical reference builds its gather from a HOST case spec
+    (indices, lengths, request rows, req_to_token) and only moves the resolved
+    slot ids to the buffers' device.  Indexing the host map with device indices
+    raised on the first real run, and an identity map could never show a wrong
+    request row -- both are checked here where the code actually executes."""
+    case = _long_case(rows=3, cols=64, holes=True)
+    for name in ("req_to_token", "topk_indices", "seq_lens", "row_req_pool_indices"):
+        assert not case[name].is_cuda and case[name].device.type == "cpu", name
+    q = torch.randn(3, _Q_HEADS, _HEAD_DIM, dtype=torch.bfloat16)
+    k_buffer = torch.randn(case["n_slots"], _KV_HEADS, _HEAD_DIM).to(
+        torch.float8_e4m3fn
+    )
+    v_buffer = torch.randn(case["n_slots"], _KV_HEADS, _HEAD_DIM).to(
+        torch.float8_e4m3fn
+    )
+    out = _reference_attention(q, k_buffer, v_buffer, case)
+    assert out.shape == q.shape
+    # The last case row selects nothing: a plain zero output, not a stale one.
+    assert torch.count_nonzero(out[-1]) == 0
+    # Two rows with the SAME selection but different request rows must differ,
+    # because req_to_token is deliberately not the identity map.
+    twin = _long_case(rows=2, cols=64, holes=False)
+    twin["topk_indices"][1] = twin["topk_indices"][0]
+    twin["seq_lens"][1] = twin["seq_lens"][0]
+    assert int(twin["row_req_pool_indices"][0]) != int(twin["row_req_pool_indices"][1])
+    twin_q = torch.randn(2, _Q_HEADS, _HEAD_DIM, dtype=torch.bfloat16)
+    twin_q[1] = twin_q[0]
+    twin_out = _reference_attention(twin_q, k_buffer, v_buffer, twin)
+    assert not torch.equal(twin_out[0], twin_out[1])
+    # And the resolved slots really are the map's own, not the logical index.
+    req0 = int(twin["row_req_pool_indices"][0])
+    length0 = int(twin["seq_lens"][0])
+    cols = [int(c) for c in twin["topk_indices"][0] if 0 <= int(c) < length0]
+    slots = [int(twin["req_to_token"][req0][c]) for c in cols]
+    assert slots != cols
+    scores = (twin_q[0, 0].float() @ k_buffer[slots].float()[:, 0].t()) / (
+        _HEAD_DIM**0.5
+    )
+    manual = torch.softmax(scores, -1) @ v_buffer[slots].float()[:, 0]
+    torch.testing.assert_close(twin_out[0, 0].float(), manual, rtol=2e-2, atol=2e-3)
+
+
+def test_prepared_numerical_cases_really_launch_several_splits():
+    """The GPU numerical cases are the only place the split-KV combine is
+    compared against a reference, so they must not silently collapse to a
+    single non-empty split (where the combine is dead code and the test would
+    pass for the wrong reason).  Checked on CPU, where it cannot be skipped."""
+    for rows, _kv, _q, cols, holes in _CASES:
+        num_splits, block_n = _launch_config(rows)[0], _launch_config(rows)[1]
+        case = _long_case(rows=rows, cols=cols, holes=holes)
+        ncols = cols if holes else min(int(case["seq_lens"].max()), cols)
+        assert num_splits > 1, (rows, cols, num_splits)
+        assert _nonempty_splits(ncols, num_splits, block_n) >= 4, (
+            rows,
+            cols,
+            num_splits,
+            block_n,
+        )
+        assert torch.count_nonzero(case["topk_indices"] >= 0) > 0
+
+
 # --- GPU (prepared: skipped without CUDA hardware) ------------------------
 
 _CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-_ROWS = 7
-_ROW_REQS = [0, 1, 0, 1, 0, 1, 0]
+
+# indexer_budget 2048 + compress_ratio - 1: the column width the split-KV launch
+# buckets were measured at, and the width at which _launch_config actually hands
+# out more than one split.  The short variant keeps the TP-local head coverage
+# cheap.
+_TOPK_COLS = 2051
+_SHORT_COLS = 512
 
 
-def _dense_case(prefix_valid):
-    """Multi-row, ragged, holes/tails and a two-request pool."""
-    n_slots = 128
-    topk_indices = torch.full((_ROWS, _TOPK), -1, dtype=torch.int32)
-    for row in range(_ROWS):
-        length = min(int(_LENS[row]), 6)
-        topk_indices[row, :length] = torch.arange(length, dtype=torch.int32)
-        if not prefix_valid:  # a -1 hole mid-row, the tail behind it
-            topk_indices[row, 2] = -1
-            tail = torch.arange(length, length + 2, dtype=torch.int32)
-            topk_indices[row, 3 : 3 + tail.numel()] = tail
+def _row_spec(row, rows, cols, holes):
+    """``(seq_len, selected logical indices)`` for one case row: the first row
+    sees a single token, the last selects nothing (the zero-output row must not
+    poison the combine), the rest are ragged and long enough to span several
+    split chunks.  ``holes`` reproduces an index-shared row: a -1 mid-row with a
+    valid drafted-tail column behind it, which the scan-bound path may not skip.
+    """
+    if rows > 1 and row == 0:
+        length, width = 1, 1
+    elif rows > 2 and row == rows - 1:
+        length, width = 8, 0
+    else:
+        length = 2048 + 3 * (row % 4)
+        width = min(cols, length, 2048 - 7 * (row % 9))
+    columns = list(range(width))
+    if holes and width > 8:
+        columns[3] = -1
+        columns[-1] = length - 1  # the tail column hides behind the hole
+    return length, columns
+
+
+def _long_case(rows, cols=_TOPK_COLS, holes=False):
+    """Host-side case spec: ragged rows, and per-request ``req_to_token`` maps
+    with no fixed point (``2c+1`` / ``2c+2``), so a row that resolved the wrong
+    request -- or used the logical index as a slot -- reads different memory.
+    """
+    topk_indices = torch.full((rows, cols), -1, dtype=torch.int32)
+    seq_lens = torch.empty(rows, dtype=torch.int32)
+    row_req_pool_indices = torch.tensor(
+        [row % 2 for row in range(rows)], dtype=torch.int32
+    )
+    width = 1
+    for row in range(rows):
+        length, columns = _row_spec(row, rows, cols, holes)
+        seq_lens[row] = length
+        width = max(width, length)
+        assert len(columns) <= cols, "case columns must fit the row width"
+        if columns:
+            topk_indices[row, : len(columns)] = torch.tensor(columns, dtype=torch.int32)
+    logical = torch.arange(width, dtype=torch.int32)
+    req_to_token = torch.stack([2 * logical + 1, 2 * (logical + 1)])
     return dict(
-        req_to_token=torch.arange(n_slots, dtype=torch.int32).view(2, n_slots // 2),
+        req_to_token=req_to_token,
         topk_indices=topk_indices,
-        seq_lens=_LENS.clone(),
-        row_req_pool_indices=torch.tensor(_ROW_REQS, dtype=torch.int32),
-        n_slots=n_slots,
+        seq_lens=seq_lens,
+        row_req_pool_indices=row_req_pool_indices,
+        n_slots=2 * width + 2,
     )
 
 
-_LENS = torch.tensor([1, 5, 5, 17, 17, 33, 33], dtype=torch.int32)
-
-
 def _reference_attention(q, k_buffer, v_buffer, case):
-    """Plain fp32 softmax over exactly the selected columns, no split-KV."""
+    """Plain fp32 softmax over exactly the selected columns, no split-KV.
+
+    ``case`` is a HOST spec (the indices, lengths, request rows and the
+    req_to_token map are read as integers here); only the resolved slot ids move
+    to the buffers' device, so this runs on CPU as well as next to CUDA tensors.
+    """
+    device = k_buffer.device
     scale = 1.0 / (k_buffer.shape[-1] ** 0.5)
     heads_per_kv = q.shape[1] // k_buffer.shape[1]
-    out = torch.zeros(q.shape, dtype=torch.float32, device=q.device)
+    out = torch.zeros(q.shape, dtype=torch.float32, device=device)
     for row in range(q.shape[0]):
         req = int(case["row_req_pool_indices"][row])
         length = int(case["seq_lens"][row])
         cols = [int(c) for c in case["topk_indices"][row] if 0 <= int(c) < length]
         if not cols:
             continue
-        slots = (
-            case["req_to_token"][req]
-            .long()[torch.tensor(cols, device=q.device, dtype=torch.long)]
-            .to(q.device)
-        )
+        index = torch.tensor(cols, dtype=torch.long)
+        slots = case["req_to_token"][req].long()[index].to(device)
         k = k_buffer[slots].float()  # [n, kv heads, D]
         v = v_buffer[slots].float()
-        for h in range(q.shape[1]):
-            kv_head = h // heads_per_kv
-            scores = (q[row, h].float() @ k[:, kv_head].t()) * scale
-            out[row, h] = torch.softmax(scores, -1) @ v[:, kv_head]
+        for kv_head in range(k_buffer.shape[1]):
+            qs = q[row, kv_head * heads_per_kv : (kv_head + 1) * heads_per_kv].float()
+            scores = (qs @ k[:, kv_head].t()) * scale
+            out[row, kv_head * heads_per_kv : (kv_head + 1) * heads_per_kv] = (
+                torch.softmax(scores, -1) @ v[:, kv_head]
+            )
     return out.to(q.dtype)
 
 
+def _nonempty_splits(ncols, num_splits, block_n):
+    """How many programs of one row's launch actually get columns, mirroring the
+    kernel's ``chunk = cdiv(cdiv(ncols, NUM_SPLITS), BLOCK_N) * BLOCK_N``.  The
+    numerical checks are worthless if this is 1: the combine would be dead code.
+    """
+    chunk = math.ceil(math.ceil(ncols / num_splits) / block_n) * block_n
+    return sum(
+        1 for s in range(num_splits) if min(s * chunk + chunk, ncols) > s * chunk
+    )
+
+
+# (rows, kv heads, q heads, columns, holes).  24 rows is the C6/W4 target-verify
+# batch, 1 row the single-request decode; the last two keep TP-local (TP4) and
+# model-level (TP1) head splits covered without a Cartesian suite.
+_CASES = [
+    (1, _KV_HEADS, _Q_HEADS, _TOPK_COLS, False),
+    (4, _KV_HEADS, _Q_HEADS, _TOPK_COLS, False),
+    (8, _KV_HEADS, _Q_HEADS, _TOPK_COLS, True),
+    (24, _KV_HEADS, _Q_HEADS, _TOPK_COLS, True),
+    (8, 1, 6, _SHORT_COLS, False),
+    (8, 4, 24, _SHORT_COLS, False),
+]
+
+
 @_CUDA
-@pytest.mark.parametrize("prefix_valid", [True, False])
-@pytest.mark.parametrize("kv_heads,q_heads", [(_KV_HEADS, _Q_HEADS), (1, 6), (4, 24)])
-def test_kernel_matches_reference_over_fp8_kv(prefix_valid, kv_heads, q_heads):
-    """Every selected contribution survives the split-KV combine -- -1 holes,
-    the drafted tail, ragged lengths, multi-row and both TP-local head
-    splits -- and a second launch reuses the partials without leaking."""
+@pytest.mark.parametrize("rows,kv_heads,q_heads,cols,holes", _CASES)
+def test_kernel_matches_reference_at_the_measured_width(
+    rows, kv_heads, q_heads, cols, holes
+):
+    """Every selected contribution survives the split-KV combine -- ragged
+    lengths, a one-token row, an empty row, the drafted tail behind a -1 hole and
+    the TP-local head splits -- and a relaunch off the same partials is stable.
+    """
     torch.manual_seed(0)
     device = "cuda"
-    case = _dense_case(prefix_valid)
-    q = torch.randn(
-        _ROWS, q_heads, _HEAD_DIM, dtype=torch.bfloat16, device=device
-    ).contiguous()
+    case = _long_case(rows=rows, cols=cols, holes=holes)
+    num_splits, block_n = _launch_config(rows)[0], _launch_config(rows)[1]
+    # Holey rows are scanned in full (NCOLS), prefix rows stop at seq_lens.
+    ncols = cols if holes else min(int(case["seq_lens"].max()), cols)
+    assert (
+        num_splits > 1 and _nonempty_splits(ncols, num_splits, block_n) >= 4
+    ), f"rows={rows} cols={cols}: {num_splits} splits x {block_n} merges nothing"
+    q = torch.randn(rows, q_heads, _HEAD_DIM, dtype=torch.bfloat16, device=device)
     k_buffer = torch.randn(case["n_slots"], kv_heads, _HEAD_DIM, device=device).to(
         torch.float8_e4m3fn
     )
@@ -377,85 +513,213 @@ def test_kernel_matches_reference_over_fp8_kv(prefix_valid, kv_heads, q_heads):
         topk_indices=case["topk_indices"].to(device),
         seq_lens=case["seq_lens"].to(device),
         sm_scale=1.0 / (_HEAD_DIM**0.5),
-        prefix_valid=prefix_valid,
+        prefix_valid=not holes,
     )
+    expected = _reference_attention(q, k_buffer, v_buffer, case)
+    assert torch.count_nonzero(expected) > 0, "case is vacuously zero"
     workspace = QSADecodeAttnWorkspace(
         num_kv_heads=kv_heads, head_dim=_HEAD_DIM, device=device
     )
-    expected = _reference_attention(
-        q,
-        k_buffer,
-        v_buffer,
-        {k: (v.cpu() if torch.is_tensor(v) else v) for k, v in case.items()},
-    )
     for _ in range(2):
         out = qsa_decode_attention(workspace=workspace, **args)
-        assert out.shape == q.shape
+        assert out.shape == q.shape and out.dtype == q.dtype
         torch.testing.assert_close(out.float(), expected.float(), rtol=2e-2, atol=2e-3)
+        # The last arriver must hand its counters back empty for the next call.
+        assert torch.count_nonzero(workspace.arrivals) == 0
 
 
 @_CUDA
-def test_launches_leave_the_arrival_counters_zeroed():
-    """Replay safety: each launch hands its counters back at zero and the
-    combine is deterministic across launches."""
+def test_finite_bf16_queries_above_the_f16_max_stay_finite():
+    """The QK MMA consumes Q as BF16.  Casting it (and E4M3 K) to F16 overflowed
+    a finite query above 65504 to Inf, and Inf - Inf then NaN'ed the softmax
+    where the resident BF16 path stays finite; the fp32 accumulation of such
+    huge scores still has to agree with the reference.
+    """
+    torch.manual_seed(0)
     device = "cuda"
-    tensors = _measured_shape(rows=5)
+    rows = 4
+    case = _long_case(rows=rows, cols=_TOPK_COLS, holes=False)
+    q = torch.full(
+        (rows, _Q_HEADS, _HEAD_DIM), 65536.0, dtype=torch.bfloat16, device=device
+    )
+    q[1] = -65536.0
+    q[2] = 1.0e30  # finite in BF16, Inf in F16; scores stay inside fp32 range
+    q[3] = 131072.0
+    assert float(q.abs().max()) > torch.finfo(torch.float16).max
+    assert torch.isfinite(q.float()).all()
+    k_buffer = torch.randn(case["n_slots"], _KV_HEADS, _HEAD_DIM, device=device).to(
+        torch.float8_e4m3fn
+    )
+    v_buffer = torch.randn(case["n_slots"], _KV_HEADS, _HEAD_DIM, device=device).to(
+        torch.float8_e4m3fn
+    )
+    workspace = QSADecodeAttnWorkspace(
+        num_kv_heads=_KV_HEADS, head_dim=_HEAD_DIM, device=device
+    )
+    out = qsa_decode_attention(
+        q=q,
+        k_buffer=k_buffer,
+        v_buffer=v_buffer,
+        req_to_token=case["req_to_token"].to(device),
+        row_req_pool_indices=case["row_req_pool_indices"].to(device),
+        topk_indices=case["topk_indices"].to(device),
+        seq_lens=case["seq_lens"].to(device),
+        sm_scale=1.0 / (_HEAD_DIM**0.5),
+        workspace=workspace,
+        prefix_valid=True,
+    )
+    assert torch.isfinite(out.float()).all(), "finite BF16 Q produced Inf/NaN"
+    expected = _reference_attention(q, k_buffer, v_buffer, case)
+    torch.testing.assert_close(out.float(), expected.float(), rtol=2e-2, atol=2e-3)
+
+
+@_CUDA
+def test_launches_are_deterministic_and_leave_the_arrival_counters_zeroed():
+    """Replay safety with real traffic: non-zero results (an all-zero output
+    would pass any equality check), bit-stable across launches, and the arrival
+    counters back at zero after every one."""
+    torch.manual_seed(0)
+    device = "cuda"
+    rows = 8
+    case = _long_case(rows=rows, cols=_TOPK_COLS, holes=False)
+    q = torch.randn(rows, _Q_HEADS, _HEAD_DIM, dtype=torch.bfloat16, device=device)
     args = dict(
-        q=tensors["q"].to(device),
-        k_buffer=tensors["k_buffer"].to(device),
-        v_buffer=tensors["v_buffer"].to(device),
-        req_to_token=torch.zeros(8, 64, dtype=torch.int32, device=device),
-        row_req_pool_indices=torch.zeros(5, dtype=torch.int32, device=device),
-        topk_indices=tensors["topk_indices"].to(device),
-        seq_lens=torch.full((5,), 32, dtype=torch.int32, device=device),
-        sm_scale=0.0625,
+        q=q,
+        k_buffer=torch.randn(case["n_slots"], _KV_HEADS, _HEAD_DIM, device=device).to(
+            torch.float8_e4m3fn
+        ),
+        v_buffer=torch.randn(case["n_slots"], _KV_HEADS, _HEAD_DIM, device=device).to(
+            torch.float8_e4m3fn
+        ),
+        req_to_token=case["req_to_token"].to(device),
+        row_req_pool_indices=case["row_req_pool_indices"].to(device),
+        topk_indices=case["topk_indices"].to(device),
+        seq_lens=case["seq_lens"].to(device),
+        sm_scale=1.0 / (_HEAD_DIM**0.5),
         prefix_valid=True,
     )
     workspace = QSADecodeAttnWorkspace(
         num_kv_heads=_KV_HEADS, head_dim=_HEAD_DIM, device=device
     )
     first = qsa_decode_attention(workspace=workspace, **args)
+    assert torch.count_nonzero(first) > 0
     assert torch.count_nonzero(workspace.arrivals) == 0
     assert torch.equal(first, qsa_decode_attention(workspace=workspace, **args))
     assert torch.count_nonzero(workspace.arrivals) == 0
 
 
 @_CUDA
-def test_workspace_survives_capture_and_replay_of_the_decode_graph():
-    """The graph bakes the workspace addresses: capture after the eager warmup,
-    replay many times, still get the eager result, counters back at zero."""
-    backend = _make_backend(triton_decode_attn=True)
+def test_graph_capture_replays_shared_tail_rows_workspace_and_counters():
+    """The production gate-on decode step end to end in one graph: the shared
+    index lookup (the valid-prefix compaction) and the split-KV kernel are both
+    recorded, so a replay re-derives the rows from the static buffers, keeps the
+    workspace addresses, and a CHANGED input must produce the new reference --
+    neither a stale write nor a skipped one can hide behind all-zero output.
+    """
+    torch.manual_seed(0)
     device = "cuda"
-    rows = 4
-    tensors = _measured_shape(rows=rows)
-    backend.req_to_token_pool = SimpleNamespace(
-        req_to_token=torch.zeros(8, 64, dtype=torch.int32, device=device)
+    rows, token_topk, tail_width = 4, 2048, 3
+    cols = token_topk + tail_width
+    state = _make_state(
+        True,
+        num_requests=8,
+        tail_width=tail_width,
+        token_topk=token_topk,
+        device=device,
     )
+    reqs = torch.tensor([1, 2, 3, 5], dtype=torch.int32, device=device)
+    widths = [token_topk - 7 * row for row in range(rows)]
+    frozen = torch.full((rows, cols), -1, dtype=torch.int32, device=device)
+    for row in range(rows):
+        frozen[row, : widths[row]] = torch.arange(widths[row], dtype=torch.int32)
+    # A -1 padded frozen row plus a drafted tail: the legacy layout would hide the
+    # tail behind up to tail_width holes, the prefix layout puts it at widths[row].
+    state.capture(
+        frozen, reqs, torch.tensor(widths, dtype=torch.int32, device=device), 48
+    )
+    positions = torch.tensor(
+        [w + tail_width - 1 for w in widths], dtype=torch.int32, device=device
+    )
+    seq_lens = positions.clone() + 1
+    logical = torch.arange(cols, dtype=torch.int32, device=device)
+    req_to_token = (
+        torch.arange(9, dtype=torch.int32, device=device)[:, None] * 3
+        + 2 * logical[None, :]
+        + 1
+    ).contiguous()
+    k_buffer = torch.randn(
+        int(req_to_token.max()) + 1, _KV_HEADS, _HEAD_DIM, device=device
+    ).to(torch.float8_e4m3fn)
+    v_buffer = torch.randn(
+        int(req_to_token.max()) + 1, _KV_HEADS, _HEAD_DIM, device=device
+    ).to(torch.float8_e4m3fn)
+    q = torch.randn(rows, _Q_HEADS, _HEAD_DIM, dtype=torch.bfloat16, device=device)
+    backend = _make_backend(triton_decode_attn=True, state=state)
+    backend.req_to_token_pool = SimpleNamespace(req_to_token=req_to_token)
     kwargs = dict(
-        q=tensors["q"].to(device),
-        k_buffer=tensors["k_buffer"].to(device),
-        v_buffer=tensors["v_buffer"].to(device),
-        layer=SimpleNamespace(layer_id=48, scaling=0.0625),
+        q=q,
+        k_buffer=k_buffer,
+        v_buffer=v_buffer,
+        layer=SimpleNamespace(layer_id=48, scaling=1.0 / (_HEAD_DIM**0.5)),
         forward_batch=SimpleNamespace(
-            forward_mode=ForwardMode.DECODE,
-            req_pool_indices=torch.arange(rows, dtype=torch.int32, device=device),
+            forward_mode=ForwardMode.DECODE, req_pool_indices=reqs
         ),
-        metadata=SimpleNamespace(
-            sequence_lengths=torch.full((rows,), 32, dtype=torch.int32, device=device),
-            row_req_pool_indices=torch.arange(rows, dtype=torch.int32, device=device),
-        ),
-        topk_indices=tensors["topk_indices"].to(device),
+        metadata=SimpleNamespace(sequence_lengths=seq_lens, row_req_pool_indices=reqs),
     )
-    eager = QwenSparseAttnBackend._forward_triton_decode(backend, **kwargs)
+
+    def call():
+        # Lookup inside the capture: the compaction itself must be recordable.
+        return QwenSparseAttnBackend._forward_triton_decode(
+            backend, topk_indices=state.lookup(reqs, positions, 48), **kwargs
+        )
+
+    def expect():
+        return _reference_attention(
+            q,
+            k_buffer,
+            v_buffer,
+            {
+                "req_to_token": req_to_token.cpu(),
+                "topk_indices": state.lookup(reqs, positions, 48).cpu(),
+                "seq_lens": seq_lens.cpu(),
+                "row_req_pool_indices": reqs.cpu(),
+            },
+        )
+
+    eager = call()  # the eager warmup owns the workspace the graph then bakes in
     workspace = backend._decode_attn_workspace
+    assert workspace is not None and torch.count_nonzero(eager) > 0
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        captured = QwenSparseAttnBackend._forward_triton_decode(backend, **kwargs)
-    for _ in range(8):
+        captured = call()
+    for _ in range(4):
         graph.replay()
     torch.cuda.synchronize()
     assert backend._decode_attn_workspace is workspace
-    assert torch.equal(eager, captured)
+    torch.testing.assert_close(captured.float(), expect().float(), rtol=2e-2, atol=2e-3)
+    assert torch.equal(captured, eager)
+
+    # Change the rows behind the replay: one fewer drafted token per row and a
+    # different frozen set.  The replay must follow, not repeat the old output.
+    positions.copy_(positions - 1)
+    seq_lens.copy_(seq_lens - 1)
+    stale = captured.clone()
+    frozen.fill_(-1)
+    for row in range(rows):
+        # A different (half-size, even-position) frozen set: the compaction
+        # boundary moves, so the tail must move with it.
+        frozen[row, : widths[row] // 2] = 2 * torch.arange(
+            widths[row] // 2, dtype=torch.int32, device=device
+        )
+    state.capture(
+        frozen, reqs, torch.tensor(widths, dtype=torch.int32, device=device), 48
+    )
+    for _ in range(2):
+        graph.replay()
+    torch.cuda.synchronize()
+    assert not torch.equal(captured, stale), "replay kept the previous output"
+    torch.testing.assert_close(captured.float(), expect().float(), rtol=2e-2, atol=2e-3)
+    assert torch.count_nonzero(captured) > 0
     assert torch.count_nonzero(workspace.arrivals) == 0
 
 
