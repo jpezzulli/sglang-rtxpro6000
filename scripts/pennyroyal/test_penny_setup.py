@@ -585,7 +585,8 @@ class SetupSessionTests(FixtureMixin):
             "",
             str(self.base / "ple-snap"),
             "",
-            "yes",
+            "yes",  # WSL2 host-memory workaround
+            "",
             "",
             "",
             "",
@@ -596,7 +597,7 @@ class SetupSessionTests(FixtureMixin):
             str(self.venv / "bin" / "python"),
         ]
         code, output, path = self.run_setup(
-            ["next"] + self.basics(str(self.next_model)) + ["y"] + advanced + ["y"]
+            [""] + self.basics(str(self.next_model)) + ["y"] + advanced + ["y"]
         )
         self.assertEqual(code, 0, output)
         asked = output.split("Review")[0]
@@ -612,9 +613,11 @@ class SetupSessionTests(FixtureMixin):
             repo_root=self.repo,
         )
         self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "true")
-        # 'no' on the same menu is an explicit false, not a blank.
+        # 'no' on the same menu is an explicit false, not a blank. The save
+        # is a fresh timestamped sibling of the requested path, so the check
+        # reads the file the wizard itself says it Saved (via run_setup).
         code, output, path = self.run_setup(
-            ["next"]
+            [""]
             + self.basics(str(self.next_model))
             + ["y"]
             + advanced[:3]
@@ -624,10 +627,10 @@ class SetupSessionTests(FixtureMixin):
             config_path=self.base / "wsl2-off.env",
         )
         self.assertEqual(code, 0, output)
+        self.assertRegex(path.name, r"^wsl2-off-\d{8}T\d{6}(-\d+)?\.env$")
+        self.assertFalse((self.base / "wsl2-off.env").exists())
         self.assertEqual(
-            pc.read_env_file(self.base / "wsl2-off.env")[
-                "SGLANG_HICACHE_TORCH_PINNED_ALLOC"
-            ],
+            pc.read_env_file(path)["SGLANG_HICACHE_TORCH_PINNED_ALLOC"],
             "false",
         )
 
@@ -1272,8 +1275,9 @@ class SetupSessionTests(FixtureMixin):
             + self.basics(str(self.dense_model), draft=str(self.draft_model))
             + [
                 "y",  # yes to the advanced section
-                str(self.base / "ple-unused"),  # prepared snapshot path
+                str(self.base / "ple-unused"),  # junk: the FP8 menu rejects it
                 "false",  # online FP8
+                "false",  # WSL2 host-memory workaround
                 "true",  # unknown tools
                 "",  # build jobs
                 "/opt/nixl",  # NIXL prefix

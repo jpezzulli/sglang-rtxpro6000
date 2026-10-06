@@ -1746,6 +1746,69 @@ class ContainerPlanTests(FixtureMixin):
             {"HOST_MODELS_ROOT", "HOST_CACHE_BASE", "HOST_NIXL_STORAGE_BASE"},
         )
 
+    # --- WSL2 host-memory workaround (SGLANG_HICACHE_TORCH_PINNED_ALLOC) -----
+    # The manual compose path forwards this knob with ${VAR:-false}; the
+    # ordinary generated launch has to honour the same precedence and hand
+    # the value to docker itself (run.sh owns the -e forwarding), which the
+    # docker-stub suite proves reaches the launched container.
+
+    def test_saved_wsl2_flag_reaches_the_generated_container_environment(self):
+        plan = self.container_plan(
+            {**self.base_values(), "SGLANG_HICACHE_TORCH_PINNED_ALLOC": "true"},
+            environ={"SGLANG_HICACHE_TORCH_PINNED_ALLOC": "false"},
+        )
+        # The saved file wins over the inherited shell value...
+        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "true")
+        self.assertEqual(plan.forced_env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "true")
+        # ...and the generated run.sh forwards exactly that to the container.
+        run_sh = self.generated(plan)[self.base / "launch out" / "run.sh"]
+        self.assertIn("  -e SGLANG_HICACHE_TORCH_PINNED_ALLOC=true\n", run_sh)
+        self.assertIn(
+            "SGLANG_HICACHE_TORCH_PINNED_ALLOC=true", self.run_printed_command(plan)
+        )
+
+    def test_explicit_false_wsl2_flag_beats_an_inherited_true(self):
+        plan = self.container_plan(
+            {**self.base_values(), "SGLANG_HICACHE_TORCH_PINNED_ALLOC": "false"},
+            environ={"SGLANG_HICACHE_TORCH_PINNED_ALLOC": "true"},
+        )
+        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "false")
+        run_sh = self.generated(plan)[self.base / "launch out" / "run.sh"]
+        self.assertIn("  -e SGLANG_HICACHE_TORCH_PINNED_ALLOC=false\n", run_sh)
+        self.assertNotIn("  -e SGLANG_HICACHE_TORCH_PINNED_ALLOC=true\n", run_sh)
+        self.assertIn(
+            "SGLANG_HICACHE_TORCH_PINNED_ALLOC=false", self.run_printed_command(plan)
+        )
+
+    def test_unset_wsl2_flag_keeps_the_inherited_value_or_the_off_default(self):
+        # Not saved at all: the inherited value is carried to the container.
+        plan = self.container_plan(
+            self.base_values(), environ={"SGLANG_HICACHE_TORCH_PINNED_ALLOC": "true"}
+        )
+        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "true")
+        run_sh = self.generated(plan)[self.base / "launch out" / "run.sh"]
+        self.assertIn("  -e SGLANG_HICACHE_TORCH_PINNED_ALLOC=true\n", run_sh)
+        # Nothing saved and nothing inherited: the documented off default.
+        plan = self.container_plan(self.base_values())
+        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "false")
+        self.assertEqual(
+            plan.origins["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "utility default"
+        )
+        run_sh = self.generated(plan)[self.base / "launch out" / "run.sh"]
+        self.assertIn("  -e SGLANG_HICACHE_TORCH_PINNED_ALLOC=false\n", run_sh)
+
+    def test_saved_blank_wsl2_flag_resets_to_off_and_suppresses_the_shell(self):
+        plan = self.container_plan(
+            {**self.base_values(), "SGLANG_HICACHE_TORCH_PINNED_ALLOC": ""},
+            environ={"SGLANG_HICACHE_TORCH_PINNED_ALLOC": "true"},
+        )
+        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "false")
+        self.assertIn(
+            "documented default", plan.origins["SGLANG_HICACHE_TORCH_PINNED_ALLOC"]
+        )
+        run_sh = self.generated(plan)[self.base / "launch out" / "run.sh"]
+        self.assertIn("  -e SGLANG_HICACHE_TORCH_PINNED_ALLOC=false\n", run_sh)
+
 
 class ContainerLaunchGenerationTests(FixtureMixin):
     """The generated files, and the disk-tier choice that has to agree in both.
@@ -2203,52 +2266,6 @@ class NativeDiskTierPlanTests(FixtureMixin):
             "#SGLANG_HICACHE_TORCH_PINNED_ALLOC=false",
             (ROOT / "docker/pennyroyal/.env.example").read_text(),
         )
-
-    def test_saved_wsl2_flag_reaches_the_rendered_container_environment(self):
-        plan = self.container_plan(
-            {**self.base_values(), "SGLANG_HICACHE_TORCH_PINNED_ALLOC": "true"},
-            environ={"SGLANG_HICACHE_TORCH_PINNED_ALLOC": "false"},
-        )
-        # The saved file wins over the inherited shell value.
-        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "true")
-        self.assertEqual(plan.forced_env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "true")
-        self.assertIn("SGLANG_HICACHE_TORCH_PINNED_ALLOC=true", plan.next_command)
-        rendered = self.run_printed_command(plan)
-        self.assertIn('SGLANG_HICACHE_TORCH_PINNED_ALLOC: "true"', rendered)
-
-    def test_explicit_false_wsl2_flag_beats_an_inherited_true(self):
-        plan = self.container_plan(
-            {**self.base_values(), "SGLANG_HICACHE_TORCH_PINNED_ALLOC": "false"},
-            environ={"SGLANG_HICACHE_TORCH_PINNED_ALLOC": "true"},
-        )
-        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "false")
-        self.assertIn(
-            'SGLANG_HICACHE_TORCH_PINNED_ALLOC: "false"', self.run_printed_command(plan)
-        )
-
-    def test_unset_wsl2_flag_keeps_the_inherited_value_or_the_off_default(self):
-        # Not saved at all: the inherited value is carried to the container.
-        plan = self.container_plan(
-            self.base_values(), environ={"SGLANG_HICACHE_TORCH_PINNED_ALLOC": "true"}
-        )
-        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "true")
-        self.assertIn(
-            'SGLANG_HICACHE_TORCH_PINNED_ALLOC: "true"', self.run_printed_command(plan)
-        )
-        # Nothing saved and nothing inherited: the documented off default.
-        plan = self.container_plan(self.base_values())
-        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "false")
-
-    def test_saved_blank_wsl2_flag_resets_to_off_and_suppresses_the_shell(self):
-        plan = self.container_plan(
-            {**self.base_values(), "SGLANG_HICACHE_TORCH_PINNED_ALLOC": ""},
-            environ={"SGLANG_HICACHE_TORCH_PINNED_ALLOC": "true"},
-        )
-        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "false")
-        self.assertIn(
-            "documented default", plan.origins["SGLANG_HICACHE_TORCH_PINNED_ALLOC"]
-        )
-
 
 class NewSaveTests(unittest.TestCase):
     """An explicit save creates NEW outputs or nothing; it never replaces."""
