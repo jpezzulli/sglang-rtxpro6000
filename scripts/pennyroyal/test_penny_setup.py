@@ -62,7 +62,7 @@ def printed_launch_dir(output: str) -> Path:
     """The launch directory named in the printed 'Start it with' command."""
     for line in output.splitlines():
         if line.startswith("Start it with: "):
-            parts = shlex.split(line[len("Start it with: "):])
+            parts = shlex.split(line[len("Start it with: ") :])
             return Path(parts[1])
     raise AssertionError(f"no printed start command in:\n{output}")
 
@@ -1333,9 +1333,7 @@ class SetupSessionTests(FixtureMixin):
         run_sh = (launch_dir / "run.sh").read_text()
         reloaded = pc.build_plan(
             "container",
-            pc.load_config(
-                "container", saved_settings(output), inherited, self.repo
-            ),
+            pc.load_config("container", saved_settings(output), inherited, self.repo),
             inherited,
             repo_root=self.repo,
         )

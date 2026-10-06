@@ -2310,9 +2310,7 @@ class NewSaveTests(unittest.TestCase):
                 self.assertRegex(name, r"^pennyroyal-\d{8}T\d{6}(?:-\d+)?\.env$")
                 self.assertLess(len(name), 40)
             for name in dir_names:
-                self.assertRegex(
-                    name, r"^pennyroyal-container-\d{8}T\d{6}(?:-\d+)?$"
-                )
+                self.assertRegex(name, r"^pennyroyal-container-\d{8}T\d{6}(?:-\d+)?$")
                 self.assertLess(len(name), 40)
             self.assertEqual(source.read_text(), "A=input\n")
             self.assertFalse(source.stat().st_mode & 0o111)
@@ -2356,9 +2354,7 @@ class NewSaveTests(unittest.TestCase):
             self.assertEqual(kept.stat().st_mode & 0o777, 0o640)
             self.assertFalse(fresh.exists())
             self.assertFalse((root / "launch").exists())
-            self.assertEqual(
-                sorted(p.name for p in root.iterdir()), ["pennyroyal.env"]
-            )
+            self.assertEqual(sorted(p.name for p in root.iterdir()), ["pennyroyal.env"])
 
     def test_a_failed_write_removes_only_what_this_save_created(self):
         # ENOSPC on the last fsync: every NEW file of this save goes again

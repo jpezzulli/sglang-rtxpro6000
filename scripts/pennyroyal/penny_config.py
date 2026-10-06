@@ -603,9 +603,7 @@ def create_new_files(
             if path.exists():
                 raise ConfigError(f"refusing to replace {path}")
             mode = (
-                0o600
-                if path in private
-                else (0o755 if path.suffix == ".sh" else 0o644)
+                0o600 if path in private else (0o755 if path.suffix == ".sh" else 0o644)
             )
             try:
                 handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
