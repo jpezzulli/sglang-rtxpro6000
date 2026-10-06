@@ -9,16 +9,23 @@
 # cbe20cc00073a4363e988ab67f9b93ee62265b25, full snapshot
 # 5105985116eb00dea8e6138aabeb5363387cb9de.
 #
-# Two deliberate deviations from the donor kernel:
+# Four deliberate deviations from the donor kernel:
 #   - Programmatic Dependent Launch is dropped (this tree has no
 #     sglang.kernels.triton_pdl): ordinary Triton launches only, no PDL
 #     constexpr, no launch_pdl, so nothing depends on a guessed overlap.
-#   - The shared-tail valid-prefix layout it assumes is built here by
-#     QSAMTPSharedSparseIndices, not by the donor's ST1 lookup kernels.
+#   - The donor folds each split's normalization into one lse (m + log2(l)) and
+#     masks dropped columns with -1e30. Both lose at the large finite scores this
+#     range allows: log2(l) rounds away inside m, so the combine weighted splits
+#     equally instead of by their columns, and a legitimate score below -1e30 was
+#     indistinguishable from a masked one. Each split now keeps m and l separately
+#     and masked columns are -inf, with the empty block/split/row cases handled
+#     explicitly so no inf-inf subtraction ever appears.
 #   - Q and K are not cast to F16 for the QK MMA: a finite BF16 query above the
 #     F16 max (~65504) would become Inf and NaN the softmax, while the resident
 #     BF16 path stays finite. The QK MMA runs on BF16 (E4M3 K converts exactly),
 #     the P/V MMA keeps the donor's F16 path (P <= 1, E4M3 V <= 448).
+#   - The shared-tail valid-prefix layout it assumes is built here by
+#     QSAMTPSharedSparseIndices, not by the donor's ST1 lookup kernels.
 """Split-KV Triton decode attention over QSA sparse top-k rows.
 
 Opt-in replacement (SGLANG_OPT_TRITON_DECODE_ATTN) for the valid-count, KV
@@ -33,9 +40,10 @@ Grid (splits, kv heads, rows). A program covers one contiguous column chunk for
 one kv head and all of its query heads (padded to 16 MMA rows): a BF16 QK MMA on
 e4m3 K (exact conversion, query exponent range preserved) and an F16 P/V MMA on
 e4m3 V (exact conversion), both with fp32 accumulation. Each program stores its
-partial (acc / l in f16, lse = m + log2(l) in fp32); the last arriver per
-(row, kv head), found with one acq_rel atomic, combines the partials in split
-order and resets its counter to 0. The result is deterministic, and the
+partial (acc / l in f16, plus its own fp32 normalization sum l and maximum m);
+the last arriver per (row, kv head), found with one acq_rel atomic, combines the
+partials in split order with weights l_s * exp2(m_s - max m) and resets its
+counter to 0. The result is deterministic, and the
 counters are zero again after every launch (CUDA graph replay safe).
 """
 
@@ -85,7 +93,8 @@ def _e4m3_to_f16(x):
 @triton.jit
 def _combine_splits(
     partial_out_ptr,
-    partial_lse_ptr,
+    partial_l_ptr,
+    partial_max_ptr,
     out_ptr,
     grp,
     offs_h,
@@ -96,23 +105,30 @@ def _combine_splits(
     D: tl.constexpr,
     NUM_SPLITS: tl.constexpr,
 ):
-    # Per-split lse loads land in the row slice of the [heads, D] layout:
-    # the combine needs no smem and no barrier. Empty splits carry -1e30.
-    lse_max = tl.full([BLOCK_H], -1.0e30, tl.float32)
+    # The per-split max and normalization sum are separate loads (they land in the
+    # row slice of the [heads, D] layout, so the combine needs no smem and no
+    # barrier). They are kept apart on purpose: at large finite scores
+    # log2(l) ~ 7 vanishes inside m + log2(l) ~ 2e31, so a stored lse would be the
+    # same for every split and the combine would weight splits by 1/NUM_SPLITS
+    # instead of by the columns they hold. An empty split has m = -inf and l == 0,
+    # which makes its weight 0 without an inf-inf subtraction (m_safe is finite).
+    m_max = tl.full([BLOCK_H], -float("inf"), tl.float32)
     for s in tl.static_range(NUM_SPLITS):
-        lse = tl.load(
-            partial_lse_ptr + (grp * NUM_SPLITS + s) * BLOCK_H + offs_h,
-            cache_modifier=".cg",
+        m_max = tl.maximum(
+            m_max,
+            tl.load(
+                partial_max_ptr + (grp * NUM_SPLITS + s) * BLOCK_H + offs_h,
+                cache_modifier=".cg",
+            ),
         )
-        lse_max = tl.maximum(lse_max, lse)
+    m_safe = tl.where(m_max == -float("inf"), 0.0, m_max)
     den = tl.zeros([BLOCK_H], tl.float32)
     o = tl.zeros([BLOCK_H, D], tl.float32)
     for s in tl.static_range(NUM_SPLITS):
         part = grp * NUM_SPLITS + s
-        w = tl.exp2(
-            tl.load(partial_lse_ptr + part * BLOCK_H + offs_h, cache_modifier=".cg")
-            - lse_max
-        )
+        m_s = tl.load(partial_max_ptr + part * BLOCK_H + offs_h, cache_modifier=".cg")
+        l_s = tl.load(partial_l_ptr + part * BLOCK_H + offs_h, cache_modifier=".cg")
+        w = l_s * tl.exp2(m_s - m_safe)
         den += w
         o_s = tl.load(
             partial_out_ptr + (part * BLOCK_H + offs_h)[:, None] * D + offs_d[None, :],
@@ -121,7 +137,7 @@ def _combine_splits(
             cache_modifier=".cg",
         )
         o += o_s.to(tl.float32) * w[:, None]
-    o = o / den[:, None]
+    o = o / tl.where(den > 0, den, 1.0)[:, None]
     tl.store(
         out_ptr + (grp * GROUP + offs_h)[:, None] * D + offs_d[None, :],
         o.to(out_ptr.dtype.element_ty),
@@ -136,7 +152,8 @@ def _store_split(
     l_i,
     out_ptr,
     partial_out_ptr,
-    partial_lse_ptr,
+    partial_l_ptr,
+    partial_max_ptr,
     arrivals_ptr,
     grp,
     sid,
@@ -160,14 +177,17 @@ def _store_split(
             mask=hmask[:, None],
             cache_modifier=".cg",
         )
-        lse = tl.where(l_i > 0, m_i + tl.log2(tl.where(l_i > 0, l_i, 1.0)), -1.0e30)
-        tl.store(partial_lse_ptr + part * BLOCK_H + offs_h, lse, cache_modifier=".cg")
+        # Raw max and raw normalization sum, NOT a folded lse (see
+        # _combine_splits); m_i is already in log2 units via qk_scale.
+        tl.store(partial_l_ptr + part * BLOCK_H + offs_h, l_i, cache_modifier=".cg")
+        tl.store(partial_max_ptr + part * BLOCK_H + offs_h, m_i, cache_modifier=".cg")
         tl.debug_barrier()
         arrived = tl.atomic_add(arrivals_ptr + grp, 1, sem="acq_rel", scope="gpu")
         if arrived == NUM_SPLITS - 1:
             _combine_splits(
                 partial_out_ptr,
-                partial_lse_ptr,
+                partial_l_ptr,
+                partial_max_ptr,
                 out_ptr,
                 grp,
                 offs_h,
@@ -192,7 +212,8 @@ def _qsa_decode_attn_kernel(
     req_to_token_ptr,
     row_req_ptr,
     partial_out_ptr,
-    partial_lse_ptr,
+    partial_l_ptr,
+    partial_max_ptr,
     arrivals_ptr,
     qk_scale,
     topk_stride,
@@ -234,7 +255,7 @@ def _qsa_decode_attn_kernel(
     start = sid * chunk
     end = tl.minimum(start + chunk, ncols)
 
-    m_i = tl.full([BLOCK_H], -1.0e30, tl.float32)
+    m_i = tl.full([BLOCK_H], -float("inf"), tl.float32)
     l_i = tl.zeros([BLOCK_H], tl.float32)
     acc = tl.zeros([BLOCK_H, D], tl.float32)
     for n0 in range(start, end, BLOCK_N):
@@ -259,10 +280,18 @@ def _qsa_decode_attn_kernel(
             )
         else:
             s = tl.dot(q, tl.trans(k))
-        s = tl.where(valid[None, :], s * qk_scale, -1.0e30)
+        # Masked columns are -inf, not a finite sentinel: a legitimate score below
+        # -1e30 (a huge finite query against a negative key) would lose to the
+        # sentinel and be dropped from the softmax altogether.
+        s = tl.where(valid[None, :], s * qk_scale, -float("inf"))
         m_new = tl.maximum(m_i, tl.max(s, 1))
-        alpha = tl.exp2(m_i - m_new)
-        p = tl.where(valid[None, :], tl.exp2(s - m_new[:, None]), 0.0)
+        # A row that has seen no valid column yet has m_new = -inf. m_safe keeps
+        # every subtraction finite (no inf-inf NaN in either arm of the select);
+        # alpha == 1 then leaves the empty partials alone, and exp2(-inf) == 0
+        # contributes nothing.
+        m_safe = tl.where(m_new == -float("inf"), 0.0, m_new)
+        alpha = tl.where(m_new == -float("inf"), 1.0, tl.exp2(m_i - m_safe))
+        p = tl.exp2(s - m_safe[:, None])
         l_i = l_i * alpha + tl.sum(p, 1)
         acc = acc * alpha[:, None]
         if F32_DOT:
@@ -277,7 +306,8 @@ def _qsa_decode_attn_kernel(
         l_i,
         out_ptr,
         partial_out_ptr,
-        partial_lse_ptr,
+        partial_l_ptr,
+        partial_max_ptr,
         arrivals_ptr,
         grp,
         sid,
@@ -306,7 +336,11 @@ def _launch_config(rows: int):
 class QSADecodeAttnWorkspace:
     """Split partials plus per-(row, kv head) arrival counters (zero between calls).
 
-    Fixed size for any row count: about 3 MB for 2 kv heads x 256.
+    Fixed size for any row count: about 3 MB for 2 kv heads x 256. The per-split
+    fields are the normalized partial output, its normalization sum and its
+    maximum (never a folded lse, see _combine_splits); all three are written by
+    every split before the last arriver reads them, so their initial content is
+    irrelevant -- only the arrival counters must start at zero.
 
     Owned by the QwenSparseAttnBackend that launches the kernel, created on its
     first eager (warmup) call and never re-created: the partial and counter
@@ -322,7 +356,12 @@ class QSADecodeAttnWorkspace:
         self.partial_out = torch.empty(
             self.max_parts * _BLOCK_H * head_dim, dtype=torch.float16, device=device
         )
-        self.partial_lse = torch.empty(
+        # Per-split normalization sum and maximum, kept as separate fp32 fields so
+        # the combine can weight splits by population as well as by score.
+        self.partial_l = torch.empty(
+            self.max_parts * _BLOCK_H, dtype=torch.float32, device=device
+        )
+        self.partial_max = torch.empty(
             self.max_parts * _BLOCK_H, dtype=torch.float32, device=device
         )
         self.arrivals = torch.zeros(self.max_parts, dtype=torch.int32, device=device)
@@ -394,7 +433,8 @@ def qsa_decode_attention(
         req_to_token,
         row_req_pool_indices,
         workspace.partial_out,
-        workspace.partial_lse,
+        workspace.partial_l,
+        workspace.partial_max,
         workspace.arrivals,
         sm_scale * _LOG2E,
         topk_indices.stride(0),

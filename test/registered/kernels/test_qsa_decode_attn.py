@@ -7,6 +7,8 @@ itself need SM120 hardware: they are prepared here and skipped without it.
 """
 
 import math
+import os
+import subprocess
 import sys
 from types import SimpleNamespace
 from unittest import mock
@@ -218,8 +220,12 @@ def test_workspace_holds_every_partial_and_starts_zeroed():
     assert workspace.max_parts == _MAX_ROW_SPLITS * _KV_HEADS
     assert workspace.partial_out.shape == (workspace.max_parts * _BLOCK_H * _HEAD_DIM,)
     assert workspace.partial_out.dtype == torch.float16
-    assert workspace.partial_lse.shape == (workspace.max_parts * _BLOCK_H,)
-    assert workspace.partial_lse.dtype == torch.float32
+    # The combine reads the normalization sum and the maximum of every split, so
+    # they are separate fields -- a folded lse cannot express per-split weight.
+    for name in ("partial_l", "partial_max"):
+        field = getattr(workspace, name)
+        assert field.shape == (workspace.max_parts * _BLOCK_H,), name
+        assert field.dtype == torch.float32, name
     # The kernel re-zeroes its own counters, so a non-zero counter at entry can
     # only mean a previous launch died mid-flight.
     assert workspace.arrivals.shape == (workspace.max_parts,)
@@ -526,6 +532,186 @@ def test_kernel_matches_reference_at_the_measured_width(
         torch.testing.assert_close(out.float(), expected.float(), rtol=2e-2, atol=2e-3)
         # The last arriver must hand its counters back empty for the next call.
         assert torch.count_nonzero(workspace.arrivals) == 0
+
+
+# --- split-normalization contract (device-parameterised) ------------------
+
+# Triton's interpreter runs the real kernel body on CPU; the mode is read when
+# triton is imported, so the checks below run in a child process.
+_INTERPRET_MODE = os.environ.get("TRITON_INTERPRET") == "1"
+
+
+def _check_equal_population_split_combine(device):
+    """Identical keys tie every selected score, so the softmax is exactly uniform
+    and the answer is the fraction of selected columns carrying V=1. A combine
+    that weights SPLITS instead of columns -- what a stored lse becomes once
+    log2(l) rounds away inside m -- returns 1/22 here instead of 35/2051.
+    """
+    rows, cols, tail = 1, 2051, 35
+    kv_heads, q_heads = 2, 4
+    num_splits, block_n = _launch_config(rows)[0], _launch_config(rows)[1]
+    chunk = math.ceil(math.ceil(cols / num_splits) / block_n) * block_n
+    assert _nonempty_splits(cols, num_splits, block_n) == num_splits, num_splits
+    # 21 full splits and one 35-column split: the populations really differ.
+    assert (num_splits - 1) * chunk == cols - tail, (num_splits, chunk)
+    logical = torch.arange(cols, dtype=torch.int32)
+    req_to_token = logical.unsqueeze(0).repeat(2, 1).contiguous()
+    topk_indices = logical.unsqueeze(0).clone()
+    seq_lens = torch.full((rows,), cols, dtype=torch.int32)
+    row_reqs = torch.zeros(rows, dtype=torch.int32)
+    k_buffer = torch.ones(cols, kv_heads, _HEAD_DIM).to(torch.float8_e4m3fn)
+    v_dense = torch.zeros(cols, kv_heads, _HEAD_DIM)
+    v_dense[cols - tail :] = 1.0
+    v_buffer = v_dense.to(torch.float8_e4m3fn)
+    q = torch.full(
+        (rows, q_heads, _HEAD_DIM), 1.0e30, dtype=torch.bfloat16, device=device
+    )
+    workspace = QSADecodeAttnWorkspace(
+        num_kv_heads=kv_heads, head_dim=_HEAD_DIM, device=device
+    )
+    out = qsa_decode_attention(
+        q=q,
+        k_buffer=k_buffer.to(device),
+        v_buffer=v_buffer.to(device),
+        req_to_token=req_to_token.to(device),
+        row_req_pool_indices=row_reqs.to(device),
+        topk_indices=topk_indices.to(device),
+        seq_lens=seq_lens.to(device),
+        sm_scale=1.0 / (_HEAD_DIM**0.5),
+        workspace=workspace,
+        prefix_valid=True,
+    )
+    assert torch.isfinite(out.float()).all()
+    expected = torch.full(out.shape, tail / cols, dtype=torch.float32, device=device)
+    # Tight enough that the split-weighted 1/22 answer cannot pass.
+    torch.testing.assert_close(out.float(), expected, rtol=1e-2, atol=2e-3)
+    torch.testing.assert_close(
+        out.float(),
+        _reference_attention(
+            q,
+            k_buffer.to(device),
+            v_buffer.to(device),
+            {
+                "req_to_token": req_to_token,
+                "topk_indices": topk_indices,
+                "seq_lens": seq_lens,
+                "row_req_pool_indices": row_reqs,
+            },
+        ).float(),
+        rtol=1e-2,
+        atol=2e-3,
+    )
+    assert torch.count_nonzero(workspace.arrivals) == 0
+
+
+def _check_negative_finite_scores_survive(device):
+    """Q=1e30 against K=-1 at scale 1/16 gives log2 scores near -2.3e31, i.e.
+    below the -1e30 the masking used to wear: the row must still average to V
+    (= 1.0), while a row with nothing selected stays exactly 0, never NaN.
+    """
+    rows, cols = 2, 2051
+    kv_heads, q_heads = 2, 4
+    selected = 128
+    logical = torch.arange(cols, dtype=torch.int32)
+    req_to_token = logical.unsqueeze(0).repeat(2, 1).contiguous()
+    topk_indices = torch.full((rows, cols), -1, dtype=torch.int32)
+    topk_indices[0, :selected] = logical[:selected]
+    seq_lens = torch.tensor([selected, 8], dtype=torch.int32)
+    row_reqs = torch.zeros(rows, dtype=torch.int32)
+    k_buffer = torch.full((cols, kv_heads, _HEAD_DIM), -1.0).to(torch.float8_e4m3fn)
+    v_buffer = torch.ones(cols, kv_heads, _HEAD_DIM).to(torch.float8_e4m3fn)
+    q = torch.full(
+        (rows, q_heads, _HEAD_DIM), 1.0e30, dtype=torch.bfloat16, device=device
+    )
+    workspace = QSADecodeAttnWorkspace(
+        num_kv_heads=kv_heads, head_dim=_HEAD_DIM, device=device
+    )
+    out = qsa_decode_attention(
+        q=q,
+        k_buffer=k_buffer.to(device),
+        v_buffer=v_buffer.to(device),
+        req_to_token=req_to_token.to(device),
+        row_req_pool_indices=row_reqs.to(device),
+        topk_indices=topk_indices.to(device),
+        seq_lens=seq_lens.to(device),
+        sm_scale=0.0625,
+        workspace=workspace,
+        prefix_valid=True,
+    )
+    assert torch.isfinite(out.float()).all(), "negative scores vanished"
+    torch.testing.assert_close(
+        out[0].float(), torch.ones_like(out[0].float()), rtol=1e-2, atol=2e-3
+    )
+    assert torch.equal(out[1], torch.zeros_like(out[1])), "empty selection not zeroed"
+    assert torch.count_nonzero(workspace.arrivals) == 0
+
+
+@_CUDA
+def test_equal_population_split_combine_on_gpu():
+    _check_equal_population_split_combine("cuda")
+
+
+@_CUDA
+def test_negative_finite_scores_on_gpu():
+    _check_negative_finite_scores_survive("cuda")
+
+
+@pytest.mark.skipif(
+    not _INTERPRET_MODE, reason="runs inside the TRITON_INTERPRET child"
+)
+def test_interpret_contract_equal_population_split_combine():
+    _check_equal_population_split_combine("cpu")
+
+
+@pytest.mark.skipif(
+    not _INTERPRET_MODE, reason="runs inside the TRITON_INTERPRET child"
+)
+def test_interpret_contract_negative_finite_scores():
+    _check_negative_finite_scores_survive("cpu")
+
+
+@pytest.mark.skipif(_INTERPRET_MODE, reason="this is the interpreter child")
+def test_split_normalization_contract_runs_in_triton_interpreter():
+    """The split combine and the masked-score handling are pure kernel-body
+    arithmetic, so Triton's interpreter can check them without a GPU.  The mode
+    must be set before triton is imported, hence the child process; the kernel
+    still needs SM120 hardware for the MMA dtypes and the timing geometry."""
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        __file__,
+        "-k",
+        "interpret_contract",
+        "-q",
+        "--no-header",
+        "-p",
+        "no:cacheprovider",
+    ]
+    # Hand the child this process' import path: under CI sglang is installed and
+    # sys.executable finds it on its own, but a source checkout run (or a venv
+    # that is not the one pytest was started from) would otherwise lose it.
+    child_env = {**os.environ, "TRITON_INTERPRET": "1"}
+    inherited = [p for p in sys.path if p and os.path.isdir(p)]
+    if inherited:
+        existing = child_env.get("PYTHONPATH", "")
+        child_env["PYTHONPATH"] = os.pathsep.join(
+            [p for p in [*inherited, existing] if p]
+        )
+    try:
+        child = subprocess.run(
+            command,
+            env=child_env,
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+    except subprocess.TimeoutExpired as exc:  # pragma: no cover - hung build
+        raise AssertionError(f"triton interpreter child timed out: {exc}") from exc
+    assert child.returncode == 0, (
+        f"interpreter child failed ({child.returncode}):\n"
+        f"{child.stdout[-4000:]}\n{child.stderr[-2000:]}"
+    )
 
 
 @_CUDA
