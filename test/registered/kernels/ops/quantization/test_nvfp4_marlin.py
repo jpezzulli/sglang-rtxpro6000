@@ -1,8 +1,12 @@
+import math
+import os
 import sys
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import torch
+import torch.nn.functional as F
 from sgl_kernel.scalar_type import scalar_types
 
 from sglang.srt.layers.quantization.marlin_utils import check_marlin_supported
@@ -11,6 +15,7 @@ from sglang.srt.layers.quantization.marlin_utils_fp4 import (
     nvfp4_marlin_process_global_scale,
     prepare_nvfp4_layer_for_marlin,
 )
+from sglang.srt.speculative import proposal_head
 from sglang.srt.utils.common import (
     is_sm80_supported,
     is_sm90_supported,
@@ -19,8 +24,8 @@ from sglang.srt.utils.common import (
 from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.test_marlin_utils import make_nvfp4_weight_and_ref
 
-register_cuda_ci(est_time=6, stage="base-b", runner_config="1-gpu-large")
-register_cuda_ci(est_time=6, stage="base-b", runner_config="1-gpu-small")
+register_cuda_ci(est_time=60, stage="base-b", runner_config="1-gpu-large")
+register_cuda_ci(est_time=60, stage="base-b", runner_config="1-gpu-small")
 
 
 @pytest.mark.skipif(
@@ -94,6 +99,188 @@ def test_nvfp4_marlin_dense_matches_dequant_reference(dtype):
     torch.cuda.synchronize()
 
     torch.testing.assert_close(output, output_ref, rtol=0.04, atol=0.04)
+
+
+# ---------------------------------------------------------------------------
+# Optional FR-Spec proposal head (SGLANG_FR_SPEC_PROPOSAL_HEAD_PRECISION=nvfp4)
+#
+# Prepared, never run on a GPU yet: no speed or accept-rate claim comes out of
+# these checks, only the contract that the quantized proposal head is the Marlin
+# kernel's own dequantized weight, that it captures and replays, and that the
+# target's storage is what the verifier still reads.
+# ---------------------------------------------------------------------------
+
+# The pinned 65,536-ID FR-Spec map and the Flash-Next hidden width. Both are
+# exactly FP4/Marlin aligned, so the hot head must reach the kernel with no
+# padded rows/columns. Batch rows: 1 decode, 4/12/16 the W4 verify widths and
+# 24 C6's verification batch.
+HOT_ROWS = 65_536
+HOT_FEATURES = 2_560
+HOT_BATCH_ROWS = [1, 4, 12, 16, 24]
+PROPOSAL_HEAD_ENV = "SGLANG_FR_SPEC_PROPOSAL_HEAD_PRECISION"
+
+CUDA_MARLIN = is_sm80_supported() or is_sm90_supported() or is_sm120_supported()
+# Gated to the qualified part: the dense Marlin kernel itself also runs on
+# SM80/SM90 (covered by the two checks above), but the FlashInfer online-NVFP4
+# packer this feature uses is only as available as the fork's SM100/SM120 rule
+# allows, and FR-Spec is an SM120 profile.
+SM120_MARLIN = CUDA_MARLIN and is_sm120_supported()
+
+
+def _normalized_error(actual: torch.Tensor, expected: torch.Tensor):
+    assert actual.shape == expected.shape
+    actual_fp32 = actual.float()
+    expected_fp32 = expected.float()
+    error_rms = (actual_fp32 - expected_fp32).square().mean().sqrt().item()
+    reference_rms = expected_fp32.square().mean().sqrt().item()
+    cosine = F.cosine_similarity(
+        actual_fp32.flatten(), expected_fp32.flatten(), dim=0
+    ).item()
+    return error_rms / max(reference_rms, 1e-8), cosine
+
+
+@pytest.fixture(scope="module", params=["bf16", "rowwise_fp8"])
+def frspec_proposal_head(request):
+    """A draft lm_head prepared from a BF16 or an SM120 rowwise-FP8 head."""
+    from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+        dequantize_rowwise_weight,
+        replace_linear_weight_rowwise_fp8,
+        rowwise_scale_of,
+    )
+
+    generator = torch.Generator(device="cuda").manual_seed(7)
+    source = (
+        torch.randn(HOT_ROWS, HOT_FEATURES, generator=generator, device="cuda")
+        / math.sqrt(HOT_FEATURES)
+    ).to(torch.bfloat16)
+    # The target's own storage: the verifier reads this, so preparation must
+    # never rewrite it in place.
+    target_head = source.clone()
+    layer = torch.nn.Module()
+    if request.param == "rowwise_fp8":
+        linear = torch.nn.Linear(
+            HOT_FEATURES, HOT_ROWS, bias=False, dtype=torch.bfloat16, device="cuda"
+        )
+        linear.weight.data.copy_(source)
+        replace_linear_weight_rowwise_fp8(linear)
+        layer.weight = linear.weight
+        reference = dequantize_rowwise_weight(linear.weight)
+        source_scale = rowwise_scale_of(linear.weight)
+    else:
+        layer.weight = source.clone()
+        reference = source.clone()
+        source_scale = None
+
+    with mock.patch.dict(os.environ, {PROPOSAL_HEAD_ENV: "nvfp4"}):
+        prepared = proposal_head.prepare_nvfp4_proposal_head(
+            layer, shared_tensors=(target_head,)
+        )
+    assert prepared
+    return {
+        "layer": layer,
+        "reference": reference,
+        "target_head": target_head,
+        "source": source,
+        "source_dtype": request.param,
+        "source_scale": source_scale,
+    }
+
+
+@pytest.mark.skipif(
+    not SM120_MARLIN, reason="FR-Spec NVFP4 proposal head is an exact-SM120 path"
+)
+def test_frspec_proposal_head_is_prepared_without_touching_the_target(
+    frspec_proposal_head,
+) -> None:
+    head = frspec_proposal_head["layer"]
+    assert head.weight.dtype == torch.int32
+    assert head.quant_method.__class__.__name__ == "ModelOptNvFp4A16LinearMethod"
+    assert head.input_size_per_partition == HOT_FEATURES
+    assert head.output_size_per_partition == HOT_ROWS
+    assert head.params_dtype in (torch.bfloat16, torch.float16)
+    assert head.weight_global_scale.shape == (1,)
+    # The split-K workspace is fixed by the device's SM count, not the batch, so
+    # every captured graph shares one address and size.
+    assert head.workspace.numel() == (
+        torch.cuda.get_device_properties(head.workspace.device).multi_processor_count
+    )
+    # Proposal precision is not global precision: the target's resident head --
+    # the verifier -- still holds every row it started with.
+    torch.testing.assert_close(
+        frspec_proposal_head["target_head"], frspec_proposal_head["source"]
+    )
+    if frspec_proposal_head["source_dtype"] == "rowwise_fp8":
+        assert frspec_proposal_head["source_scale"].shape == (HOT_ROWS,)
+
+
+@pytest.mark.skipif(
+    not SM120_MARLIN, reason="FR-Spec NVFP4 proposal head is an exact-SM120 path"
+)
+@pytest.mark.parametrize("rows", HOT_BATCH_ROWS)
+def test_frspec_proposal_head_logits_and_proposals_track_the_reference(
+    frspec_proposal_head, rows: int
+) -> None:
+    head = frspec_proposal_head["layer"]
+    generator = torch.Generator(device="cuda").manual_seed(100 + rows)
+    hidden = (
+        torch.randn(rows, HOT_FEATURES, generator=generator, device="cuda") * 0.25
+    ).to(torch.bfloat16)
+
+    logits = head.quant_method.apply(head, hidden)
+    expected = hidden @ frspec_proposal_head["reference"].T
+
+    nrmse, cosine = _normalized_error(logits, expected)
+    # FP4 weight error shows up as ~the per-weight relative error on every
+    # logit; these floors are wide enough for the quantizer and tight enough
+    # that a mismatched group scale, global scale or packed row cannot pass.
+    assert nrmse <= 0.30, f"NRMSE {nrmse:.6f} exceeds 0.30"
+    assert cosine >= 0.95, f"cosine {cosine:.6f} is below 0.95"
+
+    # Proposal-rate proxy on synthetic hidden states (what the draft would hand
+    # the verifier): the argmax must still track the unquantized head. Recorded,
+    # not claimed -- real accept rates come from the authorized model run.
+    agreement = (logits.argmax(-1) == expected.argmax(-1)).float().mean().item()
+    print(
+        f"FR-Spec NVFP4 proposal head ({frspec_proposal_head['source_dtype']}, "
+        f"rows={rows}): nrmse={nrmse:.4f} cosine={cosine:.4f} "
+        f"top1_agreement={agreement:.4f}"
+    )
+    assert agreement >= 0.30, f"top-1 agreement {agreement:.4f} is below 0.30"
+
+
+@pytest.mark.skipif(
+    not SM120_MARLIN, reason="FR-Spec NVFP4 proposal head is an exact-SM120 path"
+)
+@pytest.mark.parametrize("rows", [1, 4, 24])
+def test_frspec_proposal_head_captures_and_replays(
+    frspec_proposal_head, rows: int
+) -> None:
+    head = frspec_proposal_head["layer"]
+    generator = torch.Generator(device="cuda").manual_seed(500 + rows)
+    hidden = (
+        torch.randn(rows, HOT_FEATURES, generator=generator, device="cuda") * 0.25
+    ).to(torch.bfloat16)
+    workspace_ptr = head.workspace.data_ptr()
+    weight_ptr = head.weight.data_ptr()
+
+    # JIT/compile and warm the allocator before capture, like the FP8 head does.
+    for _ in range(2):
+        eager = head.quant_method.apply(head, hidden)
+    torch.cuda.synchronize()
+    expected = eager.clone()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_output = head.quant_method.apply(head, hidden)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    nrmse, _ = _normalized_error(graph_output.clone(), expected)
+    assert nrmse <= 0.02, f"replayed NRMSE {nrmse:.6f} exceeds 0.02"
+    # Replay-safe workspace: allocated during preparation (before capture), so
+    # the graph never owns it and the counter buffer survives every replay.
+    assert head.workspace.data_ptr() == workspace_ptr
+    assert head.weight.data_ptr() == weight_ptr
 
 
 if __name__ == "__main__":

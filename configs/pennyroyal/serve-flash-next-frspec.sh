@@ -35,6 +35,30 @@ source "$SCRIPT_DIR/request-capacity.sh"
 source "$SCRIPT_DIR/reasoning-effort.sh"
 source "$SCRIPT_DIR/tp-devices.sh"
 
+# Optional proposal-only precision for the FR-Spec draft head; the target head
+# and the full-vocab verifier never change. off keeps the shared rowwise-FP8/
+# BF16 head, nvfp4 prepares the selected hot rows with the in-tree NVFP4 W4A16
+# Marlin machinery. Only this profile can carry the field, and the runtime
+# refuses a namespace whose pinned value disagrees with the running mode: a
+# derived root must not stay labelled unquantized while proposals come from FP4
+# storage, and an off run must not read a root derived for FP4 proposals.
+SGLANG_FR_SPEC_PROPOSAL_HEAD_PRECISION="${SGLANG_FR_SPEC_PROPOSAL_HEAD_PRECISION:-off}"
+export SGLANG_FR_SPEC_PROPOSAL_HEAD_PRECISION
+PROPOSAL_HEAD_NAMESPACE_ARGS=()
+case "$SGLANG_FR_SPEC_PROPOSAL_HEAD_PRECISION" in
+  off) ;;
+  nvfp4)
+    # Keep this literal in step with NVFP4_NAMESPACE_LABEL in
+    # python/sglang/srt/speculative/proposal_head.py.
+    PROPOSAL_HEAD_NAMESPACE_ARGS=(
+      --field "fr_spec_proposal_head_precision=nvfp4_w4a16_marlin")
+    ;;
+  *)
+    echo "SGLANG_FR_SPEC_PROPOSAL_HEAD_PRECISION must be off or nvfp4" >&2
+    exit 1
+    ;;
+esac
+
 # Pin the qualified map and tokenizer: a different ID mapping changes draft
 # proposals and must never silently reuse this representation's cache namespace.
 TOKEN_MAP="$SCRIPT_DIR/frspec/flash-next-64k.pt"
@@ -149,6 +173,7 @@ NIXL_STORAGE="$("$NAMESPACE_HELPER" \
   --field "speculative_eagle_topk=1" \
   --field "speculative_num_draft_tokens=4" \
   --field "speculative_draft_quantization=unquant" \
+  "${PROPOSAL_HEAD_NAMESPACE_ARGS[@]}" \
   --field "gdn_mtp_cache_mode=none" \
   --field "hicache_io_backend=kernel" \
   --field "hicache_mem_layout=page_first" \

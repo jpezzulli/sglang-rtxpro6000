@@ -298,6 +298,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         from sglang.srt.lora.layers import unwrap_lora_layer
 
         embed, head = self.target_worker.model_runner.model.get_embed_and_head()
+        target_head_weight = head
         target_lm_head = unwrap_lora_layer(
             getattr(self.target_worker.model_runner.model, "lm_head", None)
         )
@@ -368,6 +369,25 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             # Share the embedding and lm_head
             self.draft_runner.model.set_embed_and_head(embed, head)
             maybe_share_target_lm_head()
+            if self.hot_token_id is not None:
+                from sglang.srt.speculative.proposal_head import (
+                    nvfp4_proposal_head_enabled,
+                    prepare_nvfp4_proposal_head,
+                )
+
+                if nvfp4_proposal_head_enabled():
+                    # Opt-in, FR-Spec only (SGLANG_FR_SPEC_PROPOSAL_HEAD_PRECISION
+                    # =nvfp4): the draft now owns the selected rows, so they may
+                    # be re-stored below the verifier's precision. The target's
+                    # resident head and the shared embedding are named as owned
+                    # elsewhere and refuse the swap; the full target head still
+                    # verifies every proposal, so acceptance semantics, the
+                    # pinned map ids/order and the hot logits width do not move.
+                    prepare_nvfp4_proposal_head(
+                        self.draft_runner.model.lm_head,
+                        shared_tensors=(target_head_weight, embed),
+                        logger=logger,
+                    )
 
     def init_attention_backend(self):
         # Create multi-step attn backends and cuda graph runners

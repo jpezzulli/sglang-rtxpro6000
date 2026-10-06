@@ -1023,6 +1023,12 @@ class Envs:
     # SM120. Large linears use MXFP8; lm_head and HyperConnection mix weights
     # use rowwise weight-only FP8. An explicit unsupported request fails boot.
     SGLANG_SM120_ONLINE_MXFP8 = EnvBool(False)
+    # Proposal-only precision for the FR-Spec (--speculative-token-map) draft
+    # head. "off" (default) keeps the shared rowwise-FP8/BF16 head; "nvfp4"
+    # prepares the selected hot rows with the existing NVFP4 W4A16 Marlin
+    # machinery. The target head/verifier, sampling and checkpoint format are
+    # unchanged, so an unknown name fails boot instead of guessing.
+    SGLANG_FR_SPEC_PROPOSAL_HEAD_PRECISION = EnvStr("off")
     # Route decode-size HC mix through the fused CuTe split-K GEMM pair
     # instead of the persistent Triton mix.
     SGLANG_HC_MIX_CUDA = EnvBool(True)

@@ -238,12 +238,15 @@ class ModelOptNvFp4OnlineFusedMoEMethod(ModelOptNvFp4FusedMoEMethod):
     def _quantize_weight_nvfp4(
         weight: torch.Tensor,
         weight_scale_2: Optional[torch.Tensor] = None,
+        backend: str = "cute-dsl",
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return packed NVFP4 weight, block scales, and per-tensor decode scale.
 
         The weight scale is static and per tensor. Callers pass an existing
         scale when multiple shards must share one global scale, for example the
-        gated w1/w3 pair.
+        gated w1/w3 pair. ``backend`` keeps the MoE path's cute-dsl default;
+        other SM120 callers pass ``"cuda"`` the way ``fp4_utils`` selects the
+        FlashInfer quantizer backend per architecture.
         """
         from flashinfer import SfLayout, nvfp4_quantize
 
@@ -293,7 +296,7 @@ class ModelOptNvFp4OnlineFusedMoEMethod(ModelOptNvFp4FusedMoEMethod):
             weight.contiguous(),
             1.0 / weight_scale_2,
             sfLayout=SfLayout.layout_linear,
-            backend="cute-dsl",
+            backend=backend,
         )
         rows, cols = weight.shape
         weight_sf = weight_sf.view(torch.float8_e4m3fn).reshape(rows, cols // 16)

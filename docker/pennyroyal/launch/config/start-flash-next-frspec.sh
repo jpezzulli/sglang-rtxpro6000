@@ -40,6 +40,10 @@ NIXL=on
 # Flash-Next request/state capacity; the qualified pair is 4 requests/24 slots.
 MAX_RUNNING_REQUESTS=4
 MAX_MAMBA_CACHE_SIZE=24
+# Optional proposal-only precision for the FR-Spec draft head: off keeps the
+# shared rowwise-FP8/BF16 head, nvfp4 prepares the selected hot rows as NVFP4
+# W4A16 while the unchanged target head keeps verifying every proposal.
+SGLANG_FR_SPEC_PROPOSAL_HEAD_PRECISION=off
 # ----------------------------------------------------------------------------
 
 export NUMPY_MADVISE_HUGEPAGE=0
@@ -48,6 +52,23 @@ case "$SGLANG_MM_PREPROCESS_DEVICE" in
   cpu) IMAGE_PROCESSOR_BACKEND=pil ;;
   cuda:*) IMAGE_PROCESSOR_BACKEND=torchvision ;;
   *) echo "Choose SGLANG_MM_PREPROCESS_DEVICE=cpu or cuda:N" >&2; exit 1 ;;
+esac
+
+# The runtime reads the precision from the environment and the namespace field
+# records it, so both come from this one value; keep the literal in step with
+# NVFP4_NAMESPACE_LABEL in python/sglang/srt/speculative/proposal_head.py.
+export SGLANG_FR_SPEC_PROPOSAL_HEAD_PRECISION="${SGLANG_FR_SPEC_PROPOSAL_HEAD_PRECISION:-off}"
+PROPOSAL_HEAD_NAMESPACE_ARGS=()
+case "$SGLANG_FR_SPEC_PROPOSAL_HEAD_PRECISION" in
+  off) ;;
+  nvfp4)
+    PROPOSAL_HEAD_NAMESPACE_ARGS=(
+      --field "fr_spec_proposal_head_precision=nvfp4_w4a16_marlin")
+    ;;
+  *)
+    echo "SGLANG_FR_SPEC_PROPOSAL_HEAD_PRECISION must be off or nvfp4" >&2
+    exit 1
+    ;;
 esac
 
 CONFIG_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -208,6 +229,7 @@ if [[ "$NIXL" == on ]]; then
     --field "speculative_eagle_topk=1" \
     --field "speculative_num_draft_tokens=4" \
     --field "speculative_draft_quantization=unquant" \
+    "${PROPOSAL_HEAD_NAMESPACE_ARGS[@]}" \
     --field "gdn_mtp_cache_mode=none" \
     --field "hicache_io_backend=kernel" \
     --field "hicache_mem_layout=page_first" \

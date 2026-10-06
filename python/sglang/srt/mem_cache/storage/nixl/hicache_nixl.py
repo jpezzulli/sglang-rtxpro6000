@@ -99,8 +99,15 @@ class HiCacheNixl(HiCacheStorage):
         storage_dirs = _parse_storage_dirs(
             envs.SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR.get() or file_path
         )
+        # Imported here so this storage path keeps its own import graph: the
+        # proposal-head mode is an FR-Spec runtime setting, and the namespace
+        # manifest is where a stale label has to fail closed.
+        from sglang.srt.speculative.proposal_head import namespace_field_value
+
         verify_derived_namespace_layout(
-            storage_dirs, storage_config.tp_size
+            storage_dirs,
+            storage_config.tp_size,
+            proposal_head_precision=namespace_field_value(),
         )
         # Startup-only, read-only filesystem pressure warning, logged before
         # the file manager (re-)creates base/bucket directories so a full or

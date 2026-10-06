@@ -225,12 +225,12 @@ class NamespaceTpTest(CustomTestCase):
 
     # ---------------- runtime cross-check ----------------
 
-    def _write_manifest(self, root: Path, tp_size_field):
+    def _write_manifest(self, root: Path, tp_size_field, extra_fields=None):
+        fields = {} if tp_size_field is None else {"tp_size": tp_size_field}
+        fields.update(extra_fields or {})
         identity = {
             "schema": MODULE.SCHEMA,
-            "fields": (
-                {} if tp_size_field is None else {"tp_size": tp_size_field}
-            ),
+            "fields": fields,
             "models": {},
             "runtime": {},
         }
@@ -273,6 +273,40 @@ class NamespaceTpTest(CustomTestCase):
         (broken / MODULE.MANIFEST_NAME).write_text("{oops")
         with self.assertRaises(RuntimeError):
             verify_derived_namespace_layout([str(broken)], 2)
+
+    def test_runtime_pins_the_frspec_proposal_head_precision(self):
+        """A root may not be reinterpreted as the other proposal precision.
+
+        The default (unquantized-proposal, shared-precision) label stays
+        unpinned, so existing namespaces keep their identity; the optional
+        NVFP4 proposal head pins its exact representation and the runtime
+        refuses either mismatch without touching the cached files.
+        """
+        from sglang.srt.speculative.proposal_head import (
+            NVFP4_NAMESPACE_LABEL,
+            PROPOSAL_HEAD_NAMESPACE_FIELD,
+        )
+
+        plain = self.root / "plain-head"
+        self._write_manifest(plain, "1")
+        verify_derived_namespace_layout([str(plain)], 1)  # off run, off root
+        payload = plain / "bucket" / "entry"
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_bytes(b"keep me")
+        with self.assertRaises(RuntimeError) as ctx:
+            verify_derived_namespace_layout([str(plain)], 1, NVFP4_NAMESPACE_LABEL)
+        self.assertIn(PROPOSAL_HEAD_NAMESPACE_FIELD, str(ctx.exception))
+        self.assertEqual(payload.read_bytes(), b"keep me")  # no purge
+
+        quantized = self.root / "nvfp4-head"
+        self._write_manifest(
+            quantized, "1", {PROPOSAL_HEAD_NAMESPACE_FIELD: NVFP4_NAMESPACE_LABEL}
+        )
+        verify_derived_namespace_layout([str(quantized)], 1, NVFP4_NAMESPACE_LABEL)
+        with self.assertRaises(RuntimeError):
+            verify_derived_namespace_layout([str(quantized)], 1)
+        with self.assertRaises(RuntimeError):
+            verify_derived_namespace_layout([str(quantized)], 1, "nvfp4")
 
     # ---------------- name-layout fact under a shared root ----------------
 

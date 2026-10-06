@@ -27,8 +27,24 @@ logger = logging.getLogger(__name__)
 NAMESPACE_MANIFEST_NAME = "namespace-identity.json"
 
 
-def verify_derived_namespace_layout(storage_dirs: List[str], tp_size: int) -> None:
-    """Reject a derived namespace root whose pinned tp_size is not ours."""
+def verify_derived_namespace_layout(
+    storage_dirs: List[str],
+    tp_size: int,
+    proposal_head_precision: str | None = None,
+) -> None:
+    """Reject a derived namespace root whose pinned identity is not ours.
+
+    ``proposal_head_precision`` is the exact proposal-head representation this
+    instance runs with (``None`` for the default shared-precision head). It is
+    pinned as an identity field by the FR-Spec launcher, so a root derived for
+    one proposal precision is never reinterpreted as the other -- a quantized
+    proposal run cannot read a cache whose identity still says the draft head is
+    unquantized, and vice versa.
+    """
+    from sglang.srt.speculative.proposal_head import (
+        PROPOSAL_HEAD_NAMESPACE_FIELD,
+    )
+
     for base in storage_dirs:
         manifest_path = os.path.join(base, NAMESPACE_MANIFEST_NAME)
         if not os.path.exists(manifest_path):
@@ -60,4 +76,15 @@ def verify_derived_namespace_layout(storage_dirs: List[str], tp_size: int) -> No
                 f"{pinned_tp_size} but this instance runs tp_size={tp_size}; "
                 "derive a separate namespace root per TP topology (no cache "
                 "data was removed)"
+            )
+        pinned_precision = fields.get(PROPOSAL_HEAD_NAMESPACE_FIELD)
+        if pinned_precision != proposal_head_precision:
+            raise RuntimeError(
+                f"NIXL FILE namespace {base} is pinned to "
+                f"{PROPOSAL_HEAD_NAMESPACE_FIELD}="
+                f"{pinned_precision!r} but this instance runs the "
+                f"{PROPOSAL_HEAD_NAMESPACE_FIELD}="
+                f"{proposal_head_precision!r} proposal head; derive a namespace "
+                "root for the enabled SGLANG_FR_SPEC_PROPOSAL_HEAD_PRECISION "
+                "(no cache data was removed)"
             )
