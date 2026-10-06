@@ -2267,6 +2267,7 @@ class NativeDiskTierPlanTests(FixtureMixin):
             (ROOT / "docker/pennyroyal/.env.example").read_text(),
         )
 
+
 class NewSaveTests(unittest.TestCase):
     """An explicit save creates NEW outputs or nothing; it never replaces."""
 
