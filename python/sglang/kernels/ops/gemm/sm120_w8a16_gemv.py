@@ -4,7 +4,7 @@
 # python/sglang/srt/layers/quantization/w8a16_gemv.py (Apache-2.0), including the
 # per-shape tile table / in-launch split-K fixup of patch 0026 and the per-stream
 # split-K scratch slots of patch 0041 of aiueo52/flash-next-rtxpro6000 @
-# 524af49abcca66fcb4377ba8297022804535fccf. Kept donor-only PDL, fused-norm,
+# 524af49abcca66fcb4377ba8297022804535fccf.  Donor-only PDL, fused-norm,
 # fused gate_up+SiLU, bf16-GEMV and two-destination-store paths are dropped: this
 # file serves the resident rowwise-FP8 output heads only.
 """Low-row (M <= 16) W8A16 FP8 GEMV for the SM120 online-FP8 output heads.

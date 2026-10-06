@@ -223,6 +223,21 @@ def test_lowrow_gemv_is_opt_in_and_explicitly_shape_gated(monkeypatch):
     assert sm120_w8a16_gemv.lowrow_gemv_enabled() is False
     assert _supported(torch.zeros(1, 32, dtype=torch.bfloat16), weight) is False
 
+    # Same rows x gate matrix as the SM120 kernel coverage: the candidate owns a
+    # call iff it is gated on AND the rows fit its own limit, so gate-off low rows
+    # and gate-on 24/33 rows both stay on the original implementation.
+    for gate_on in (False, True):
+        if gate_on:
+            monkeypatch.setenv(sm120_w8a16_gemv.GEMV_ENV, "1")
+        else:
+            monkeypatch.delenv(sm120_w8a16_gemv.GEMV_ENV, raising=False)
+        for rows in (1, 4, 12, 16, 24, 33):
+            uses_candidate = gate_on and rows <= sm120_w8a16_gemv.MAX_ROWS
+            assert (
+                _supported(torch.zeros(rows, 32, dtype=torch.bfloat16), weight)
+                is uses_candidate
+            ), (rows, gate_on)
+
     monkeypatch.setenv(sm120_w8a16_gemv.GEMV_ENV, "1")
     assert sm120_w8a16_gemv.lowrow_gemv_enabled() is True
     assert sm120_w8a16_gemv.MAX_ROWS == 16

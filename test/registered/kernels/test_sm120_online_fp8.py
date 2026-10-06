@@ -116,12 +116,15 @@ def test_rowwise_lm_head_matches_dequantized_bf16_reference(
     rowwise_lm_head_weight: torch.Tensor, rows: int, gemv_candidate: bool
 ) -> None:
     hidden = _randn((rows, HIDDEN_SIZE), seed=200 + rows, scale=0.25)
+    # The candidate owns a call iff it is gated on AND the rows fit its own limit;
+    # everything else (gate off, C6's 24 rows, the 33-row fallback) stays on the
+    # original implementation and must still validate numerically.
+    uses_candidate = gemv_candidate and rows <= sm120_w8a16_gemv.MAX_ROWS
     assert (
         sm120_w8a16_gemv.lowrow_gemv_supported(
             hidden, rowwise_lm_head_weight, rowwise_scale_of(rowwise_lm_head_weight)
         )
-        is gemv_candidate
-        and (rows <= sm120_w8a16_gemv.MAX_ROWS) == gemv_candidate
+        is uses_candidate
     )
 
     actual = rowwise_fp8_lm_head_logits(hidden, rowwise_lm_head_weight)
