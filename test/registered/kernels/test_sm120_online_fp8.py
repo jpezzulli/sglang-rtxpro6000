@@ -7,6 +7,8 @@ import math
 import pytest
 import torch
 import torch.nn.functional as F
+from torch import nn
+
 from sglang.kernels.ops.gemm import sm120_w8a16_gemv
 from sglang.kernels.ops.gemm.sm120_online_fp8 import (
     configure_online_fp8,
@@ -16,7 +18,6 @@ from sglang.kernels.ops.gemm.sm120_online_fp8 import (
     rowwise_scale_of,
 )
 from sglang.test.ci.ci_register import register_cuda_ci
-from torch import nn
 
 register_cuda_ci(est_time=180, stage="base-b", runner_config="1-gpu-small")
 
@@ -190,18 +191,17 @@ def test_rowwise_head_shape_matches_dequantized_reference_and_replays(
     hidden = _randn((rows, HIDDEN_SIZE), seed=800 + rows, scale=0.25)
     scale = rowwise_scale_of(rowwise_draft_head_weight)
     assert scale.shape == (DRAFT_HEAD_ROWS,)
-    assert sm120_w8a16_gemv.lowrow_gemv_supported(
-        hidden, rowwise_draft_head_weight, scale
-    ) is gemv_candidate
+    assert (
+        sm120_w8a16_gemv.lowrow_gemv_supported(hidden, rowwise_draft_head_weight, scale)
+        is gemv_candidate
+    )
 
     for _ in range(2):
         rowwise_fp8_lm_head_logits(hidden, rowwise_draft_head_weight)
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        graph_output = rowwise_fp8_lm_head_logits(
-            hidden, rowwise_draft_head_weight
-        )
+        graph_output = rowwise_fp8_lm_head_logits(hidden, rowwise_draft_head_weight)
     hidden.copy_(_randn((rows, HIDDEN_SIZE), seed=900 + rows, scale=0.25))
     graph.replay()
     torch.cuda.synchronize()

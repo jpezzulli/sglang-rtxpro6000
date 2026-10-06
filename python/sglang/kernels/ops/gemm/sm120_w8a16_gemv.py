@@ -587,7 +587,7 @@ def lowrow_mxfp8_gemv(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     owner: object = None,
-) -> "torch.Tensor | None":
+) -> torch.Tensor | None:
     """Eligible dense block-MXFP8 linear at M <= MAX_ROWS; None = not eligible.
 
     Returns None instead of raising so the one call site in fp8.py can fall

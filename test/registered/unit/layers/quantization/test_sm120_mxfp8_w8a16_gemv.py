@@ -15,6 +15,7 @@ import os
 
 import pytest
 import torch
+
 from sglang.kernels.ops.gemm import sm120_w8a16_gemv
 from sglang.kernels.ops.quantization.mxfp8_quant import MXFP8Tensor, from_mxfp8
 from sglang.srt.layers.quantization.fp8 import Fp8LinearMethod
@@ -156,9 +157,9 @@ def test_dense_gate_covers_rows_dtype_layout_scale_and_part(monkeypatch):
 
     # Hardware bound, stated rather than inferred from a model name.
     for capability in ((9, 0), (10, 0), (12, 1), (12, 0, 1), ()):
-        assert _supported(
-            _bf16(4, k), weight, scale, capability=capability
-        ) is False, capability
+        assert (
+            _supported(_bf16(4, k), weight, scale, capability=capability) is False
+        ), capability
     assert SM120 == (12, 0)
     # On this CPU-only checkout the device capability is empty, so the public
     # entry refuses even for an otherwise-eligible call.
@@ -205,6 +206,7 @@ def test_ue8m0_scale_contract_matches_the_in_tree_mxfp8_dequant():
 
 class _Recorder:
     """Stand-in for the Triton kernel: records the grid, args and constexprs."""
+
     def __init__(self):
         self.launches = []
 
@@ -242,7 +244,7 @@ def _dense_launch(monkeypatch, rows: int, n: int, k: int, *, owner=None, **kwarg
     x = torch.zeros(rows, k, dtype=torch.bfloat16)
     out = sm120_w8a16_gemv.lowrow_mxfp8_gemv(x, weight, scale, owner)
     assert len(recorder.launches) == 1
-    (grid, args, constexprs), = recorder.launches
+    ((grid, args, constexprs),) = recorder.launches
     return out, x, grid, args, constexprs, weight, scale
 
 
@@ -269,7 +271,7 @@ def test_dense_launch_consumes_the_stored_tensors_in_one_launch(monkeypatch):
     recorder = _patch_launcher(monkeypatch)
     rowwise_scale = torch.rand(n, dtype=torch.float32)
     sm120_w8a16_gemv.lowrow_fp8_gemv(x, weight.to(torch.float8_e4m3fn), rowwise_scale)
-    (_grid, _args, rowwise_cfg), = recorder.launches
+    ((_grid, _args, rowwise_cfg),) = recorder.launches
     assert rowwise_cfg["SF_GROUP"] == 0
 
 
@@ -373,9 +375,7 @@ def test_fp8_mxfp8_apply_routes_eligible_calls_and_falls_back(monkeypatch):
 
     # Eligible: 16 bf16 rows, no bias -> the candidate, and the W8A8 dispatch is
     # not reached at all.
-    out = Fp8LinearMethod.apply(
-        method, layer, torch.zeros(16, k, dtype=torch.bfloat16)
-    )
+    out = Fp8LinearMethod.apply(method, layer, torch.zeros(16, k, dtype=torch.bfloat16))
     assert out is not sentinel and out.shape == (16, n)
     assert fallbacks() == 0 and len(recorder.launches) == 1
 
@@ -413,9 +413,7 @@ def test_fp8_mxfp8_apply_routes_eligible_calls_and_falls_back(monkeypatch):
     shuffled = _fp8_method(Mxfp8DenseGemmBackend.FLASHINFER_TRTLLM)
     shuffled_sentinel = shuffled.w8a8_mxfp8_linear.result
     assert (
-        Fp8LinearMethod.apply(
-            shuffled, layer, torch.zeros(4, k, dtype=torch.bfloat16)
-        )
+        Fp8LinearMethod.apply(shuffled, layer, torch.zeros(4, k, dtype=torch.bfloat16))
         is shuffled_sentinel
     )
     assert len(shuffled.w8a8_mxfp8_linear.calls) == 1
