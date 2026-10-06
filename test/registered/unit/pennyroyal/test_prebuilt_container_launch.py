@@ -503,8 +503,7 @@ def launch(
             # Two GPUs granted by Docker unless the test says otherwise, and a
             # per-test override of any qualified default (one dict, so an
             # override cannot collide with the default it replaces).
-            **{"FAKE_CUDA_DEVICES": "2", **qualified_defaults(),
-               **(env or {})},
+            **{"FAKE_CUDA_DEVICES": "2", **qualified_defaults(), **(env or {})},
         ),
         text=True,
         capture_output=True,
@@ -686,9 +685,7 @@ def test_container_startup_keeps_every_granted_gpu_visible(tmp_path):
     assert argv_after(argv, "--image-processor-backend") == "torchvision"
 
     # The TP guard still refuses a device Docker never granted.
-    result, argv, _, _ = launch(
-        tmp_path, startup, env={"FAKE_CUDA_DEVICES": "1"}
-    )
+    result, argv, _, _ = launch(tmp_path, startup, env={"FAKE_CUDA_DEVICES": "1"})
     assert result.returncode != 0 and argv is None
     assert "needs at least 2 visible CUDA device(s)" in result.stderr
 
@@ -778,30 +775,41 @@ def test_forwarded_settings_survive_the_mounted_script_for_every_profile(tmp_pat
         # Nothing forwarded: the qualified defaults stay exactly as qualified.
         assert default_env["forward_unknown_tools"] == "true", name
         assert default_env["nccl_p2p_disable"] == "unset", name
-        assert '\"reasoning_effort\":\"medium\"' in argv_after(
-            default_argv, "--default-chat-template-kwargs"), name
+        assert '"reasoning_effort":"medium"' in argv_after(
+            default_argv, "--default-chat-template-kwargs"
+        ), name
         result, argv, server_env, _ = launch(
-            tmp_path, startup, env={"SGLANG_FORWARD_UNKNOWN_TOOLS": "false"})
+            tmp_path, startup, env={"SGLANG_FORWARD_UNKNOWN_TOOLS": "false"}
+        )
         assert result.returncode == 0, (name, result.stderr)
         assert server_env["forward_unknown_tools"] == "false", (
-            name, server_env["forward_unknown_tools"])
+            name,
+            server_env["forward_unknown_tools"],
+        )
         # The value is not merely exported: the tool parser still qualifies.
         assert argv_after(argv, "--tool-call-parser") == "qwen3_coder", name
     # The FR-Spec example cannot launch against the stand-in checkpoint (its
     # pinned tokenizer guard stops it, as it should), so the same guarantee is
     # read from the file the operator edits instead.
     frspec = (CONFIGS / "start-flash-next-frspec.sh").read_text()
-    assert ('export SGLANG_FORWARD_UNKNOWN_TOOLS='
-            '"${SGLANG_FORWARD_UNKNOWN_TOOLS:-true}"') in frspec
+    assert (
+        "export SGLANG_FORWARD_UNKNOWN_TOOLS=" '"${SGLANG_FORWARD_UNKNOWN_TOOLS:-true}"'
+    ) in frspec
     assert "export SGLANG_FORWARD_UNKNOWN_TOOLS=true" not in frspec
     # The 27b recipe pins its own capacity, TP and PLE placement in the launch
     # line, so an ambient value there is decoration: the saved settings must be
     # refused up front (penny_config's profile check), not quietly ignored.
     result, argv, server_env, _ = launch(
-        tmp_path, RECIPES / "serve-qwen38-27b-dflash2.sh",
+        tmp_path,
+        RECIPES / "serve-qwen38-27b-dflash2.sh",
         through_entrypoint=False,
-        env={"MAX_RUNNING_REQUESTS": "8", "MAX_MAMBA_CACHE_SIZE": "48",
-             "MAX_TOTAL_TOKENS": "262144", "TP_SIZE": "2"})
+        env={
+            "MAX_RUNNING_REQUESTS": "8",
+            "MAX_MAMBA_CACHE_SIZE": "48",
+            "MAX_TOTAL_TOKENS": "262144",
+            "TP_SIZE": "2",
+        },
+    )
     assert result.returncode == 0, result.stderr
     assert argv_after(argv, "--max-running-requests") == "4"
     assert argv_after(argv, "--max-mamba-cache-size") == "24"
@@ -827,7 +835,8 @@ def test_a_generated_launch_forwards_the_saved_value_end_to_end(tmp_path):
         directory.mkdir(parents=True, exist_ok=True)
     model = make_checkpoint(host_root / "penny-model", "generated")
     saved = {
-        "HOST_MODELS_ROOT": str(host_root), "HOST_CACHE_BASE": str(cache),
+        "HOST_MODELS_ROOT": str(host_root),
+        "HOST_CACHE_BASE": str(cache),
         "HOST_NIXL_STORAGE_BASE": str(nixl),
         "LAUNCH_DIR": str(tmp_path / "generated"),
         "SGLANG_FORWARD_UNKNOWN_TOOLS": "false",
@@ -838,10 +847,14 @@ def test_a_generated_launch_forwards_the_saved_value_end_to_end(tmp_path):
         "TARGET_MODEL": "/models/penny-model",
     }
     env_file = tmp_path / "container.env"
-    env_file.write_text(pc.serialize_env([("", sorted(saved.items()))],
-                                         header=(f"{pc.PROFILE_KEY}=next-plain",)))
-    plan = pc.build_plan("container", pc.load_config("container", env_file, {},
-                                                     REPO), {}, repo_root=REPO)
+    env_file.write_text(
+        pc.serialize_env(
+            [("", sorted(saved.items()))], header=(f"{pc.PROFILE_KEY}=next-plain",)
+        )
+    )
+    plan = pc.build_plan(
+        "container", pc.load_config("container", env_file, {}, REPO), {}, repo_root=REPO
+    )
     assert [issue.message for issue in plan.errors] == []
     pc.write_container_files(plan, confirm=lambda text: True)
     run_sh = plan.launch_dir / "run.sh"
@@ -851,37 +864,44 @@ def test_a_generated_launch_forwards_the_saved_value_end_to_end(tmp_path):
     directory, capture = fake_docker(tmp_path)
     result = subprocess.run(
         ["bash", str(run_sh)],
-        env=clean_env(PATH=f"{directory}:{os.environ['PATH']}",
-                      DOCKER_CAPTURE=str(capture),
-                      HOME=str(tmp_path / "home")),
-        text=True, capture_output=True, check=False)
+        env=clean_env(
+            PATH=f"{directory}:{os.environ['PATH']}",
+            DOCKER_CAPTURE=str(capture),
+            HOME=str(tmp_path / "home"),
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     assert result.returncode == 0, result.stderr
     argv = capture.read_text().splitlines()
     index = argv.index("-e")
-    forwarded = [value for value in argv[index:] if value.startswith(
-        "SGLANG_")]
+    forwarded = [value for value in argv[index:] if value.startswith("SGLANG_")]
 
     # 2. Container side: the same generated script, run by the image's own
     # exec path with exactly the -e pairs docker was handed, exports what it
     # received (paths rewritten the way an operator rewrites them before the
     # first start).
-    passed_through = dict(argv[index + 1].split("=", 1)
-                          for index, value in enumerate(argv)
-                          if value == "-e" and "=" in argv[index + 1])
+    passed_through = dict(
+        argv[index + 1].split("=", 1)
+        for index, value in enumerate(argv)
+        if value == "-e" and "=" in argv[index + 1]
+    )
     startup = plan.launch_dir / "config" / "start-flash-next.sh"
     generated = startup.read_text()
     assert "TARGET_MODEL=/models/penny-model" in generated, generated
-    startup.write_text(generated.replace("TARGET_MODEL=/models/penny-model",
-                                         f'TARGET_MODEL="{model}"'))
-    result, server_argv, server_env, _ = launch(tmp_path, startup,
-                                                env=passed_through)
+    startup.write_text(
+        generated.replace("TARGET_MODEL=/models/penny-model", f'TARGET_MODEL="{model}"')
+    )
+    result, server_argv, server_env, _ = launch(tmp_path, startup, env=passed_through)
     assert result.returncode == 0, result.stderr
     assert server_env["forward_unknown_tools"] == "false", server_env
     assert server_env["cache"] == str(cache / "sglang"), server_env
     # The launcher-side reasoning tier reached the chat-template kwargs the
     # server is started with, and the NCCL workaround reached its environment.
-    assert '\"reasoning_effort\":\"high\"' in argv_after(
-        server_argv, "--default-chat-template-kwargs"), server_argv
+    assert '"reasoning_effort":"high"' in argv_after(
+        server_argv, "--default-chat-template-kwargs"
+    ), server_argv
     assert server_env["nccl_p2p_disable"] == "1", server_env
     # The profile's qualified flags are untouched by any of this.
     assert argv_after(server_argv, "--speculative-algorithm") == "NEXTN"
@@ -895,14 +915,17 @@ def test_native_recipes_take_the_same_disk_tier_switch(tmp_path):
     # namespace derivation simply never runs.
     for recipe in ("serve-flash-next.sh", "serve-qwen38-27b-dflash2.sh"):
         path = RECIPES / recipe
-        on_result, on_argv, on_env, _ = launch(tmp_path, path,
-                                               through_entrypoint=False)
+        on_result, on_argv, on_env, _ = launch(tmp_path, path, through_entrypoint=False)
         assert on_result.returncode == 0, (recipe, on_result.stderr)
         assert "--hicache-storage-backend" in on_argv, recipe
         assert on_env["namespace"] != "unset", recipe
         off_result, off_argv, off_env, _ = launch(
-            tmp_path, path, through_entrypoint=False, env={"NIXL": "off"},
-            nixl_root=tmp_path / "no nixl root here")
+            tmp_path,
+            path,
+            through_entrypoint=False,
+            env={"NIXL": "off"},
+            nixl_root=tmp_path / "no nixl root here",
+        )
         assert off_result.returncode == 0, (recipe, off_result.stderr)
         for flag in STORAGE_FLAGS:
             assert flag not in off_argv, (recipe, flag)
@@ -915,9 +938,12 @@ def test_native_recipes_take_the_same_disk_tier_switch(tmp_path):
         assert off_env["cache"] == on_env["cache"], recipe
 
     # A value that is neither on nor off is a mistake, not a new mode.
-    bogus, argv, _, _ = launch(tmp_path, RECIPES / "serve-flash-next.sh",
-                               through_entrypoint=False,
-                               env={"NIXL": "sometimes"})
+    bogus, argv, _, _ = launch(
+        tmp_path,
+        RECIPES / "serve-flash-next.sh",
+        through_entrypoint=False,
+        env={"NIXL": "sometimes"},
+    )
     assert bogus.returncode != 0 and argv is None
     assert "NIXL must be on or off" in bogus.stderr
 
@@ -927,14 +953,16 @@ def test_native_frspec_disk_tier_off_needs_no_nixl_root(tmp_path):
     # on a NIXL root, config or namespace helper it no longer needs -- and the
     # root it does not need does not even have to exist.
     result, argv, _, _ = launch(
-        tmp_path, RECIPES / "serve-flash-next-frspec.sh",
-        through_entrypoint=False, env={"NIXL": "off"},
-        nixl_root=tmp_path / "no nixl root here")
+        tmp_path,
+        RECIPES / "serve-flash-next-frspec.sh",
+        through_entrypoint=False,
+        env={"NIXL": "off"},
+        nixl_root=tmp_path / "no nixl root here",
+    )
     assert result.returncode != 0 and argv is None
     assert "NIXL config missing" not in result.stderr
     assert "Required executable missing" not in result.stderr
-    assert "tokenizer differs from the qualified FR-Spec tokenizer" in (
-        result.stderr)
+    assert "tokenizer differs from the qualified FR-Spec tokenizer" in (result.stderr)
 
 
 if __name__ == "__main__":  # pytest is the real driver; this is a smoke check

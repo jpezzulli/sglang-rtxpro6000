@@ -5,7 +5,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SUMMARY = ROOT / "configs" / "pennyroyal" / "startup-summary.sh"
 BASE = "5d1a31074028a16f3fba468ed144125cc1222e18"
@@ -72,7 +71,9 @@ class StartupSummaryTest(unittest.TestCase):
         self.assertIn("Context: 524288 tokens | KV cap: 824384", output)
         self.assertIn("Max running requests: 4 | Mamba slots: 24", output)
         self.assertIn("PLE: host RAM | HiCache: true | Host tier: 32 GiB", output)
-        self.assertIn("Storage backend: nixl | NIXL location: /cache/NIXL pool [one]", output)
+        self.assertIn(
+            "Storage backend: nixl | NIXL location: /cache/NIXL pool [one]", output
+        )
         self.assertIn("Media preprocessing: CPU (sglang)", output)
 
     def test_nextn_without_frspec_reports_automatic_cap_and_secondary_gpu(self):
@@ -88,7 +89,9 @@ class StartupSummaryTest(unittest.TestCase):
         self.assertIn("FR-Spec: off", output)
         self.assertIn("Context: automatic tokens | KV cap: automatic", output)
         self.assertIn("PLE: no host offload requested", output)
-        self.assertIn("Media preprocessing: secondary GPU (cuda:2) (transformers)", output)
+        self.assertIn(
+            "Media preprocessing: secondary GPU (cuda:2) (transformers)", output
+        )
 
     def test_nextn_nvme_ple_and_main_gpu(self):
         output = self.summary(
@@ -125,7 +128,9 @@ class StartupSummaryTest(unittest.TestCase):
         self.assertIn("Profile: Qwen3.8-27B / DFlash2", output)
         self.assertIn("Model: /models/target model", output)
         self.assertIn("Draft model: /models/draft model", output)
-        self.assertIn("FR-Spec: off | Online FP8: not applicable | KV dtype: fp8_e4m3", output)
+        self.assertIn(
+            "FR-Spec: off | Online FP8: not applicable | KV dtype: fp8_e4m3", output
+        )
         self.assertIn("Draft KV dtype: fp8_e5m2", output)
         self.assertIn("PLE: not applicable", output)
 
@@ -133,8 +138,9 @@ class StartupSummaryTest(unittest.TestCase):
         # The comparison needs the base commit's blobs. A shallow or partial
         # clone may not carry that object at all; say so instead of reporting
         # a recipe regression that never happened.
-        probe = subprocess.run(["git", "cat-file", "-t", BASE], cwd=ROOT,
-                               capture_output=True, text=True)
+        probe = subprocess.run(
+            ["git", "cat-file", "-t", BASE], cwd=ROOT, capture_output=True, text=True
+        )
         if probe.returncode != 0:
             self.skipTest(f"base commit {BASE[:10]} is not available here")
         for launcher in LAUNCHERS:
@@ -155,14 +161,20 @@ class StartupSummaryTest(unittest.TestCase):
                     ["git", "show", f"{BASE}:{relative}"], cwd=ROOT, text=True
                 )
                 current_source = (ROOT / relative).read_text()
-                base_block = self._from_last_line(base_source, 'exec "$SGLANG_EXE" serve')
-                current_block = self._from_last_line(current_source, "launch_args=(serve")
+                base_block = self._from_last_line(
+                    base_source, 'exec "$SGLANG_EXE" serve'
+                )
+                current_block = self._from_last_line(
+                    current_source, "launch_args=(serve"
+                )
 
                 base_argv, base_output = self._run_launch_block(
                     base_block, executable, base_capture
                 )
                 current_argv, current_output = self._run_launch_block(
-                    current_block, executable, current_capture,
+                    current_block,
+                    executable,
+                    current_capture,
                     # The chosen RAM cache size is now a variable the recipe
                     # guards; with no choice made it must expand to the same
                     # qualified literal the base block still hardcodes, so the
@@ -195,7 +207,10 @@ class StartupSummaryTest(unittest.TestCase):
         return "\n".join(lines[matches[-1] :]) + "\n"
 
     def _run_launch_block(
-        self, block: str, executable: Path, capture: Path,
+        self,
+        block: str,
+        executable: Path,
+        capture: Path,
         hicache_size: str = "",
     ) -> tuple[list[str], str]:
         scalar_values = {
@@ -245,8 +260,8 @@ class StartupSummaryTest(unittest.TestCase):
                 # recipe does keeps the comparison against the base block honest:
                 # an empty array would silently drop the disk tier from the
                 # current argv and the two lists could never match.
-                'HICACHE_STORAGE_ARGS=(--hicache-storage-backend nixl '
-                '--hicache-storage-prefetch-policy timeout '
+                "HICACHE_STORAGE_ARGS=(--hicache-storage-backend nixl "
+                "--hicache-storage-prefetch-policy timeout "
                 '--hicache-storage-backend-extra-config "@$NIXL_CONFIG")',
                 f"export CAPTURE_PATH={shlex.quote(str(capture))}",
                 block,
