@@ -1922,6 +1922,87 @@ class AtomicWriteTests(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in root.iterdir()),
                              ["a.sh", "b.sh"])
 
+    def test_a_rollback_renames_the_backup_so_read_only_and_crlf_survive(self):
+        # Restoring has to rename the previous file back, not write text over
+        # it: a 0444 destination cannot be rewritten at all, and a file whose
+        # lines end CRLF must keep those bytes rather than a normalized copy.
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            kept = root / "a.sh"
+            blocked = root / "b.sh"
+            kept.write_bytes(b"old a\r\nsecond\r\n")
+            kept.chmod(0o444)
+            blocked.write_bytes(b"old b\n")
+            real_replace = pc.os.replace
+            attempts = {"n": 0}
+
+            def flaky(src, dst):
+                attempts["n"] += 1
+                if attempts["n"] == 2:
+                    raise OSError(21, "Is a directory")
+                return real_replace(src, dst)
+
+            pc.os.replace = flaky
+            try:
+                with self.assertRaises(pc.ConfigError) as caught:
+                    pc.commit_files([(kept, "new a\n"), (blocked, "new b\n")])
+            finally:
+                pc.os.replace = real_replace
+            self.assertIn("b.sh", str(caught.exception))
+            self.assertEqual(kept.read_bytes(), b"old a\r\nsecond\r\n",
+                             "the previous bytes come back exactly, CRLF and all")
+            self.assertEqual(kept.stat().st_mode & 0o777, 0o444,
+                             "a read-only file stays read-only through the "
+                             "rollback")
+            self.assertEqual(blocked.read_bytes(), b"old b\n")
+            self.assertEqual(sorted(path.name for path in root.iterdir()),
+                             ["a.sh", "b.sh"],
+                             "no backup or temporary file survives the refusal")
+
+    def test_identical_content_with_crlf_is_left_alone_as_unchanged(self):
+        # Comparison happens on bytes, so a file that already holds the payload
+        # is not rewritten (and its CRLF endings are not silently normalized).
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.toml"
+            path.write_bytes(b"backend = \"posix\"\r\n")
+            before = path.stat()
+            self.assertEqual(dict(pc.commit_files([(path, 'backend = "posix"\r\n')])),
+                             {path: "unchanged"})
+            self.assertEqual(path.read_bytes(), b"backend = \"posix\"\r\n")
+            self.assertEqual(path.stat().st_mtime_ns, before.st_mtime_ns)
+            self.assertEqual(path.stat().st_mode & 0o777, before.st_mode & 0o777)
+
+    def test_a_full_disk_refuses_the_save_and_leaves_no_temporary(self):
+        # The temporary has to be registered before the write and fsync, or
+        # ENOSPC escapes with an invisible file left in the operator's folder.
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            settings = root / "pennyroyal.env"
+            run_sh = root / "run.sh"
+            run_sh.write_bytes(b"#!/bin/sh\nold\n")
+            real_fsync = pc.os.fsync
+
+            def no_space(fd):
+                raise OSError(28, "No space left on device")
+
+            pc.os.fsync = no_space
+            try:
+                with self.assertRaises(pc.ConfigError) as caught:
+                    pc.commit_files([(settings, "NIXL=off\n"),
+                                     (run_sh, "#!/bin/sh\nnew\n")],
+                                    private=(settings,))
+            finally:
+                pc.os.fsync = real_fsync
+            self.assertIn("No space left on device", str(caught.exception))
+            self.assertFalse(settings.exists())
+            self.assertEqual(run_sh.read_bytes(), b"#!/bin/sh\nold\n")
+            self.assertEqual([path.name for path in root.iterdir()], ["run.sh"],
+                             "nothing hidden, nothing half-written")
+
+
     def test_the_same_destination_named_twice_is_refused(self):
         import tempfile
         with tempfile.TemporaryDirectory() as temp:

@@ -387,25 +387,32 @@ def commit_files(files: list[tuple[Path, str]],
 
     A save touches several files that have to agree - the settings file, the
     generated run.sh and the startup script it mounts - so every destination is
-    checked and every payload written to a sibling temporary file BEFORE any
+    checked and every payload is written to a sibling temporary file BEFORE any
     replacement happens. An existing directory where a file belongs
     (IsADirectoryError), a folder that cannot be created, a read-only parent or
-    a full disk then fail the whole save, and anything already moved is put
-    back, so the launch is never described by half the new set and half the old
-    one. Content that already matches is left completely alone: no rewrite, no
-    chmod. A path named in `private` is created 0600, a new .sh becomes 0755,
-    and an existing file always keeps its own permissions.
+    a full disk then fail the whole save. The temporary is registered the moment
+    mkstemp returns, so a failure during the write or fsync (ENOSPC) still gets
+    it cleaned up, and each file being replaced keeps a hard-linked backup that
+    the rollback renames back: bytes, permissions and ownership of the previous
+    file survive a read-only 0444 destination or CRLF content exactly, which
+    re-serializing the old text could not promise. Content is compared and
+    written as bytes for the same reason: content that already matches is left
+    completely alone, no rewrite and no chmod. A path named in `private` is
+    created 0600, a new .sh becomes 0755, and an existing file keeps its own
+    permissions.
     """
     paths = [Path(path) for path, _ in files]
     if len(set(paths)) != len(paths):
         raise ConfigError("this save names the same file twice")
-    staged: list[tuple[Path, Path, Optional[str]]] = []
+    staged: list[tuple[Path, Path, Optional[Path]]] = []
+    temps: list[Path] = []
+    backups: list[Path] = []
     outcomes: list[tuple[Path, str]] = []
     try:
         for path, content in ((Path(path), text) for path, text in files):
-            current = (path.read_text(encoding="utf-8") if path.is_file()
-                       else None)
-            if current == content:
+            payload = content.encode("utf-8")
+            current = path.read_bytes() if path.is_file() else None
+            if current == payload:
                 outcomes.append((path, "unchanged"))
                 continue
             mode = ((path.stat().st_mode & 0o777) if path.exists()
@@ -419,34 +426,50 @@ def commit_files(files: list[tuple[Path, str]],
                 handle, tmp_name = tempfile.mkstemp(dir=str(path.parent),
                                                     prefix=f".{path.name}.")
                 temp = Path(tmp_name)
-                with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                    stream.write(content)
+                temps.append(temp)
+                with os.fdopen(handle, "wb") as stream:
+                    stream.write(payload)
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.chmod(temp, mode)
+                backup = None
+                if current is not None:
+                    backup = path.with_name(f".{path.name}.pennyroyal-old")
+                    backup.unlink(missing_ok=True)
+                    try:
+                        os.link(path, backup)
+                    except OSError:
+                        # No hard links here: keep the previous bytes anyway.
+                        shutil.copy2(path, backup)
+                    backups.append(backup)
             except OSError as exc:
                 raise ConfigError(f"cannot write {path}: "
                                   f"{exc.strerror or exc}") from exc
-            staged.append((path, temp, current))
+            staged.append((path, temp, backup))
             outcomes.append((path, "written"))
-        replaced: list[tuple[Path, Optional[str]]] = []
-        for path, temp, old in staged:
+        replaced: list[tuple[Path, Optional[Path]]] = []
+        for path, temp, backup in staged:
             try:
                 os.replace(temp, path)
             except OSError as exc:
-                for done, previous in replaced:
+                for done, previous in reversed(replaced):
                     if previous is None:
                         done.unlink(missing_ok=True)
                     else:
-                        done.write_text(previous, encoding="utf-8")
+                        # Rename the backup itself: a 0444 file cannot be
+                        # rewritten in place, and renaming keeps its bytes and
+                        # mode instead of re-creating them.
+                        os.replace(previous, done)
                 raise ConfigError(f"cannot replace {path}: "
                                   f"{exc.strerror or exc}") from exc
-            replaced.append((path, old))
-    except BaseException:
-        for _path, temp, _old in staged:
+            replaced.append((path, backup))
+    finally:
+        for temp in temps:
             temp.unlink(missing_ok=True)
-        raise
+        for backup in backups:
+            backup.unlink(missing_ok=True)
     return outcomes
+
 
 # --------------------------------------------------------------------------
 # Per-key validation
