@@ -38,7 +38,7 @@ from sglang.test.ci.ci_register import register_cpu_ci
 register_cpu_ci(est_time=10, suite="base-a-test-cpu")
 
 from sglang.kernels.ops.speculative.dspark import dspark_accept
-from sglang.srt.speculative import dflash_utils, eagle_utils
+from sglang.srt.speculative import eagle_utils
 from sglang.srt.speculative.dflash_utils import build_dflash_verify_target_probs
 from sglang.srt.speculative.eagle_utils import eagle_sample
 
@@ -271,10 +271,9 @@ def test_eagle_each_request_is_filtered_with_its_own_min_p():
 def test_eagle_min_p_is_the_only_difference_between_two_requests():
     # Same logits, same temperature, two draft rows each; the requests differ
     # only in min_p (0.0 vs 0.5). On the base they were the same row.
-    rows = (
-        _run_eagle(_sampling_info(temperatures=torch.ones(BS, 1)))["target_probs"]
-        .reshape(ROWS, VOCAB)
-    )
+    rows = _run_eagle(_sampling_info(temperatures=torch.ones(BS, 1)))[
+        "target_probs"
+    ].reshape(ROWS, VOCAB)
     _close(rows[0], EXPECTED_OPEN_ROW)
     _close(rows[2], EXPECTED_CUT_ROW_SAME_TEMP)
     assert int((rows[0] > 0).sum()) == 3
@@ -421,9 +420,7 @@ def _run_accept_sampling_core(sampling_info):
             target_logits=LOGITS.clone(),
             draft_probs=draft_probs,
             sampling_info=sampling_info,
-            draft_input=SimpleNamespace(
-                max_top_k=None, uniform_top_k_value=None
-            ),
+            draft_input=SimpleNamespace(max_top_k=None, uniform_top_k_value=None),
             gamma=DRAFT_TOKEN_NUM,
             verify_num_draft_tokens=DRAFT_TOKEN_NUM,
             cutoff_verify_lens=None,
@@ -438,9 +435,7 @@ def test_selector_route_sends_min_p_only_requests_to_the_builder():
     info = _sampling_info(top_ks=all_out, top_ps=ones, min_ps=torch.tensor([0.0, 0.5]))
     out = _run_accept_sampling_core(info)
     rows = out["target_probs"].reshape(ROWS, VOCAB)
-    raw = torch.softmax(
-        LOGITS / TEMPERATURES.repeat_interleave(DRAFT_TOKEN_NUM, 0), -1
-    )
+    raw = torch.softmax(LOGITS / TEMPERATURES.repeat_interleave(DRAFT_TOKEN_NUM, 0), -1)
     # The base route saw no filter needed and took the plain softmax/temperature
     # shortcut, so this row was the unfiltered distribution.
     assert out["builder_calls"] == 1
@@ -455,9 +450,7 @@ def test_selector_route_keeps_the_unfiltered_shortcut_when_nothing_is_asked():
     info = _sampling_info(top_ks=all_out, top_ps=ones, min_ps=ones * 0.0)
     out = _run_accept_sampling_core(info)
     assert out["builder_calls"] == 0  # the cheap path is still the cheap path
-    raw = torch.softmax(
-        LOGITS / TEMPERATURES.repeat_interleave(DRAFT_TOKEN_NUM, 0), -1
-    )
+    raw = torch.softmax(LOGITS / TEMPERATURES.repeat_interleave(DRAFT_TOKEN_NUM, 0), -1)
     _close(out["target_probs"].reshape(ROWS, VOCAB), raw)
 
 
