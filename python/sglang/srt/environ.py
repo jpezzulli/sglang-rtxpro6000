@@ -1187,6 +1187,12 @@ class Envs:
     SGLANG_ENABLE_OVERLAP_PLAN_STREAM = EnvBool(False)
     # A/B: keep the DFLASH draft greedy head eager (not folded in-graph).
     SGLANG_DFLASH_EAGER_DRAFT_SAMPLER = EnvBool(False)
+    # Build the native MTP draft's embed_tokens / lm_head as 1-row placeholders
+    # instead of allocating the full [vocab, hidden] pair the EAGLE/NEXTN worker
+    # deletes again in `set_embed_and_head`. Off by default: those bytes sit
+    # inside the mem_fraction_static budget, so a deployment tuned against the
+    # old footprint would lose them from its KV pool headroom.
+    SGLANG_DRAFT_SKIP_VOCAB_WEIGHTS = EnvBool(False)
     SGLANG_RAGGED_VERIFY_MODE = EnvStr("static")
     SGLANG_TEST_RAGGED_VERIFY_FORCE_UNIFORM_CAPTURE = EnvBool(False)
     # Skip draft_extend while adaptive spec is at steps=0 (drafting disabled).
