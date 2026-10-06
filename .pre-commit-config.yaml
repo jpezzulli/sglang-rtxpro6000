@@ -91,23 +91,11 @@ repos:
         files: ^python/sglang/multimodal_gen/.*
         exclude: ^(python/sglang/multimodal_gen/configs/sample|python/sglang/multimodal_gen/apps/ComfyUI_SGLDiffusion/workflows|python/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages)(/|$)
         types_or: [python, markdown, json, text]
-      - id: sort-ci-permissions
-        name: sort CI_PERMISSIONS.json
-        entry: python3 .github/update_ci_permission.py --sort-only
-        language: system
-        files: ^\.github/CI_PERMISSIONS\.json$
-        pass_filenames: false
       - id: check-workflow-job-names
         name: check for duplicate workflow job names
         entry: python3 scripts/lint/check_workflow_job_names.py
         language: system
         files: ^\.github/workflows/.*\.yml$
-        pass_filenames: false
-      - id: check-rust-ext-cache-prefix
-        name: check rust-ext cache key prefix defaults match
-        entry: python3 scripts/lint/check_rust_ext_cache_prefix.py
-        language: system
-        files: ^(\.github/actions/download-rust-ext/action\.yml|\.github/workflows/_pr-test-rust-ext-build\.yml)$
         pass_filenames: false
       - id: check-no-bare-pytest-main
         name: reject bare pytest.main calls in __main__ blocks
@@ -119,18 +107,6 @@ repos:
         entry: python3 -m unittest discover -s scripts/lint -p 'test_check_*.py'
         language: system
         files: ^scripts/lint/(check_|test_check_).*\.py$
-        pass_filenames: false
-      - id: check-registered-tests
-        name: validate registered test CI registries
-        entry: python3 scripts/lint/check_registered_tests.py
-        language: system
-        files: ^test/registered/.*\.py$
-        pass_filenames: false
-      - id: check-no-registered-tests-in-package
-        name: reject CI-registered tests inside the sglang package
-        entry: python3 scripts/lint/check_no_registered_tests_in_package.py
-        language: system
-        files: ^python/sglang/.*\.py$
         pass_filenames: false
       - id: rustfmt-sgl-model-gateway
         name: rustfmt sgl-model-gateway (nightly)

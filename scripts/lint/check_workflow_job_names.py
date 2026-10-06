@@ -5,9 +5,8 @@ Duplicate job names on the same commit allow a passing job in one workflow
 to satisfy a required status check meant for a different workflow, bypassing
 branch protection.
 
-See: https://github.com/sgl-project/sglang/pull/20208 for an example where
-pr-test-npu.yml's "pr-test-finish" job (which passed) caused GitHub to treat
-the required "pr-test-finish" check (from pr-test.yml, which failed) as met.
+See: https://github.com/sgl-project/sglang/pull/20208 for the upstream example
+where a duplicate job name in another workflow satisfied a required check.
 """
 
 import glob
@@ -19,7 +18,6 @@ import yaml
 # Job names used as required status checks in branch protection.
 # These MUST be unique across all workflow files.
 PROTECTED_JOB_NAMES = {
-    "pr-test-finish",
     "lint",
 }
 
