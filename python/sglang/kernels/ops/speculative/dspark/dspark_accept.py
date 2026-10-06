@@ -90,7 +90,14 @@ def _accept_sampling_core(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     bs = candidates.shape[0]
     device = candidates.device
-    if not sampling_info.need_top_k_sampling and not sampling_info.need_top_p_sampling:
+    # The shortcut is the unfiltered chain: taking it because top-k/top-p are
+    # off would skip min_p too, and a min_p-only request is the common LM
+    # Studio case. Anything the shared builder knows about has to reach it.
+    if (
+        not sampling_info.need_top_k_sampling
+        and not sampling_info.need_top_p_sampling
+        and not sampling_info.need_min_p_sampling
+    ):
         target_probs = SoftmaxTemp.execute(
             logits=target_logits,
             temperatures=sampling_info.temperatures,

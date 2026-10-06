@@ -14,6 +14,7 @@ from sglang.kernels.ops.speculative.spec_tree import (
 from sglang.srt.hardware_backend.npu.dsv4.dsv4_common_hooks import (
     maybe_build_dsv4_verify_bundle,
 )
+from sglang.srt.layers.sampler import min_p_normalize_probs_torch
 from sglang.srt.mem_cache.allocation import alloc_for_spec_decode
 from sglang.srt.mem_cache.allocation_sizing import (
     get_alloc_reserve_per_decode,
@@ -806,6 +807,19 @@ def eagle_sample(
                 )
                 maybe_detect_nan(
                     target_probs, "v2 verify: target_probs after top_p_renorm"
+                )
+            if sampling_info.need_min_p_sampling:
+                # Without this the target keeps mass on tokens the request's own
+                # min_p would have removed, so they can win the acceptance coin
+                # and the final sample comes from the wrong distribution.
+                target_probs = min_p_normalize_probs_torch(
+                    target_probs,
+                    torch.repeat_interleave(
+                        sampling_info.min_ps, verify_input.draft_token_num, dim=0
+                    ),
+                )  # (bs * num_draft_tokens, vocab_size)
+                maybe_detect_nan(
+                    target_probs, "v2 verify: target_probs after min_p_renorm"
                 )
             target_probs = target_probs.reshape(bs, verify_input.draft_token_num, -1)
             draft_probs = (

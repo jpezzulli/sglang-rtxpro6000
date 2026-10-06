@@ -771,6 +771,24 @@ def top_p_normalize_probs_torch(
     return torch.zeros_like(probs_sort).scatter_(-1, probs_idx, probs_sort)
 
 
+def min_p_normalize_probs_torch(
+    probs: torch.Tensor,
+    min_ps: torch.Tensor,
+):
+    """Drop ``p < min_p * max(p)`` and renormalize, one min_p per row.
+
+    The min_p stage of ``top_k_top_p_min_p_sampling_from_probs_torch`` and of
+    the flashinfer chain (``min_p_sampling_from_probs``), factored out for the
+    speculative verifies: they build their own target distribution and hand one
+    tensor to both the acceptance test and the final/bonus draw, so the stage
+    has to leave a distribution behind. top-k/top-p never remove the row
+    maximum, so where this sits in the chain does not change the cut.
+    """
+    keep = probs >= probs.amax(dim=-1, keepdim=True) * min_ps.view(-1, 1)
+    probs = probs * keep
+    return probs / probs.sum(dim=-1, keepdim=True)
+
+
 def apply_custom_logit_processor(
     logits: torch.Tensor,
     sampling_batch_info: SamplingBatchInfo,
