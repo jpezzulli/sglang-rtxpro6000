@@ -17,6 +17,12 @@ Precedence (stated the same way in --help and the examples):
   3. a recipe-specific key that is not saved keeps the value it inherited from
      the environment, or the recipe's own default when nothing is set here.
 This utility never rewrites recipe defaults; unset means "the recipe decides".
+
+An explicit save (``./configure-penny``) never replaces anything: it writes a
+NEW timestamped settings file beside its input and, for ``--container``, a new
+timestamped folder of ordinary launch files, then prints the command that uses
+exactly those new outputs. Previous files stay untouched for the operator to
+rename, move or delete themselves; there is no pointer, symlink or registry.
 """
 
 from __future__ import annotations
@@ -29,8 +35,8 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -511,123 +517,104 @@ def read_env_file(path: Path) -> dict[str, str]:
     return parse_env_text(text, str(path))
 
 
-def write_env_file(path: Path, text: str, mode: int = 0o600) -> None:
-    """Atomically replace path; an existing file keeps its own permissions."""
+def save_stamp() -> str:
+    """Local timestamp (sortable, filename-safe) naming one save's outputs."""
+    return datetime.now().strftime("%Y%m%dT%H%M%S")
+
+
+def timestamped_new_path(path: Path, stamp: str, directory: bool = False) -> Path:
+    """An unused path beside `path`, named after `stamp`, for a save's output.
+
+    ``pennyroyal.env`` becomes ``pennyroyal-20261006T072130.env`` next to it;
+    a launch folder becomes ``...-20261006T072130``. Repeated saves inside one
+    second (or an operator-made file of the same name) step to ``-2``, ``-3``,
+    ... so every save owns its own fresh output and nothing previous is ever
+    reused. Nothing is created here; create_new_files has the final word, and
+    a name that appears in the meantime is refused, never replaced.
+    """
     path = Path(path)
-    if path.exists():
-        mode = path.stat().st_mode & 0o777
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    finally:
-        if tmp.exists():
-            tmp.unlink()
+    if directory:
+        stem, suffix = path.name, ""
+    else:
+        stem, suffix = path.stem, path.suffix or ".env"
+    base = f"{stem}-{stamp}"
+    candidate = path.parent / f"{base}{suffix}"
+    number = 1
+    while candidate.exists():
+        number += 1
+        if number > 999:
+            raise ConfigError(f"cannot find a free new name beside {path}")
+        candidate = path.parent / f"{base}-{number}{suffix}"
+    return candidate
 
 
-def commit_files(
+def create_new_files(
     files: list[tuple[Path, str]], private: tuple[Path, ...] = ()
-) -> list[tuple[Path, str]]:
-    """Replace every (path, content) as one set, or leave them all as they were.
+) -> list[Path]:
+    """Create every (path, content) as a brand-new file, or leave nothing behind.
 
-    A save touches several files that have to agree - the settings file, the
-    generated run.sh and the startup script it mounts - so every destination is
-    checked and every payload is written to a sibling temporary file BEFORE any
-    replacement happens. An existing directory where a file belongs
-    (IsADirectoryError), a folder that cannot be created, a read-only parent or
-    a full disk then fail the whole save. The temporary is registered the moment
-    mkstemp returns, so a failure during the write or fsync (ENOSPC) still gets
-    it cleaned up, and each file being replaced keeps a hard-linked backup that
-    the rollback renames back: bytes, permissions and ownership of the previous
-    file survive a read-only 0444 destination or CRLF content exactly, which
-    re-serializing the old text could not promise. Content is compared and
-    written as bytes for the same reason: content that already matches is left
-    completely alone, no rewrite and no chmod. A path named in `private` is
-    created 0600, a new .sh becomes 0755, and an existing file keeps its own
-    permissions.
+    A save touches only its own fresh paths: a destination that already exists
+    is a refusal, not an overwrite, so a previous file is never even opened for
+    writing. Each file is created with O_EXCL, written and fsynced; a create or
+    write failure (a full disk, a vanished folder) deletes exactly the files -
+    and the folders - this call made, then reports the reason. There is no
+    staging, journal or backup: the only rollback is deleting what this call
+    itself created. A path named in `private` is created 0600, a new .sh
+    becomes 0755, anything else 0644.
     """
     paths = [Path(path) for path, _ in files]
     if len(set(paths)) != len(paths):
         raise ConfigError("this save names the same file twice")
-    staged: list[tuple[Path, Path, Optional[Path]]] = []
-    temps: list[Path] = []
-    backups: list[Path] = []
-    outcomes: list[tuple[Path, str]] = []
+    created: list[Path] = []
+    folders: list[Path] = []
     try:
         for path, content in ((Path(path), text) for path, text in files):
-            payload = content.encode("utf-8")
-            current = path.read_bytes() if path.is_file() else None
-            if current == payload:
-                outcomes.append((path, "unchanged"))
-                continue
+            missing: list[Path] = []
+            probe = path.parent
+            while not probe.is_dir():
+                missing.append(probe)
+                probe = probe.parent
+            for folder in reversed(missing):
+                try:
+                    folder.mkdir()
+                except FileExistsError:
+                    pass  # someone else made it; it is not ours to delete
+                else:
+                    folders.append(folder)
+            if path.exists():
+                raise ConfigError(f"refusing to replace {path}")
             mode = (
-                (path.stat().st_mode & 0o777)
-                if path.exists()
-                else (
-                    0o600
-                    if path in private
-                    else (0o755 if path.suffix == ".sh" else 0o644)
-                )
+                0o600
+                if path in private
+                else (0o755 if path.suffix == ".sh" else 0o644)
             )
             try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                if path.exists() and not path.is_file():
-                    raise ConfigError(f"cannot replace {path}: not a regular " "file")
-                handle, tmp_name = tempfile.mkstemp(
-                    dir=str(path.parent), prefix=f".{path.name}."
-                )
-                temp = Path(tmp_name)
-                temps.append(temp)
-                with os.fdopen(handle, "wb") as stream:
-                    stream.write(payload)
+                handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except OSError as exc:
+                raise ConfigError(
+                    f"cannot create {path}: {exc.strerror or exc}"
+                ) from exc
+            created.append(path)
+            try:
+                with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                    stream.write(content)
                     stream.flush()
                     os.fsync(stream.fileno())
-                os.chmod(temp, mode)
-                backup = None
-                if current is not None:
-                    backup = path.with_name(f".{path.name}.pennyroyal-old")
-                    backup.unlink(missing_ok=True)
-                    try:
-                        os.link(path, backup)
-                    except OSError:
-                        # No hard links here: keep the previous bytes anyway.
-                        shutil.copy2(path, backup)
-                    backups.append(backup)
+                path.chmod(mode)
             except OSError as exc:
                 raise ConfigError(
-                    f"cannot write {path}: " f"{exc.strerror or exc}"
+                    f"cannot write {path}: {exc.strerror or exc}"
                 ) from exc
-            staged.append((path, temp, backup))
-            outcomes.append((path, "written"))
-        replaced: list[tuple[Path, Optional[Path]]] = []
-        for path, temp, backup in staged:
+    except BaseException:
+        for done in created:
+            done.unlink(missing_ok=True)
+        for folder in reversed(folders):
             try:
-                os.replace(temp, path)
-            except OSError as exc:
-                for done, previous in reversed(replaced):
-                    if previous is None:
-                        done.unlink(missing_ok=True)
-                    else:
-                        # Rename the backup itself: a 0444 file cannot be
-                        # rewritten in place, and renaming keeps its bytes and
-                        # mode instead of re-creating them.
-                        os.replace(previous, done)
-                raise ConfigError(
-                    f"cannot replace {path}: " f"{exc.strerror or exc}"
-                ) from exc
-            replaced.append((path, backup))
-    finally:
-        for temp in temps:
-            temp.unlink(missing_ok=True)
-        for backup in backups:
-            backup.unlink(missing_ok=True)
-    return outcomes
+                folder.rmdir()  # empty again unless the world changed meanwhile
+            except OSError:
+                pass
+        raise
+    return paths
 
 
 # --------------------------------------------------------------------------
@@ -1855,44 +1842,14 @@ def container_launch_files(plan: Plan) -> list[tuple[Path, str]]:
     return files
 
 
-def container_write_plan(
-    plan: Plan,
-    files: Optional[list[tuple[Path, str]]] = None,
-) -> list[tuple[Path, str]]:
-    """Write these (or freshly generated) launch files; consent is already given.
+def write_container_files(plan: Plan) -> list[Path]:
+    """Create the generated launch files (run.sh, startup script, NIXL TOML).
 
-    The caller that asks the operator about an edited file does so from this same
-    list, so what is agreed is exactly what lands on disk. Content that already
-    matches is left completely alone (no rewrite, no chmod).
+    Generation is a save-time act, never a launch-time one, and a save only
+    ever writes fresh paths: an existing file is never replaced, so ./run.sh
+    afterwards runs exactly the files the operator has in that folder.
     """
-    return commit_files(list(container_launch_files(plan) if files is None else files))
-
-
-def write_container_files(plan: Plan, confirm=None) -> list[tuple[Path, str]]:
-    """Write the generated launch files as one set, or not at all.
-
-    Generation is a save-time act, never a launch-time one: ./run.sh afterwards
-    runs the file the operator has, not a fresh copy of these lines. Consent for
-    every file that would replace an edited one is obtained BEFORE anything is
-    written, so declining cannot leave run.sh and the startup script disagreeing
-    about the disk tier, and a cancel or EOF mid-question changes nothing.
-    """
-    files = container_launch_files(plan)
-    edited = [
-        path
-        for path, content in files
-        if path.is_file() and path.read_text(encoding="utf-8") != content
-    ]
-    if (
-        edited
-        and confirm is not None
-        and not confirm(
-            "Overwrite the launch file(s) you edited so the whole set matches "
-            "these settings? [{}]".format(", ".join(path.name for path in edited))
-        )
-    ):
-        return [(path, "kept your edited copy") for path, _ in files]
-    return container_write_plan(plan, files)
+    return create_new_files(container_launch_files(plan))
 
 
 def container_mount_issue(
@@ -2045,10 +2002,12 @@ HELP_EPILOG = """\
 Files and precedence:
   native config    ~/.config/pennyroyal/pennyroyal.env (0600, user-owned)
   container config ~/.config/pennyroyal/pennyroyal-container.env, the
-                   configurator's own file: saving ./configure-penny --container
-                   writes these settings into an ordinary run.sh plus a startup
-                   script (and a NIXL TOML when the disk tier is on) under
-                   LAUNCH_DIR, and the container then reads only those files --
+                   configurator's own file: each save ./configure-penny
+                   --container writes a NEW timestamped copy of these
+                   settings plus a fresh timestamped folder holding an
+                   ordinary run.sh, a startup script (and a NIXL TOML when
+                   the disk tier is on); previous files are never replaced,
+                   and the container then reads only those files --
                    no host Python, checkout, Compose or .env at container start.
   --config PATH wins over PENNYROYAL_CONFIG, which wins over the default above.
   A key saved in the file wins over an inherited environment variable. A key

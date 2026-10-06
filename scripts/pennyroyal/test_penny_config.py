@@ -14,6 +14,7 @@ import math
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import unittest
@@ -113,10 +114,6 @@ def docker_stub(directory: Path) -> tuple[Path, Path]:
     )
     stub.chmod(0o755)
     return bin_dir, capture
-
-
-class _Cancelled(Exception):
-    """Stand-in for the wizard's cancellation (its 'q'/EOF Cancelled signal)."""
 
 
 def make_executable(path: Path, body: str) -> None:
@@ -1351,6 +1348,10 @@ class ContainerPlanTests(FixtureMixin):
         LAUNCH_ENV_KEYS), so nothing but the printed command can supply them.
         No daemon, model or GPU is involved here.
         """
+        # A save only ever writes fresh paths, so each printed-command check
+        # starts from an empty folder (several checks reuse one base).
+        if plan.launch_dir is not None and plan.launch_dir.exists():
+            shutil.rmtree(plan.launch_dir)
         pc.write_container_files(plan)
         bin_dir, capture = docker_stub(self.base)
         env = {
@@ -1898,33 +1899,6 @@ class ContainerLaunchGenerationTests(FixtureMixin):
         with self.assertRaises(pc.ConfigError):
             pc.container_launch_files(plan)
 
-    def test_saving_twice_does_not_clobber_an_edited_file(self):
-        plan = self.container_plan(self.base_values())
-        pc.write_container_files(plan)
-        run_sh = self.base / "launch out" / "run.sh"
-        original = run_sh.read_text()
-        run_sh.write_text(original + "\n# operator edit\n")
-        asked: list[str] = []
-        outcomes = dict(
-            pc.write_container_files(
-                plan, confirm=lambda text: asked.append(text) or False
-            )
-        )
-        self.assertEqual(len(asked), 1, asked)
-        self.assertIn("run.sh", asked[0])
-        self.assertEqual(outcomes[run_sh], "kept your edited copy")
-        self.assertEqual(run_sh.read_text(), original + "\n# operator edit\n")
-        # A file whose content already matches is never rewritten at all.
-        startup = self.base / "launch out" / "config" / "start-flash-next-frspec.sh"
-        started = startup.stat().st_mtime_ns
-        self.assertEqual(dict(pc.write_container_files(plan))[startup], "unchanged")
-        self.assertEqual(startup.stat().st_mtime_ns, started)
-        # Confirming the overwrite is what replaces the operator's edit.
-        run_sh.write_text(original + "\n# operator edit\n")
-        outcomes = dict(pc.write_container_files(plan, confirm=lambda text: True))
-        self.assertEqual(outcomes[run_sh], "written")
-        self.assertEqual(run_sh.read_text(), original)
-
     def test_saved_forward_unknown_tools_reaches_the_container(self):
         # A saved false must arrive as false in the launched process, not be
         # rewritten to the script's qualified default on the way.
@@ -2276,215 +2250,122 @@ class NativeDiskTierPlanTests(FixtureMixin):
         )
 
 
-class AtomicWriteTests(unittest.TestCase):
-    def test_permissions_are_preserved_and_no_temp_file_remains(self):
-        import tempfile
+class NewSaveTests(unittest.TestCase):
+    """An explicit save creates NEW outputs or nothing; it never replaces."""
 
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "pennyroyal.env"
-            path.write_text("A=1\n")
-            path.chmod(0o640)
-            pc.write_env_file(path, "A=2\n")
-            self.assertEqual(path.stat().st_mode & 0o777, 0o640)
-            self.assertEqual(pc.read_env_file(path), {"A": "2"})
-            self.assertEqual(
-                sorted(entry.name for entry in Path(temp).iterdir()), ["pennyroyal.env"]
-            )
-
-    def test_a_blocked_destination_fails_the_whole_save_set(self):
-        # The save writes settings, run.sh and the startup script as one set:
-        # an existing directory where a file belongs must stop every one of
-        # them, not land the first two and raise on the third.
+    def test_saved_names_are_timestamped_and_never_reused(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            settings, launch = root / "pennyroyal.env", root / "launch"
-            (launch / "config").mkdir(parents=True)
-            run_sh = launch / "run.sh"
-            run_sh.write_text("#!/bin/sh\nold\n")
-            run_sh.chmod(0o755)
-            startup = launch / "config" / "start-flash-next.sh"
-            startup.mkdir()  # the operator's obstruction
-            with self.assertRaises(pc.ConfigError) as caught:
-                pc.commit_files(
-                    [
-                        (settings, "NIXL=off\n"),
-                        (run_sh, "#!/bin/sh\nnew\n"),
-                        (startup, "#!/usr/bin/env bash\n"),
-                    ],
-                    private=(settings,),
-                )
-            self.assertIn("start-flash-next.sh", str(caught.exception))
-            self.assertFalse(settings.exists(), "settings must not land")
-            self.assertEqual(run_sh.read_text(), "#!/bin/sh\nold\n")
-            # Nothing half-applied and no temporary litter anywhere in the set.
+            stamp = "20261006T072130"
+            config = root / "pennyroyal.env"
+            first = pc.timestamped_new_path(config, stamp)
+            self.assertEqual(first, root / "pennyroyal-20261006T072130.env")
+            first.write_text("A=1\n")
+            # A second save inside one second must not point at the file the
+            # first one just wrote.
             self.assertEqual(
-                sorted(p.name for p in root.rglob("*") if p.is_file()), ["run.sh"]
+                pc.timestamped_new_path(config, stamp),
+                root / "pennyroyal-20261006T072130-2.env",
             )
-            self.assertEqual([p.name for p in startup.iterdir()], [])
-
-    def test_replacement_uses_the_documented_modes(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / "config").mkdir()
-            existing = root / "kept.env"
-            existing.write_text("A=1\n")
-            existing.chmod(0o640)
-            fresh = root / "fresh.env"
-            script = root / "config" / "start-flash-next.sh"
-            toml = root / "config" / "nixl-posix.toml"
-            pc.commit_files(
-                [
-                    (existing, "A=2\n"),
-                    (fresh, "A=1\n"),
-                    (script, "#!/usr/bin/env bash\n"),
-                    (toml, 'backend = "posix")\n'),
-                ],
-                private=(fresh,),
-            )
+            launch = root / "pennyroyal-container"
+            new_dir = pc.timestamped_new_path(launch, stamp, directory=True)
+            self.assertEqual(new_dir, root / "pennyroyal-container-20261006T072130")
+            new_dir.mkdir()
             self.assertEqual(
-                existing.stat().st_mode & 0o777,
-                0o640,
-                "an existing file keeps its own permissions",
-            )
-            self.assertEqual(fresh.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(script.stat().st_mode & 0o777, 0o755)
-            self.assertEqual(toml.stat().st_mode & 0o777, 0o644)
-            self.assertEqual(
-                dict(pc.commit_files([(existing, "A=2\n")])),
-                {existing: "unchanged"},
-                "matching content is left alone",
+                pc.timestamped_new_path(launch, stamp, directory=True),
+                root / "pennyroyal-container-20261006T072130-2",
             )
 
-    def test_a_failed_replacement_restores_what_was_already_moved(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            first, second = root / "a.sh", root / "b.sh"
-            first.write_text("old a\n")
-            second.write_text("old b\n")
-            real_replace = pc.os.replace
-            attempts = {"n": 0}
-
-            def flaky(src, dst):
-                attempts["n"] += 1
-                if attempts["n"] == 2:
-                    raise OSError(21, "Is a directory")
-                return real_replace(src, dst)
-
-            pc.os.replace = flaky
-            try:
-                with self.assertRaises(pc.ConfigError) as caught:
-                    pc.commit_files([(first, "new a\n"), (second, "new b\n")])
-            finally:
-                pc.os.replace = real_replace
-            self.assertIn("b.sh", str(caught.exception))
-            self.assertEqual(
-                first.read_text(),
-                "old a\n",
-                "the file already replaced has to come back",
-            )
-            self.assertEqual(second.read_text(), "old b\n")
-            self.assertEqual(sorted(p.name for p in root.iterdir()), ["a.sh", "b.sh"])
-
-    def test_a_rollback_renames_the_backup_so_read_only_and_crlf_survive(self):
-        # Restoring has to rename the previous file back, not write text over
-        # it: a 0444 destination cannot be rewritten at all, and a file whose
-        # lines end CRLF must keep those bytes rather than a normalized copy.
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            kept = root / "a.sh"
-            blocked = root / "b.sh"
-            kept.write_bytes(b"old a\r\nsecond\r\n")
-            kept.chmod(0o444)
-            blocked.write_bytes(b"old b\n")
-            real_replace = pc.os.replace
-            attempts = {"n": 0}
-
-            def flaky(src, dst):
-                attempts["n"] += 1
-                if attempts["n"] == 2:
-                    raise OSError(21, "Is a directory")
-                return real_replace(src, dst)
-
-            pc.os.replace = flaky
-            try:
-                with self.assertRaises(pc.ConfigError) as caught:
-                    pc.commit_files([(kept, "new a\n"), (blocked, "new b\n")])
-            finally:
-                pc.os.replace = real_replace
-            self.assertIn("b.sh", str(caught.exception))
-            self.assertEqual(
-                kept.read_bytes(),
-                b"old a\r\nsecond\r\n",
-                "the previous bytes come back exactly, CRLF and all",
-            )
-            self.assertEqual(
-                kept.stat().st_mode & 0o777,
-                0o444,
-                "a read-only file stays read-only through the " "rollback",
-            )
-            self.assertEqual(blocked.read_bytes(), b"old b\n")
-            self.assertEqual(
-                sorted(path.name for path in root.iterdir()),
-                ["a.sh", "b.sh"],
-                "no backup or temporary file survives the refusal",
-            )
-
-    def test_identical_content_with_crlf_is_left_alone_as_unchanged(self):
-        # Comparison happens on bytes, so a file that already holds the payload
-        # is not rewritten (and its CRLF endings are not silently normalized).
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "config.toml"
-            path.write_bytes(b'backend = "posix"\r\n')
-            before = path.stat()
-            self.assertEqual(
-                dict(pc.commit_files([(path, 'backend = "posix"\r\n')])),
-                {path: "unchanged"},
-            )
-            self.assertEqual(path.read_bytes(), b'backend = "posix"\r\n')
-            self.assertEqual(path.stat().st_mtime_ns, before.st_mtime_ns)
-            self.assertEqual(path.stat().st_mode & 0o777, before.st_mode & 0o777)
-
-    def test_a_full_disk_refuses_the_save_and_leaves_no_temporary(self):
-        # The temporary has to be registered before the write and fsync, or
-        # ENOSPC escapes with an invisible file left in the operator's folder.
+    def test_created_files_use_the_documented_modes_and_create_parents(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             settings = root / "pennyroyal.env"
-            run_sh = root / "run.sh"
-            run_sh.write_bytes(b"#!/bin/sh\nold\n")
+            run_sh = root / "new launch" / "run.sh"
+            toml = root / "new launch" / "config" / "nixl-posix.toml"
+            pc.create_new_files(
+                [
+                    (settings, "NIXL=off\n"),
+                    (run_sh, "#!/bin/sh\nx\n"),
+                    (toml, "a = 1\n"),
+                ],
+                private=(settings,),
+            )
+            self.assertEqual(settings.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(run_sh.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(toml.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(pc.read_env_file(settings), {"NIXL": "off"})
+
+    def test_an_existing_destination_is_refused_not_replaced(self):
+        # A previous file is the operator's: it is not even opened for
+        # writing, and the new set of the refused save disappears completely.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            kept = root / "pennyroyal.env"
+            kept.write_text("A=1\n")
+            kept.chmod(0o640)
+            fresh = root / "launch" / "run.sh"
+            with self.assertRaises(pc.ConfigError) as caught:
+                pc.create_new_files([(fresh, "#!/bin/sh\nnew\n"), (kept, "A=2\n")])
+            self.assertIn("refusing to replace", str(caught.exception))
+            self.assertEqual(kept.read_text(), "A=1\n")
+            self.assertEqual(kept.stat().st_mode & 0o777, 0o640)
+            self.assertFalse(fresh.exists())
+            self.assertFalse((root / "launch").exists())
+            self.assertEqual(
+                sorted(p.name for p in root.iterdir()), ["pennyroyal.env"]
+            )
+
+    def test_a_failed_write_removes_only_what_this_save_created(self):
+        # ENOSPC on the last fsync: every NEW file of this save goes again
+        # (with the folders it created), while an earlier save's file stays
+        # byte-for-byte as it was.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            earlier = root / "pennyroyal-20261006T072130.env"
+            earlier.write_text("A=1\n")
+            earlier_bytes = earlier.read_bytes()
+            earlier_mode = earlier.stat().st_mode & 0o777
+            settings = root / "pennyroyal-20261006T072200.env"
+            run_sh = root / "new launch" / "run.sh"
+            startup = root / "new launch" / "config" / "start-flash-next.sh"
             real_fsync = pc.os.fsync
+            attempts = {"n": 0}
 
-            def no_space(fd):
-                raise OSError(28, "No space left on device")
+            def no_space_on_the_last_write(fd):
+                attempts["n"] += 1
+                if attempts["n"] == 3:
+                    raise OSError(28, "No space left on device")
+                return real_fsync(fd)
 
-            pc.os.fsync = no_space
+            pc.os.fsync = no_space_on_the_last_write
             try:
                 with self.assertRaises(pc.ConfigError) as caught:
-                    pc.commit_files(
-                        [(settings, "NIXL=off\n"), (run_sh, "#!/bin/sh\nnew\n")],
+                    pc.create_new_files(
+                        [
+                            (settings, "NIXL=off\n"),
+                            (run_sh, "#!/bin/sh\nx\n"),
+                            (startup, "#!/bin/sh\ny\n"),
+                        ],
                         private=(settings,),
                     )
             finally:
                 pc.os.fsync = real_fsync
             self.assertIn("No space left on device", str(caught.exception))
+            self.assertEqual(earlier.read_bytes(), earlier_bytes)
+            self.assertEqual(earlier.stat().st_mode & 0o777, earlier_mode)
             self.assertFalse(settings.exists())
-            self.assertEqual(run_sh.read_bytes(), b"#!/bin/sh\nold\n")
+            self.assertFalse((root / "new launch").exists())
             self.assertEqual(
-                [path.name for path in root.iterdir()],
-                ["run.sh"],
-                "nothing hidden, nothing half-written",
+                sorted(p.name for p in root.iterdir()),
+                ["pennyroyal-20261006T072130.env"],
             )
 
     def test_the_same_destination_named_twice_is_refused(self):
@@ -2493,7 +2374,7 @@ class AtomicWriteTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "run.sh"
             with self.assertRaises(pc.ConfigError):
-                pc.commit_files([(path, "a\n"), (path, "b\n")])
+                pc.create_new_files([(path, "a\n"), (path, "b\n")])
             self.assertFalse(path.exists())
 
 
@@ -2528,106 +2409,6 @@ class BuildEnvTests(unittest.TestCase):
         )
         values = dict(line.split("=", 1) for line in run.stdout.splitlines())
         self.assertEqual(values["MAX_JOBS"], "8")
-
-
-class ContainerGenerationConsentTests(FixtureMixin):
-    """Consent covers the related set, so a decline cannot half-apply it."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        (self.repo / "docker" / "pennyroyal").mkdir(parents=True, exist_ok=True)
-        (self.repo / "docker" / "pennyroyal" / "launch").symlink_to(
-            ROOT / "docker" / "pennyroyal" / "launch"
-        )
-        self.host_root = self.base / "host models"
-        self.host_root.mkdir()
-        (self.host_root / "RadixArk-Qwen3.8-Flash-Next-NVFP4").mkdir()
-        (self.base / "cache").mkdir(exist_ok=True)
-        (self.base / "nixl").mkdir(exist_ok=True)
-        self.launch_dir = self.base / "launch out"
-
-    def plan(self, nixl: str) -> pc.Plan:
-        values = {
-            "HOST_MODELS_ROOT": str(self.host_root),
-            "HOST_CACHE_BASE": str(self.base / "cache"),
-            "HOST_NIXL_STORAGE_BASE": str(self.base / "nixl"),
-            "LAUNCH_DIR": str(self.launch_dir),
-            "NIXL": nixl,
-        }
-        path = self.base / f"{nixl}.env"
-        path.write_text(
-            pc.serialize_env(
-                [("", sorted(values.items()))], header=(f"{pc.PROFILE_KEY}=next",)
-            )
-        )
-        return pc.build_plan(
-            "container",
-            pc.load_config("container", path, {}, self.repo),
-            {},
-            repo_root=self.repo,
-        )
-
-    def tracked(self) -> list[Path]:
-        return [
-            self.launch_dir / "run.sh",
-            self.launch_dir / "config" / "start-flash-next-frspec.sh",
-        ]
-
-    def test_declining_leaves_the_whole_set_exactly_as_it_was(self):
-        # The repro: run.sh wants the new disk-tier choice, the startup script
-        # was edited by hand. Consent is for the set, before anything is
-        # written, so a decline cannot pair run.sh's new choice with the old
-        # startup file -- the two would disagree about the mount and the flags.
-        on = self.plan("on")
-        pc.write_container_files(on)
-        before = {path: path.read_text() for path in self.tracked()}
-        assert "NIXL=on" in before[self.launch_dir / "run.sh"]
-        startup = self.launch_dir / "config" / "start-flash-next-frspec.sh"
-        startup.write_text(before[startup] + "\n# my own edit\n")
-        before = {path: path.read_text() for path in self.tracked()}
-        asked: list[str] = []
-        outcomes = dict(
-            pc.write_container_files(
-                self.plan("off"), confirm=lambda text: asked.append(text) or False
-            )
-        )
-        # One question naming every file that would be replaced, asked once.
-        self.assertEqual(len(asked), 1, asked)
-        self.assertIn("run.sh", asked[0])
-        self.assertIn("start-flash-next-frspec.sh", asked[0])
-        for path, text in before.items():
-            self.assertEqual(path.read_text(), text, path)
-        self.assertEqual(set(outcomes.values()), {"kept your edited copy"})
-        # Nothing half-applied: the launcher still matches the kept script.
-        self.assertIn("NIXL=on", (self.launch_dir / "run.sh").read_text())
-
-    def test_cancel_at_the_question_writes_nothing(self):
-        on = self.plan("on")
-        pc.write_container_files(on)
-        edited = self.launch_dir / "run.sh"
-        edited.write_text(edited.read_text() + "\n# mine\n")
-        before = {path: path.read_text() for path in self.tracked()}
-
-        def cancel(_text: str) -> bool:
-            # The wizard's Prompt raises this on 'q' or end of input.
-            raise _Cancelled()
-
-        with self.assertRaises(_Cancelled):
-            pc.write_container_files(self.plan("off"), confirm=cancel)
-        for path, text in before.items():
-            self.assertEqual(path.read_text(), text, path)
-
-    def test_confirming_replaces_the_whole_set_together(self):
-        pc.write_container_files(self.plan("on"))
-        startup = self.launch_dir / "config" / "start-flash-next-frspec.sh"
-        startup.write_text(startup.read_text() + "\n# mine\n")
-        outcomes = dict(
-            pc.write_container_files(self.plan("off"), confirm=lambda _text: True)
-        )
-        self.assertEqual(set(outcomes.values()), {"written"})
-        self.assertIn("NIXL=off", (self.launch_dir / "run.sh").read_text())
-        self.assertIn("NIXL=off", startup.read_text())
-        self.assertNotIn("# mine", startup.read_text())
 
 
 if __name__ == "__main__":

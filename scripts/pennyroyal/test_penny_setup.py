@@ -11,6 +11,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,27 @@ def make_executable(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body)
     path.chmod(0o755)
+
+
+def saved_settings(output: str) -> Path:
+    """The settings file the wizard said it saved (its 'Saved ...' line).
+
+    The prompt's Choice label has no trailing newline, so the 'Saved' text
+    can sit at the end of the last 'Choice (...): ' line: search anywhere.
+    """
+    marker = "Saved "
+    index = output.rfind(marker)
+    assert index != -1, output
+    return Path(output[index + len(marker) :].splitlines()[0].strip())
+
+
+def printed_launch_dir(output: str) -> Path:
+    """The launch directory named in the printed 'Start it with' command."""
+    for line in output.splitlines():
+        if line.startswith("Start it with: "):
+            parts = shlex.split(line[len("Start it with: "):])
+            return Path(parts[1])
+    raise AssertionError(f"no printed start command in:\n{output}")
 
 
 class FixtureMixin(unittest.TestCase):
@@ -157,7 +179,13 @@ class SetupSessionTests(FixtureMixin):
             self.repo,
             home=home or self.base / "isolated-home",
         )
-        return code, out.getvalue(), path
+        output = out.getvalue()
+        if code == 0:
+            # A save is a NEW timestamped file, not the input path: hand back
+            # the exact file the wizard says it wrote (the printed line under
+            # test, like everything else here).
+            return code, output, saved_settings(output)
+        return code, output, path
 
     def basics(
         self,
@@ -228,9 +256,10 @@ class SetupSessionTests(FixtureMixin):
         self.assertEqual(saved["MAX_RUNNING_REQUESTS"], "6")
         self.assertIn("unrecognized key kept", output)
 
-    def test_existing_file_needs_consent_to_replace(self):
-        # A valid saved file: the save gate passes and the replace confirmation
-        # alone decides; declining leaves the file byte-for-byte untouched.
+    def test_declining_writes_no_new_file_and_keeps_the_previous(self):
+        # A valid saved file: the save gate passes and the confirmation alone
+        # decides; declining leaves the previous file byte- and mode-identical
+        # and creates no new file either.
         existing = (
             f"{pc.PROFILE_KEY}=next\n"
             f"TARGET_MODEL={pc.quote_value(str(self.next_model))}\n"
@@ -242,8 +271,9 @@ class SetupSessionTests(FixtureMixin):
             existing=existing,
         )
         self.assertEqual(code, 3, output)
-        self.assertIn("Replace", output)
-        self.assertEqual(path.read_text(), existing)
+        self.assertIn("Save a new settings file as", output)
+        self.assertEqual(path.read_bytes(), existing.encode())
+        self.assertEqual(list(self.base.glob("pennyroyal-*.env")), [])
 
     def test_invalid_menu_selection_is_reasked_until_valid(self):
         # The numbered profile menu prints BEFORE the question; a junk answer
@@ -379,12 +409,14 @@ class SetupSessionTests(FixtureMixin):
         self.assertIn("Model profile:\n  [1] next", output)
         self.assertIn("Media preprocessing device (cpu or cuda:N):\n  [1] cpu", output)
         self.assertIn("  [1] yes\n  [2] no", output)
-        saved = pc.read_env_file(self.config_path)
+        settings = saved_settings(output)
+        self.assertNotEqual(settings, self.config_path)  # a NEW file
+        saved = pc.read_env_file(settings)
         self.assertEqual(saved[pc.PROFILE_KEY], "next")
         self.assertEqual(saved["NVIDIA_GPU"], "0")
         plan = pc.build_plan(
             "container",
-            pc.load_config("container", self.config_path, {}, self.repo),
+            pc.load_config("container", settings, {}, self.repo),
             {},
             repo_root=self.repo,
         )
@@ -405,6 +437,7 @@ class SetupSessionTests(FixtureMixin):
         )
         self.assertEqual(code, 3, out2.getvalue())
         self.assertFalse(cancel.exists())
+        self.assertEqual(list(self.base.glob("cancel-*.env")), [])
 
     def test_malformed_saved_gpu_is_named_not_crashed(self):
         # Parent's repro: saved GPU='bad gpu' + discovered GPU 0, then Enter.
@@ -621,7 +654,12 @@ class SetupSessionTests(FixtureMixin):
         # the existing file stays byte-for-byte as it was.
         with self.assertRaises(ps.Cancelled):
             self.run_setup([""] + self.basics("")[:9] + ["q"], existing=existing)
-        self.assertEqual(path.read_text(), existing)
+        self.assertEqual(self.config_path.read_text(), existing)
+        self.assertEqual(
+            len(list(self.base.glob("pennyroyal-*.env"))),
+            1,
+            "the cancelled run created no new settings file",
+        )
         # A junk saved value cannot be kept by Enter: the menu rejects and
         # re-asks, so the invalid value never reaches the file again (the
         # extra blank line feeds the second, now-valid, menu prompt).
@@ -729,13 +767,20 @@ class SetupSessionTests(FixtureMixin):
             )
         output = out.getvalue()
         self.assertEqual(code, 0, output)
-        self.assertTrue(custom.is_file())
-        self.assertIn(str(custom), output)
-        self.assertNotIn(
-            "user-selected.env\n",
-            output.split("next command:")[0].replace(str(custom), ""),
-        )  # no bare relative echo
+        # The save wrote a NEW timestamped sibling; the file the operator
+        # selected is only ever an input and stays untouched.
+        saved = saved_settings(output)
+        self.assertTrue(saved.is_file())
+        self.assertFalse(custom.exists())
+        self.assertIn(str(saved), output)
+        head = (
+            output.split("next command:")[0]
+            .replace(str(saved), "")
+            .replace(str(custom), "")
+        )
+        self.assertNotIn("user-selected.env\n", head)  # no bare relative echo
         printed = output.split("next command:")[1].strip().splitlines()[0]
+        self.assertIn(str(saved), printed)
         run = subprocess.run(
             printed,
             shell=True,
@@ -993,7 +1038,7 @@ class SetupSessionTests(FixtureMixin):
         # Python, no checkout, no Compose and no .env.
         code, output, launch_dir, files = self.run_container_setup()
         self.assertEqual(code, 0, output)
-        self.assertIn("Writing the launch files in", output)
+        self.assertIn("Launch files written in", output)
         self.assertEqual(
             sorted(files), ["nixl-posix-frspec.toml", "start-flash-next-frspec.sh"]
         )
@@ -1011,12 +1056,13 @@ class SetupSessionTests(FixtureMixin):
 
     def test_declining_the_save_changes_neither_settings_nor_launch_files(self):
         # The changed decision is the case that matters: the saved tier goes on
-        # to off while the startup script must follow. Declining at the one gate
-        # has to leave BOTH the saved file and the launch files byte-identical,
-        # and must not advertise a launch built from the rejected settings.
+        # to off. Declining at the gate has to leave the previous settings file
+        # and launch folder byte-identical, create nothing new, and not
+        # advertise a launch built from the rejected settings.
         code, output, launch_dir, files = self.run_container_setup()
         self.assertEqual(code, 0, output)
-        config_before = self.config_path.read_bytes()
+        settings = saved_settings(output)
+        config_before = settings.read_bytes()
         run_sh = launch_dir / "run.sh"
         startup = files["start-flash-next-frspec.sh"]
         run_before, startup_before = run_sh.read_bytes(), startup.read_bytes()
@@ -1024,52 +1070,93 @@ class SetupSessionTests(FixtureMixin):
         self.assertIn(b"NIXL=on", startup_before)
 
         code, output, _dir, _files = self.run_container_setup(
-            existing=True, answers={"NIXL": "2"}, save="2"
+            existing=True,
+            answers={"NIXL": "2"},
+            save="2",
+            config_path=settings,
         )  # off, then 'no'
         self.assertEqual(code, 3, output)
         self.assertIn("Cancelled; nothing was written", output)
-        # The question named what it covered, so the answer was informed.
-        self.assertIn(str(self.config_path), output)
-        self.assertIn("launch file(s) you edited", output)
-        self.assertIn("start-flash-next-frspec.sh", output)
-        self.assertEqual(self.config_path.read_bytes(), config_before)
+        # The question named the fresh outputs it was offering, so the answer
+        # was informed; declining wrote none of them.
+        self.assertIn("Save a new settings file as", output)
+        self.assertIn("launch files in", output)
+        self.assertNotIn("Saved ", output)
+        self.assertEqual(settings.read_bytes(), config_before)
         self.assertEqual(run_sh.read_bytes(), run_before)
         self.assertEqual(startup.read_bytes(), startup_before)
+        self.assertEqual(
+            sorted(p.name for p in launch_dir.parent.iterdir()), [launch_dir.name]
+        )
         # Nothing on screen offers the launch the operator just refused.
         self.assertNotIn("--no-nixl", output)
         self.assertNotIn("Start it with:", output)
 
-    def test_cancel_at_the_save_gate_leaves_the_previous_choice_in_place(self):
+    def test_cancel_at_the_save_gate_leaves_the_previous_set_in_place(self):
         # 'q' (or EOF) is a decline with no write at all: the previous save and
         # its launch files stay exactly as they were.
-        code, _output, launch_dir, files = self.run_container_setup()
+        code, output, launch_dir, files = self.run_container_setup()
         self.assertEqual(code, 0)
-        config_before = self.config_path.read_bytes()
+        settings = saved_settings(output)
+        config_before = settings.read_bytes()
         run_before = (launch_dir / "run.sh").read_bytes()
         startup = files["start-flash-next-frspec.sh"]
         startup_before = startup.read_bytes()
 
         with self.assertRaises(ps.Cancelled):
-            self.run_container_setup(existing=True, answers={"NIXL": "2"}, save="q")
-        self.assertEqual(self.config_path.read_bytes(), config_before)
+            self.run_container_setup(
+                existing=True,
+                answers={"NIXL": "2"},
+                save="q",
+                config_path=settings,
+            )
+        self.assertEqual(settings.read_bytes(), config_before)
         self.assertEqual((launch_dir / "run.sh").read_bytes(), run_before)
         self.assertEqual(startup.read_bytes(), startup_before)
-
-    def test_confirming_the_gate_changes_the_settings_and_files_together(self):
-        # The same on-to-off decision, agreed: no half-applied state anywhere.
-        _code, _output, launch_dir, files = self.run_container_setup()
-        startup = files["start-flash-next-frspec.sh"]
-        code, output, _dir, _files = self.run_container_setup(
-            existing=True, answers={"NIXL": "2"}, save=""
+        self.assertEqual(
+            sorted(p.name for p in launch_dir.parent.iterdir()), [launch_dir.name]
         )
+
+    def test_two_saves_produce_distinct_usable_sets(self):
+        # The same on-to-off decision, agreed: it lands in a NEW settings file
+        # and a NEW launch folder. Every file of the first save keeps its exact
+        # bytes and mode, and each printed command names only its own outputs.
+        _code, output, launch_dir, files = self.run_container_setup()
+        first_settings = saved_settings(output)
+        first_run = (launch_dir / "run.sh").read_bytes()
+        startup = files["start-flash-next-frspec.sh"]
+        first_startup = startup.read_bytes()
+        first_toml = files["nixl-posix-frspec.toml"].read_bytes()
+        first_mode = (launch_dir / "run.sh").stat().st_mode & 0o777
+
+        code, output, second_dir, second_files = self.run_container_setup(
+            existing=True,
+            answers={"NIXL": "2"},
+            save="",
+            config_path=first_settings,
+        )  # off
         self.assertEqual(code, 0, output)
-        self.assertEqual(pc.read_env_file(self.config_path)["NIXL"], "off")
-        self.assertIn("\nNIXL=off\n", (launch_dir / "run.sh").read_text())
-        self.assertIn("\nNIXL=off\n", startup.read_text())
-        # run.sh and the startup script agree; the unmounted tier's TOML stays
-        # on disk untouched because the operator owns that directory and may
-        # have edited it (the generated set simply does not reference it).
-        self.assertIn("Start it with:", output)
+        second_settings = saved_settings(output)
+        self.assertNotEqual(second_settings, first_settings)
+        self.assertNotEqual(second_dir, launch_dir)
+        saved = pc.read_env_file(second_settings)
+        self.assertEqual(saved["NIXL"], "off")
+        # The saved settings resolve to the same fresh set the command names.
+        self.assertEqual(saved["LAUNCH_DIR"], str(second_dir))
+        self.assertIn("\nNIXL=off\n", (second_dir / "run.sh").read_text())
+        self.assertIn(
+            "\nNIXL=off\n", second_files["start-flash-next-frspec.sh"].read_text()
+        )
+        # With the tier off the set has no TOML at all, and the printed
+        # command (and only it) names the new folder.
+        self.assertEqual(sorted(second_files), ["start-flash-next-frspec.sh"])
+        self.assertIn(str(second_dir), output)
+        self.assertIn("--no-nixl", output)
+        # The previous save is untouched: bytes and modes as they were.
+        self.assertEqual((launch_dir / "run.sh").read_bytes(), first_run)
+        self.assertEqual(startup.read_bytes(), first_startup)
+        self.assertEqual(files["nixl-posix-frspec.toml"].read_bytes(), first_toml)
+        self.assertEqual((launch_dir / "run.sh").stat().st_mode & 0o777, first_mode)
 
     def test_container_disk_tier_off_asks_no_nixl_root_and_writes_no_toml(self):
         code, output, launch_dir, files = self.run_container_setup(
@@ -1078,7 +1165,9 @@ class SetupSessionTests(FixtureMixin):
         self.assertEqual(code, 0, output)
         # No root question at all, so there is no path nobody would use.
         self.assertNotIn("HOST_NIXL_STORAGE_BASE", output.split("Review")[0])
-        self.assertNotIn("HOST_NIXL_STORAGE_BASE", pc.read_env_file(self.config_path))
+        self.assertNotIn(
+            "HOST_NIXL_STORAGE_BASE", pc.read_env_file(saved_settings(output))
+        )
         self.assertEqual(sorted(files), ["start-flash-next-frspec.sh"])
         self.assertIn("\nNIXL=off\n", (launch_dir / "run.sh").read_text())
         self.assertIn("\nNIXL=off\n", files["start-flash-next-frspec.sh"].read_text())
@@ -1095,6 +1184,7 @@ class SetupSessionTests(FixtureMixin):
         save: str = "",
         before_save: tuple[str, ...] = (),
         environ: dict[str, str] | None = None,
+        config_path: Path | None = None,
     ) -> tuple[int, str, Path, dict]:
         """Drive the container wizard with the listed answers, keeping defaults.
 
@@ -1135,19 +1225,26 @@ class SetupSessionTests(FixtureMixin):
         )
         code = ps.run_session(
             "container",
-            self.config_path,
+            config_path or self.config_path,
             dict(environ or {}),
             prompt,
             self.repo,
             home=self.base / "isolated-home",
         )
-        launch_dir = self.base / "isolated-home" / "pennyroyal-container"
+        output = out.getvalue()
+        # A save is a NEW folder, so the helper trusts only what the wizard
+        # printed: the directory in its 'Start it with' command.
+        launch_dir = (
+            printed_launch_dir(output)
+            if code == 0
+            else self.base / "isolated-home" / "pennyroyal-container"
+        )
         files = (
             {path.name: path for path in (launch_dir / "config").iterdir()}
             if (launch_dir / "config").is_dir()
             else {}
         )
-        return code, out.getvalue(), launch_dir, files
+        return code, output, launch_dir, files
 
     def test_mixup_checkpoint_blocks_save_as_clear_error(self):
         # A dense checkpoint on the next profile is the parent's mixup case.
@@ -1228,7 +1325,9 @@ class SetupSessionTests(FixtureMixin):
         run_sh = (launch_dir / "run.sh").read_text()
         reloaded = pc.build_plan(
             "container",
-            pc.load_config("container", self.config_path, inherited, self.repo),
+            pc.load_config(
+                "container", saved_settings(output), inherited, self.repo
+            ),
             inherited,
             repo_root=self.repo,
         )
@@ -1250,12 +1349,13 @@ class SetupSessionTests(FixtureMixin):
         inherited = {"PENNY_HICACHE_SIZE_GB": "64", "MAX_RUNNING_REQUESTS": "7"}
         code, output, launch_dir, files = self.run_container_setup(environ=inherited)
         self.assertEqual(code, 0, output)
-        saved = pc.read_env_file(self.config_path)
+        settings = saved_settings(output)
+        saved = pc.read_env_file(settings)
         for name in sorted(inherited):
             self.assertNotIn(name, saved, name)  # left on Enter: never written
         reloaded = pc.build_plan(
             "container",
-            pc.load_config("container", self.config_path, inherited, self.repo),
+            pc.load_config("container", settings, inherited, self.repo),
             inherited,
             repo_root=self.repo,
         )
@@ -1280,81 +1380,60 @@ class SetupSessionTests(FixtureMixin):
         self.assertIn('--max-running-requests "$MAX_RUNNING_REQUESTS"', startup)
         self.assertIn('--hicache-size "$HICACHE_SIZE_GB"', startup)
 
-    def test_a_blocked_startup_destination_saves_the_set_or_nothing(self):
-        # Review regression, in the order the failure was reported: a normal
-        # save, then the generated startup file is replaced by a directory, then
-        # a save that turns the disk tier off. The settings file and run.sh used
-        # to move onto NIXL=off before writing the startup script raised
-        # IsADirectoryError, so the launch was described by two different saves.
-        _code, _output, launch_dir, _files = self.run_container_setup()
-        settings_before = self.config_path.read_bytes()
+    def test_a_failed_write_removes_the_new_set_and_keeps_the_previous(self):
+        # The review's half-write regression, on the new contract: an ENOSPC
+        # while the fresh set is being written must not leave the settings and
+        # run.sh on the new choice with a missing startup script. The whole
+        # NEW set is deleted again (folders included); the previous save keeps
+        # every byte, and no start command is advertised for the attempt that
+        # never completed.
+        _code, output, launch_dir, files = self.run_container_setup()
+        settings = saved_settings(output)
+        settings_before = settings.read_bytes()
         run_before = (launch_dir / "run.sh").read_bytes()
-        startup = launch_dir / "config" / "start-flash-next-frspec.sh"
-        startup.unlink()
-        startup.mkdir()
-        code, output, _dir, _files = self.run_container_setup(
-            existing=True, answers={"NIXL": "2"}, save=""
-        )  # off
-        self.assertEqual(code, 4, output)
-        self.assertIn("start-flash-next-frspec.sh", output)
-        self.assertIn("Cannot save", output)
-        self.assertIn("Nothing was written", output)
-        self.assertIn(
-            "NIXL=on",
-            settings_before.decode(),
-            "the fixture really did save the disk tier on",
-        )
-        self.assertEqual(
-            self.config_path.read_bytes(),
-            settings_before,
-            "the saved settings must stay on the old choice",
-        )
-        self.assertEqual(
-            (launch_dir / "run.sh").read_bytes(),
-            run_before,
-            "run.sh must stay on the old choice too",
-        )
-        self.assertTrue(
-            startup.is_dir(), "the directory the operator put there is untouched"
-        )
-        self.assertEqual(
-            sorted(path.name for path in (launch_dir / "config").iterdir()),
-            ["nixl-posix-frspec.toml", "start-flash-next-frspec.sh"],
-            "no half-written file and no temporary litter",
-        )
-
-    def test_a_blocked_run_sh_destination_saves_nothing_either(self):
-        # Same promise from the other end of the set: the host launch file is
-        # obstructed, so neither it, nor the startup script, nor the settings
-        # may change.
-        _code, _output, launch_dir, _files = self.run_container_setup()
-        settings_before = self.config_path.read_bytes()
-        startup = launch_dir / "config" / "start-flash-next-frspec.sh"
+        startup = files["start-flash-next-frspec.sh"]
         startup_before = startup.read_bytes()
-        run_sh = launch_dir / "run.sh"
-        run_sh.unlink()
-        run_sh.mkdir()
-        code, output, _dir, _files = self.run_container_setup(
-            existing=True, answers={"NIXL": "2"}, save=""
-        )
+        real_fsync = os.fsync
+        attempts = {"n": 0}
+
+        def no_space_on_the_last_write(fd):
+            attempts["n"] += 1
+            if attempts["n"] == 3:  # settings, run.sh, then the startup script
+                raise OSError(28, "No space left on device")
+            return real_fsync(fd)
+
+        with mock.patch.object(os, "fsync", no_space_on_the_last_write):
+            code, output, _dir, _files = self.run_container_setup(
+                existing=True,
+                answers={"NIXL": "2"},
+                save="",
+                config_path=settings,
+            )  # off
         self.assertEqual(code, 4, output)
-        self.assertIn("run.sh", output)
+        self.assertIn("Cannot save", output)
+        self.assertIn("start-flash-next-frspec.sh", output)
+        self.assertIn("No space left on device", output)
         self.assertIn("Nothing was written", output)
-        self.assertEqual(self.config_path.read_bytes(), settings_before)
+        self.assertNotIn("Start it with:", output)
+        self.assertEqual(settings.read_bytes(), settings_before)
+        self.assertEqual((launch_dir / "run.sh").read_bytes(), run_before)
         self.assertEqual(startup.read_bytes(), startup_before)
-        self.assertTrue(run_sh.is_dir())
+        # No half-written new set and no stray folder survives the failure.
         self.assertEqual(
-            sorted(path.name for path in launch_dir.rglob("*") if path.is_file()),
-            ["nixl-posix-frspec.toml", "start-flash-next-frspec.sh"],
-            "nothing else was written under the launch folder",
+            sorted(p.name for p in launch_dir.parent.iterdir()), [launch_dir.name]
+        )
+        self.assertEqual(
+            sorted(p.name for p in settings.parent.glob("pennyroyal-*.env")),
+            [settings.name],
         )
 
     def test_broken_template_writes_neither_settings_nor_files(self):
         # A checkout whose shipped examples are incomplete cannot be half-saved:
         # the plan can be valid while the generated files are impossible, and
         # this save must then stop without touching the existing file.
-        _code, _output, _launch_dir, _files = self.run_container_setup()
-        before = self.config_path.read_bytes()
+        _code, output, _launch_dir, _files = self.run_container_setup()
+        settings = saved_settings(output)
+        before = settings.read_bytes()
         templates = self.repo / "docker" / "pennyroyal" / "launch"
         real = templates.resolve()
         templates.unlink()
@@ -1365,12 +1444,15 @@ class SetupSessionTests(FixtureMixin):
             target.write_text(source.read_text())
         try:
             code, output, _dir, _files = self.run_container_setup(
-                existing=True, before_save=("1",), save=""  # save despite the errors
+                existing=True,
+                before_save=("1",),
+                save="",  # save despite the errors
+                config_path=settings,
             )
             self.assertEqual(code, 4, output)
             self.assertIn("Cannot write the container launch files", output)
             self.assertIn("Nothing was written", output)
-            self.assertEqual(self.config_path.read_bytes(), before)
+            self.assertEqual(settings.read_bytes(), before)
         finally:
             shutil.rmtree(templates)
             templates.symlink_to(real)

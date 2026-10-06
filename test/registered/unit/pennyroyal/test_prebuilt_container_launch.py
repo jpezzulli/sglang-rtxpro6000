@@ -856,7 +856,7 @@ def test_a_generated_launch_forwards_the_saved_value_end_to_end(tmp_path):
         "container", pc.load_config("container", env_file, {}, REPO), {}, repo_root=REPO
     )
     assert [issue.message for issue in plan.errors] == []
-    pc.write_container_files(plan, confirm=lambda text: True)
+    pc.write_container_files(plan)
     run_sh = plan.launch_dir / "run.sh"
     assert run_sh.is_file(), plan.launch_dir
 

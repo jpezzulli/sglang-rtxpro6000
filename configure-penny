@@ -10,8 +10,9 @@
 #
 # Usage: ./configure-penny [--container] [--config PATH] [--check] [--yes]
 #   (no arguments)   interactive setup for the native launcher
-#   --container      setup for the prebuilt container: writes the launch files
-#   --config PATH    read and write this file instead of the default one
+#   --container      setup for the prebuilt container: a fresh timestamped
+#                    folder with run.sh and the startup files it mounts
+#   --config PATH    read this file; each save writes a NEW timestamped copy
 #   --check          validate a saved config without a GPU and exit
 #   --show-config    print the resolved configuration and launch command
 #   --yes            accept the save confirmation (scripted runs)

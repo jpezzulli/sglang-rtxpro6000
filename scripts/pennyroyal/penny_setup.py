@@ -5,7 +5,10 @@ Stdlib-only terminal wizard. It produces exactly the same validated files as
 the non-interactive path because it shares penny_config.py for the .env-style
 format, validation, and command generation. Rerunning loads existing choices;
 unrecognized advanced keys are preserved; cancelling, EOF, or a declined
-confirmation writes nothing; an existing file is never replaced without consent.
+confirmation writes nothing. Every save is a NEW timestamped settings file (and
+for --container a new timestamped launch folder); a previous file is never
+replaced, renamed, removed or backed up - the operator renames or moves what
+they like and starts the printed command with the exact new outputs.
 
 This utility only writes configuration, and for --container the ordinary
 launch files those settings describe (see the generated run.sh contract in
@@ -746,75 +749,78 @@ def run_session(
                 allow_empty=spec.kind == "positive-int",
             )
 
-    # One consent gate covers everything this save touches: the saved settings
-    # file and the launch files generated from them. Asking after the first
-    # write is what left a declined overwrite with a saved file on the new
-    # choice and a startup script on the old one, and a cancelled 'q' with a
-    # changed file it never agreed to.
+    # Every save is a set of brand-new ordinary files. The existing settings
+    # file is this session's input, never its target: nothing here overwrites,
+    # renames, removes or backs up a previous file. The fresh names are chosen
+    # BEFORE the consent gate so the question, the write and the printed
+    # commands all name the identical new outputs - and a save that cannot
+    # complete never advertises a launch it did not fully write.
+    stamp = pc.save_stamp()
+    new_config = pc.timestamped_new_path(config_path, stamp)
+    if mode == "container":
+        # The saved settings and the generated launch belong to one set: the
+        # new output directory is recorded in the new file, so a later
+        # --check --config <that file> resolves exactly this launch.
+        answers["LAUNCH_DIR"] = str(
+            pc.timestamped_new_path(plan.launch_dir, stamp, directory=True)
+        )
+        body = proposed_text()
+        config = pc.config_from_text(mode, body, new_config, "this save")
+        plan = pc.build_plan(mode, config, environ, repo_root=repo_root)
     generated = []
     try:
         generated = _generated_container_files(mode, plan)
     except pc.ConfigError as exc:
         # Nothing in this save can be written, so nothing is: a broken template
-        # is named instead of half-saving the settings next to old launch files.
+        # is named instead of leaving the settings next to old launch files.
         prompt.say(f"\nCannot write the container launch files: {exc}")
         prompt.say(
             "Nothing was written; correct the template folder and save " "again."
         )
         return 4
-    edited = [
-        path
-        for path, content in generated
-        if path.is_file() and path.read_text(encoding="utf-8") != content
-    ]
-    verb = "Replace" if config_path.exists() else "Save"
-    question = f"\n{verb} {config_path}?"
-    if edited:
-        question += (
-            " Overwrite the launch file(s) you edited so the whole set "
-            "matches these settings [{}]?".format(
-                ", ".join(path.name for path in edited)
-            )
-        )
+    question = f"\nSave a new settings file as {new_config}?"
+    if generated:
+        question += f"\nWrite the generated launch files in {plan.launch_dir}?"
     if not prompt.confirm(question, default=True):
         prompt.say("Cancelled; nothing was written.")
         return 3
 
-    # One staged commit for the whole save: exactly the bytes the proposal above
-    # was validated and generated from, plus the launch files generated from
-    # them. Every destination is checked and staged before anything is replaced,
-    # so a blocked path (a directory where run.sh or the startup script belongs,
-    # a read-only folder, a full disk) fails the save as a set instead of leaving
-    # the settings file on the new choice and the launch files on the old one.
+    # One exclusive-create call for the whole set: exactly the bytes the
+    # proposal above was validated and generated from. A destination that
+    # already exists is refused (never replaced), and on any failure the new
+    # files and folders this save made are deleted again; every earlier file
+    # stays exactly as it was, byte for byte and mode for mode.
     try:
-        written = pc.commit_files(
-            [(config_path, body), *generated], private=(config_path,)
+        written = pc.create_new_files(
+            [(new_config, body), *generated], private=(new_config,)
         )
     except pc.ConfigError as exc:
         prompt.say(f"\nCannot save: {exc}")
-        prompt.say("Nothing was written; correct the blocked path and save again.")
+        prompt.say(
+            "Nothing was written; this save's new files were removed again "
+            "and every earlier file is untouched."
+        )
         return 4
-    prompt.say(f"Saved {config_path}")
+    prompt.say(f"Saved {new_config}")
     # Rebuild from the file that was just written: the plan printed below is then
     # the plan run-penny (or the generated run.sh) will build from it, and its
     # notes speak about the state after the save, not before it.
     plan = pc.build_plan(
         mode,
-        pc.load_config(mode, config_path, environ, repo_root),
+        pc.load_config(mode, new_config, environ, repo_root),
         environ,
         repo_root=repo_root,
     )
     if mode == "container":
         # Generation belongs to the save, never to the launch: the operator
         # edits run.sh and the startup script by hand afterwards, and nothing
-        # here rewrites them when the container starts. The overwrite above was
-        # agreed before anything was written, so the saved settings and the
-        # files that decide the launch always change together.
+        # here rewrites them when the container starts. Only a set that is
+        # fully on disk gets its start command printed above the plan.
         prompt.say("")
-        prompt.say(f"Writing the launch files in {plan.launch_dir}")
-        for path, outcome in written:
-            if path != config_path:
-                prompt.say(f"  {outcome}: {path}")
+        prompt.say(f"Launch files written in {plan.launch_dir}")
+        for path in written:
+            if path != new_config:
+                prompt.say(f"  {path}")
         prompt.say(
             f"Start it with: cd "
             f"{pc.quote_command_arg(str(plan.launch_dir))}"
