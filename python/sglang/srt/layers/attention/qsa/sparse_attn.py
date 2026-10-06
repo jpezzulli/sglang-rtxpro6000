@@ -396,8 +396,18 @@ def qsa_prefill_kv_pack_supported(
     ``pack_qsa_prefill_kv`` walks a rectangular ``max_k`` grid with a per-request
     ``cu_k`` early exit, so every row needs its own device request id and a
     rectangular, strided-indexable KV pool.  Anything else (an odd dtype, a
-    padded or host-resident request map, a row longer than the request table)
-    stays on the joined-index ``index_select`` path.
+    padded request map, a row longer than the request table) stays on the
+    joined-index ``index_select`` path.
+
+    Two mismatches between the launch and ordinary tensor metadata are refused
+    here because the kernel does them by raw pointer arithmetic rather than by
+    stride: it reads ``req_indices + batch`` without a request stride, so a
+    strided id row (``[0, 9, 1, 9, 2][::2]``) would silently gather the wrong --
+    possibly out-of-range -- requests; and it dereferences every input as a
+    device address, so host-resident ids beside a device pool/table would fail
+    pointer validation where the old ``tolist()`` path works.  The request
+    *table* may be strided (``SR0``/``SR1`` are passed) because the kernel
+    strides it explicitly.
 
     ponytail: upstream's grid is ``max_k`` by batch, so a short request next to
     a 524288-token one launches masked programs that store nothing.  Per-request
@@ -410,7 +420,16 @@ def qsa_prefill_kv_pack_supported(
         return False
     if req_to_token.ndim != 2:
         return False
-    if req_indices.ndim != 1 or req_indices.dtype not in (torch.int32, torch.int64):
+    if (
+        req_indices.ndim != 1
+        or req_indices.dtype not in (torch.int32, torch.int64)
+        or not req_indices.is_contiguous()
+    ):
+        return False
+    # One launch dereferences all four inputs as one device's addresses.
+    if v.device != k.device or req_to_token.device != k.device:
+        return False
+    if req_indices.device != k.device:
         return False
     if req_indices.shape[0] != len(sequence_lens):
         return False
