@@ -2,24 +2,14 @@
   "api_url": "https://huggingface.co/api/models/jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4?expand%5B%5D=createdAt&expand%5B%5D=lastModified&expand%5B%5D=downloads&expand%5B%5D=downloadsAllTime&expand%5B%5D=likes",
   "collected_at": "2026-10-06T00:31:59Z",
   "created_at": "2026-09-17T03:42:44.000Z",
-  "days": {
-    "2026-10-06": {
-      "collected_at": "2026-10-06T00:31:59Z",
-      "downloads_all_time": 1044,
-      "downloads_last_30_days": 1044,
-      "likes": 8,
-      "source_sha256": "08584d09a84007c6ea1466306349f4c7b10867ca4359b7add2192ead6acf18ad"
-    }
-  },
+  "downloads_all_time": 1044,
+  "downloads_last_30_days": 1044,
   "first_collected_at": "2026-10-06T00:29:45Z",
-  "first_observed": {
-    "collected_at": "2026-10-06T00:29:45Z",
-    "downloads_all_time": 1044,
-    "downloads_last_30_days": 1044,
-    "likes": 8
-  },
   "html_url": "https://huggingface.co/jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4",
+  "likes": 8,
   "model_id": "jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4",
+  "raw_response": "{\"_id\":\"6aab61b41b2869850c8df693\",\"id\":\"jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4\",\"lastModified\":\"2026-09-17T06:57:18.000Z\",\"downloads\":1044,\"downloadsAllTime\":1044,\"likes\":8,\"createdAt\":\"2026-09-17T03:42:44.000Z\"}",
   "repository": "jpezzulli/sglang-rtxpro6000",
-  "schema_version": 1
+  "schema_version": 1,
+  "source_sha256": "08584d09a84007c6ea1466306349f4c7b10867ca4359b7add2192ead6acf18ad"
 }
