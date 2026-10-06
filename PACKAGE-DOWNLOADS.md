@@ -2,7 +2,7 @@
 
 Package: [`ghcr.io/jpezzulli/sglang-rtxpro6000`](https://github.com/users/jpezzulli/packages/container/package/sglang-rtxpro6000).
 Published: **2026-09-15**. First captured: **2026-09-16T12:21:06Z**.
-Latest capture: **2026-10-06T00:29:34Z**.
+Latest capture: **2026-10-06T00:31:51Z**.
 
 | Metric | Latest reported | Change from previous archived day |
 | --- | ---: | ---: |
@@ -39,6 +39,6 @@ These are GitHub package download counters, not unique users, successful install
 | 2026-10-03 | 2026-10-03T11:33:10Z | 4,587 | +467 |
 | 2026-10-04 | 2026-10-04T05:52:10Z | 4,962 | +375 |
 | 2026-10-05 | 2026-10-05T05:39:39Z | 5,097 | +135 |
-| 2026-10-06 | 2026-10-06T00:29:34Z | 5,294 | +197 |
+| 2026-10-06 | 2026-10-06T00:31:51Z | 5,294 | +197 |
 
 GitHub exposes these counters on the public package pages. Its documented Packages REST responses provide package/version metadata but do not include download counters, so this collector validates and archives the public HTML representation. A markup change fails the package step loudly; the preceding repository-traffic step remains safely committed.
