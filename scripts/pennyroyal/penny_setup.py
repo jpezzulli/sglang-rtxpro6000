@@ -662,8 +662,19 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
         prompt.say("Cancelled; nothing was written.")
         return 3
 
-    # Exactly the bytes the proposal above was validated and generated from.
-    pc.write_env_file(config_path, body)
+    # One staged commit for the whole save: exactly the bytes the proposal above
+    # was validated and generated from, plus the launch files generated from
+    # them. Every destination is checked and staged before anything is replaced,
+    # so a blocked path (a directory where run.sh or the startup script belongs,
+    # a read-only folder, a full disk) fails the save as a set instead of leaving
+    # the settings file on the new choice and the launch files on the old one.
+    try:
+        written = pc.commit_files([(config_path, body), *generated],
+                                  private=(config_path,))
+    except pc.ConfigError as exc:
+        prompt.say(f"\nCannot save: {exc}")
+        prompt.say("Nothing was written; correct the blocked path and save again.")
+        return 4
     prompt.say(f"Saved {config_path}")
     # Rebuild from the file that was just written: the plan printed below is then
     # the plan run-penny (or the generated run.sh) will build from it, and its
@@ -679,8 +690,9 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
         # files that decide the launch always change together.
         prompt.say("")
         prompt.say(f"Writing the launch files in {plan.launch_dir}")
-        for written, outcome in pc.container_write_plan(plan, generated):
-            prompt.say(f"  {outcome}: {written}")
+        for path, outcome in written:
+            if path != config_path:
+                prompt.say(f"  {outcome}: {path}")
         prompt.say(f"Start it with: cd "
                    f"{pc.quote_command_arg(str(plan.launch_dir))}"
                    " && ./run.sh")

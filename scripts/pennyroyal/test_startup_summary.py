@@ -239,6 +239,15 @@ class StartupSummaryTest(unittest.TestCase):
             (
                 "TOKEN_CAP_ARGS=(--max-total-tokens 824384)",
                 "PLE_ARGS=(--ple-offload-embedding)",
+                # The disk tier is on by default, and the recipe now keeps the
+                # three NIXL FILE storage-backend arguments in one guarded array
+                # (see the NIXL=on/off switch). Stating them here the way the
+                # recipe does keeps the comparison against the base block honest:
+                # an empty array would silently drop the disk tier from the
+                # current argv and the two lists could never match.
+                'HICACHE_STORAGE_ARGS=(--hicache-storage-backend nixl '
+                '--hicache-storage-prefetch-policy timeout '
+                '--hicache-storage-backend-extra-config "@$NIXL_CONFIG")',
                 f"export CAPTURE_PATH={shlex.quote(str(capture))}",
                 block,
             )

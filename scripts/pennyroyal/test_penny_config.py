@@ -1842,6 +1842,95 @@ class AtomicWriteTests(unittest.TestCase):
                              ["pennyroyal.env"])
 
 
+    def test_a_blocked_destination_fails_the_whole_save_set(self):
+        # The save writes settings, run.sh and the startup script as one set:
+        # an existing directory where a file belongs must stop every one of
+        # them, not land the first two and raise on the third.
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            settings, launch = root / "pennyroyal.env", root / "launch"
+            (launch / "config").mkdir(parents=True)
+            run_sh = launch / "run.sh"
+            run_sh.write_text("#!/bin/sh\nold\n")
+            run_sh.chmod(0o755)
+            startup = launch / "config" / "start-flash-next.sh"
+            startup.mkdir()                      # the operator's obstruction
+            with self.assertRaises(pc.ConfigError) as caught:
+                pc.commit_files([(settings, "NIXL=off\n"),
+                                 (run_sh, "#!/bin/sh\nnew\n"),
+                                 (startup, "#!/usr/bin/env bash\n")],
+                                private=(settings,))
+            self.assertIn("start-flash-next.sh", str(caught.exception))
+            self.assertFalse(settings.exists(), "settings must not land")
+            self.assertEqual(run_sh.read_text(), "#!/bin/sh\nold\n")
+            # Nothing half-applied and no temporary litter anywhere in the set.
+            self.assertEqual(sorted(p.name for p in root.rglob("*") if p.is_file()),
+                             ["run.sh"])
+            self.assertEqual([p.name for p in startup.iterdir()], [])
+
+    def test_replacement_uses_the_documented_modes(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "config").mkdir()
+            existing = root / "kept.env"
+            existing.write_text("A=1\n")
+            existing.chmod(0o640)
+            fresh = root / "fresh.env"
+            script = root / "config" / "start-flash-next.sh"
+            toml = root / "config" / "nixl-posix.toml"
+            pc.commit_files([(existing, "A=2\n"), (fresh, "A=1\n"),
+                             (script, "#!/usr/bin/env bash\n"),
+                             (toml, "backend = \"posix\")\n")],
+                            private=(fresh,))
+            self.assertEqual(existing.stat().st_mode & 0o777, 0o640,
+                             "an existing file keeps its own permissions")
+            self.assertEqual(fresh.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(script.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(toml.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(dict(pc.commit_files([(existing, "A=2\n")])),
+                             {existing: "unchanged"},
+                             "matching content is left alone")
+
+    def test_a_failed_replacement_restores_what_was_already_moved(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first, second = root / "a.sh", root / "b.sh"
+            first.write_text("old a\n")
+            second.write_text("old b\n")
+            real_replace = pc.os.replace
+            attempts = {"n": 0}
+
+            def flaky(src, dst):
+                attempts["n"] += 1
+                if attempts["n"] == 2:
+                    raise OSError(21, "Is a directory")
+                return real_replace(src, dst)
+
+            pc.os.replace = flaky
+            try:
+                with self.assertRaises(pc.ConfigError) as caught:
+                    pc.commit_files([(first, "new a\n"), (second, "new b\n")])
+            finally:
+                pc.os.replace = real_replace
+            self.assertIn("b.sh", str(caught.exception))
+            self.assertEqual(first.read_text(), "old a\n",
+                             "the file already replaced has to come back")
+            self.assertEqual(second.read_text(), "old b\n")
+            self.assertEqual(sorted(p.name for p in root.iterdir()),
+                             ["a.sh", "b.sh"])
+
+    def test_the_same_destination_named_twice_is_refused(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "run.sh"
+            with self.assertRaises(pc.ConfigError):
+                pc.commit_files([(path, "a\n"), (path, "b\n")])
+            self.assertFalse(path.exists())
+
+
 class BuildEnvTests(unittest.TestCase):
     def test_helper_exports_the_existing_defaults_and_respects_presets(self):
         helper = SCRIPTS / "build-env.sh"

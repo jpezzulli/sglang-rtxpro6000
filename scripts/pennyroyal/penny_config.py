@@ -381,6 +381,73 @@ def write_env_file(path: Path, text: str, mode: int = 0o600) -> None:
             tmp.unlink()
 
 
+def commit_files(files: list[tuple[Path, str]],
+                 private: tuple[Path, ...] = ()) -> list[tuple[Path, str]]:
+    """Replace every (path, content) as one set, or leave them all as they were.
+
+    A save touches several files that have to agree - the settings file, the
+    generated run.sh and the startup script it mounts - so every destination is
+    checked and every payload written to a sibling temporary file BEFORE any
+    replacement happens. An existing directory where a file belongs
+    (IsADirectoryError), a folder that cannot be created, a read-only parent or
+    a full disk then fail the whole save, and anything already moved is put
+    back, so the launch is never described by half the new set and half the old
+    one. Content that already matches is left completely alone: no rewrite, no
+    chmod. A path named in `private` is created 0600, a new .sh becomes 0755,
+    and an existing file always keeps its own permissions.
+    """
+    paths = [Path(path) for path, _ in files]
+    if len(set(paths)) != len(paths):
+        raise ConfigError("this save names the same file twice")
+    staged: list[tuple[Path, Path, Optional[str]]] = []
+    outcomes: list[tuple[Path, str]] = []
+    try:
+        for path, content in ((Path(path), text) for path, text in files):
+            current = (path.read_text(encoding="utf-8") if path.is_file()
+                       else None)
+            if current == content:
+                outcomes.append((path, "unchanged"))
+                continue
+            mode = ((path.stat().st_mode & 0o777) if path.exists()
+                    else (0o600 if path in private
+                          else (0o755 if path.suffix == ".sh" else 0o644)))
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if path.exists() and not path.is_file():
+                    raise ConfigError(f"cannot replace {path}: not a regular "
+                                      "file")
+                handle, tmp_name = tempfile.mkstemp(dir=str(path.parent),
+                                                    prefix=f".{path.name}.")
+                temp = Path(tmp_name)
+                with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.chmod(temp, mode)
+            except OSError as exc:
+                raise ConfigError(f"cannot write {path}: "
+                                  f"{exc.strerror or exc}") from exc
+            staged.append((path, temp, current))
+            outcomes.append((path, "written"))
+        replaced: list[tuple[Path, Optional[str]]] = []
+        for path, temp, old in staged:
+            try:
+                os.replace(temp, path)
+            except OSError as exc:
+                for done, previous in replaced:
+                    if previous is None:
+                        done.unlink(missing_ok=True)
+                    else:
+                        done.write_text(previous, encoding="utf-8")
+                raise ConfigError(f"cannot replace {path}: "
+                                  f"{exc.strerror or exc}") from exc
+            replaced.append((path, old))
+    except BaseException:
+        for _path, temp, _old in staged:
+            temp.unlink(missing_ok=True)
+        raise
+    return outcomes
+
 # --------------------------------------------------------------------------
 # Per-key validation
 # --------------------------------------------------------------------------
@@ -1417,19 +1484,8 @@ def container_write_plan(plan: Plan,
     list, so what is agreed is exactly what lands on disk. Content that already
     matches is left completely alone (no rewrite, no chmod).
     """
-    outcomes: list[tuple[Path, str]] = []
-    for path, content in (container_launch_files(plan) if files is None
-                          else files):
-        current = path.read_text(encoding="utf-8") if path.is_file() else None
-        if current == content:
-            outcomes.append((path, "unchanged"))
-            continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        if path.suffix == ".sh":
-            path.chmod(0o755)
-        outcomes.append((path, "written"))
-    return outcomes
+    return commit_files(list(container_launch_files(plan) if files is None
+                             else files))
 
 
 def write_container_files(plan: Plan, confirm=None) -> list[tuple[Path, str]]:

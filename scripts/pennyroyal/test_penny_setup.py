@@ -1054,6 +1054,63 @@ class SetupSessionTests(FixtureMixin):
         self.assertIn('--max-running-requests "$MAX_RUNNING_REQUESTS"', startup)
         self.assertIn('--hicache-size "$HICACHE_SIZE_GB"', startup)
 
+    def test_a_blocked_startup_destination_saves_the_set_or_nothing(self):
+        # Review regression, in the order the failure was reported: a normal
+        # save, then the generated startup file is replaced by a directory, then
+        # a save that turns the disk tier off. The settings file and run.sh used
+        # to move onto NIXL=off before writing the startup script raised
+        # IsADirectoryError, so the launch was described by two different saves.
+        _code, _output, launch_dir, _files = self.run_container_setup()
+        settings_before = self.config_path.read_bytes()
+        run_before = (launch_dir / "run.sh").read_bytes()
+        startup = launch_dir / "config" / "start-flash-next-frspec.sh"
+        startup.unlink()
+        startup.mkdir()
+        code, output, _dir, _files = self.run_container_setup(
+            existing=True, answers={"NIXL": "2"}, save="")   # off
+        self.assertEqual(code, 4, output)
+        self.assertIn("start-flash-next-frspec.sh", output)
+        self.assertIn("Cannot save", output)
+        self.assertIn("Nothing was written", output)
+        self.assertIn("NIXL=on", settings_before.decode(),
+                      "the fixture really did save the disk tier on")
+        self.assertEqual(self.config_path.read_bytes(), settings_before,
+                         "the saved settings must stay on the old choice")
+        self.assertEqual((launch_dir / "run.sh").read_bytes(), run_before,
+                         "run.sh must stay on the old choice too")
+        self.assertTrue(startup.is_dir(),
+                        "the directory the operator put there is untouched")
+        self.assertEqual(sorted(path.name for path in
+                                (launch_dir / "config").iterdir()),
+                         ["nixl-posix-frspec.toml",
+                          "start-flash-next-frspec.sh"],
+                         "no half-written file and no temporary litter")
+
+    def test_a_blocked_run_sh_destination_saves_nothing_either(self):
+        # Same promise from the other end of the set: the host launch file is
+        # obstructed, so neither it, nor the startup script, nor the settings
+        # may change.
+        _code, _output, launch_dir, _files = self.run_container_setup()
+        settings_before = self.config_path.read_bytes()
+        startup = launch_dir / "config" / "start-flash-next-frspec.sh"
+        startup_before = startup.read_bytes()
+        run_sh = launch_dir / "run.sh"
+        run_sh.unlink()
+        run_sh.mkdir()
+        code, output, _dir, _files = self.run_container_setup(
+            existing=True, answers={"NIXL": "2"}, save="")
+        self.assertEqual(code, 4, output)
+        self.assertIn("run.sh", output)
+        self.assertIn("Nothing was written", output)
+        self.assertEqual(self.config_path.read_bytes(), settings_before)
+        self.assertEqual(startup.read_bytes(), startup_before)
+        self.assertTrue(run_sh.is_dir())
+        self.assertEqual(sorted(path.name for path in launch_dir.rglob("*")
+                                if path.is_file()),
+                         ["nixl-posix-frspec.toml",
+                          "start-flash-next-frspec.sh"],
+                         "nothing else was written under the launch folder")
+
     def test_broken_template_writes_neither_settings_nor_files(self):
         # A checkout whose shipped examples are incomplete cannot be half-saved:
         # the plan can be valid while the generated files are impossible, and
