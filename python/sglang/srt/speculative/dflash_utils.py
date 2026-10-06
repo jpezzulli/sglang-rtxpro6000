@@ -14,6 +14,7 @@ import triton.language as tl
 from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 from sglang.srt.layers.sampler import (
     apply_custom_logit_processor,
+    min_p_normalize_probs_torch,
     top_p_normalize_probs_torch,
 )
 from sglang.srt.managers.schedule_batch import Req
@@ -1017,6 +1018,7 @@ def build_dflash_verify_target_probs(
     device = next_token_logits.device
     need_top_k = bool(getattr(sampling_info, "need_top_k_sampling", True))
     need_top_p = bool(getattr(sampling_info, "need_top_p_sampling", False))
+    need_min_p = bool(getattr(sampling_info, "need_min_p_sampling", False))
     expanded_temperature = torch.repeat_interleave(
         sampling_info.temperatures, draft_token_num, dim=0
     )
@@ -1054,6 +1056,16 @@ def build_dflash_verify_target_probs(
                     sampling_info.top_ps, draft_token_num, dim=0
                 )
                 topk_probs = _dflash_top_p_renorm_prob(topk_probs, repeated_top_ps)
+            if need_min_p:
+                # The sparse row holds the k largest logits, so its maximum is
+                # the row maximum the dense path would see: the cut and the
+                # renormalization come out identical for the two branches.
+                topk_probs = min_p_normalize_probs_torch(
+                    topk_probs,
+                    torch.repeat_interleave(
+                        sampling_info.min_ps, draft_token_num, dim=0
+                    ),
+                )
 
             target_probs = torch.zeros_like(scaled_logits, dtype=topk_probs.dtype)
             target_probs.scatter_(1, topk_indices, topk_probs)
@@ -1070,6 +1082,11 @@ def build_dflash_verify_target_probs(
             target_probs = _dflash_top_p_renorm_prob(
                 target_probs,
                 torch.repeat_interleave(sampling_info.top_ps, draft_token_num, dim=0),
+            )
+        if need_min_p:
+            target_probs = min_p_normalize_probs_torch(
+                target_probs,
+                torch.repeat_interleave(sampling_info.min_ps, draft_token_num, dim=0),
             )
     return target_probs.view(bs, draft_token_num, -1).contiguous()
 
