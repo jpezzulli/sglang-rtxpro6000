@@ -223,7 +223,10 @@ def test_next_recipes_initialize_cache_environment_before_nvme_preflight(tmp_pat
 
 def test_source_guard_matches_every_hooked_publication_module():
     guard = json.loads(GUARD.read_text())
-    assert guard["source"].startswith("Pennyroyal v2.5.3")
+    assert guard["source"] == (
+        "Pennyroyal candidate f804f21af3ad633744d0a50455a0a72bef68b546 "
+        "(prereq 69583da7c71b87ac36371333a19f2749bab72773, unqualified)"
+    )
     assert "sglang.srt.models.qwen4_exp" in guard["modules"]
 
     for module, expected in guard["modules"].items():
