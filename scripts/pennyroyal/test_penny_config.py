@@ -2278,6 +2278,45 @@ class NewSaveTests(unittest.TestCase):
                 root / "pennyroyal-container-20261006T072130-2",
             )
 
+    def test_repeat_saves_on_generated_paths_keep_one_timestamp_suffix(self):
+        # Review regression: rerunning against the file just saved (and its
+        # saved LAUNCH_DIR) used to stack timestamps until ENAMETOOLONG. The
+        # previous generated suffix is replaced, not appended to, so names
+        # stay bounded and readable, every set is still unique, and the
+        # operator's original input file never changes.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "pennyroyal.env"
+            source.write_text("A=input\n")
+            current_settings, current_dir = source, root / "pennyroyal-container"
+            names, dir_names = [], []
+            for number in range(15):
+                stamp = f"2026100{number % 10}T1200{number:02d}"
+                nxt = pc.timestamped_new_path(current_settings, stamp)
+                new_dir = pc.timestamped_new_path(current_dir, stamp, directory=True)
+                pc.create_new_files(
+                    [(nxt, f"N={number}\n"), (new_dir / "run.sh", "#!/bin/sh\n")],
+                    private=(nxt,),
+                )
+                names.append(nxt.name)
+                dir_names.append(new_dir.name)
+                # The next save reads exactly what the previous one wrote.
+                current_settings, current_dir = nxt, new_dir
+            self.assertEqual(len(set(names)), 15, names)
+            self.assertEqual(len(set(dir_names)), 15, dir_names)
+            for name in names:
+                self.assertRegex(name, r"^pennyroyal-\d{8}T\d{6}(?:-\d+)?\.env$")
+                self.assertLess(len(name), 40)
+            for name in dir_names:
+                self.assertRegex(
+                    name, r"^pennyroyal-container-\d{8}T\d{6}(?:-\d+)?$"
+                )
+                self.assertLess(len(name), 40)
+            self.assertEqual(source.read_text(), "A=input\n")
+            self.assertFalse(source.stat().st_mode & 0o111)
+
     def test_created_files_use_the_documented_modes_and_create_parents(self):
         import tempfile
 
@@ -2367,6 +2406,40 @@ class NewSaveTests(unittest.TestCase):
                 sorted(p.name for p in root.iterdir()),
                 ["pennyroyal-20261006T072130.env"],
             )
+
+    def test_a_parent_blocked_by_a_regular_file_is_a_readable_failure(self):
+        # mkdir problems (a regular file where a folder belongs, a denied
+        # parent) must read like every other save failure, not escape as raw
+        # NotADirectoryError/PermissionError through the wizard, and must
+        # still delete only this attempt's own new files.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            blocker = root / "not-a-folder"
+            blocker.write_text("mine\n")
+            settings = root / "pennyroyal.env"
+            with self.assertRaises(pc.ConfigError) as caught:
+                pc.create_new_files(
+                    [(settings, "A=1\n"), (blocker / "launch" / "run.sh", "x\n")],
+                    private=(settings,),
+                )
+            self.assertIn("launch", str(caught.exception))
+            self.assertFalse(settings.exists(), "the attempt's new settings are gone")
+            self.assertFalse((root / "launch").exists())
+            self.assertEqual(blocker.read_text(), "mine\n")
+            if os.geteuid() == 0:  # a root shell ignores the permission rows
+                self.skipTest("permission bits do not apply to root")
+            locked = root / "locked"
+            locked.mkdir()
+            locked.chmod(0o500)
+            try:
+                with self.assertRaises(pc.ConfigError) as caught:
+                    pc.create_new_files([(locked / "sub" / "run.sh", "x\n")])
+            finally:
+                locked.chmod(0o700)
+            self.assertIn("sub", str(caught.exception))
+            self.assertTrue(locked.is_dir())
 
     def test_the_same_destination_named_twice_is_refused(self):
         import tempfile

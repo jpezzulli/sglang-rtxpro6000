@@ -522,21 +522,34 @@ def save_stamp() -> str:
     return datetime.now().strftime("%Y%m%dT%H%M%S")
 
 
+# What one generated save suffix looks like at the end of a name: the
+# timestamp and the optional collision counter timestamped_new_path appends.
+# Rerunning against the file/folder just saved (the wizard feeds its own
+# output and the saved LAUNCH_DIR straight back in) strips this tail first, so
+# a name carries ONE generated timestamp on its stable basename instead of
+# stacking suffixes toward ENAMETOOLONG. No registry decides this.
+_GENERATED_TAIL_RE = re.compile(r"-\d{8}T\d{6}(?:-\d+)?$")
+
+
 def timestamped_new_path(path: Path, stamp: str, directory: bool = False) -> Path:
     """An unused path beside `path`, named after `stamp`, for a save's output.
 
     ``pennyroyal.env`` becomes ``pennyroyal-20261006T072130.env`` next to it;
-    a launch folder becomes ``...-20261006T072130``. Repeated saves inside one
-    second (or an operator-made file of the same name) step to ``-2``, ``-3``,
-    ... so every save owns its own fresh output and nothing previous is ever
-    reused. Nothing is created here; create_new_files has the final word, and
-    a name that appears in the meantime is refused, never replaced.
+    a launch folder becomes ``...-20261006T072130``. A name that already ends
+    in one generated suffix (the previous save's output or its saved
+    LAUNCH_DIR) is reduced to its stable basename first, so re-saving onto
+    its own output never stacks timestamps. Repeated saves inside one second
+    (or an operator-made file of the same name) step to ``-2``, ``-3``, ... so
+    every save owns its own fresh output and nothing previous is ever reused.
+    Nothing is created here; create_new_files has the final word, and a name
+    that appears in the meantime is refused, never replaced.
     """
     path = Path(path)
     if directory:
-        stem, suffix = path.name, ""
+        stem, suffix = _GENERATED_TAIL_RE.sub("", path.name), ""
     else:
-        stem, suffix = path.stem, path.suffix or ".env"
+        stem = _GENERATED_TAIL_RE.sub("", path.stem)
+        suffix = path.suffix or ".env"
     base = f"{stem}-{stamp}"
     candidate = path.parent / f"{base}{suffix}"
     number = 1
@@ -579,6 +592,12 @@ def create_new_files(
                     folder.mkdir()
                 except FileExistsError:
                     pass  # someone else made it; it is not ours to delete
+                except OSError as exc:
+                    # A regular file where a folder belongs, or a denied
+                    # parent, reads like every other create failure here.
+                    raise ConfigError(
+                        f"cannot create {folder}: {exc.strerror or exc}"
+                    ) from exc
                 else:
                     folders.append(folder)
             if path.exists():

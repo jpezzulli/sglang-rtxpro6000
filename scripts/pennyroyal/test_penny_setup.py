@@ -1139,6 +1139,14 @@ class SetupSessionTests(FixtureMixin):
         second_settings = saved_settings(output)
         self.assertNotEqual(second_settings, first_settings)
         self.assertNotEqual(second_dir, launch_dir)
+        # Re-saving onto its own output and saved LAUNCH_DIR replaces the one
+        # generated suffix instead of stacking another timestamp on it.
+        self.assertRegex(
+            second_settings.name, r"^pennyroyal-\d{8}T\d{6}(?:-\d+)?\.env$"
+        )
+        self.assertRegex(
+            second_dir.name, r"^pennyroyal-container-\d{8}T\d{6}(?:-\d+)?$"
+        )
         saved = pc.read_env_file(second_settings)
         self.assertEqual(saved["NIXL"], "off")
         # The saved settings resolve to the same fresh set the command names.
