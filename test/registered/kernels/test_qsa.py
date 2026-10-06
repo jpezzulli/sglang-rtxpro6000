@@ -2782,78 +2782,159 @@ def test_qsa_cpu_extend_never_reaches_the_fused_kv_pack(monkeypatch):
     torch.testing.assert_close(output, values + 1)
 
 
+_QSA_NC_ROWS = [3, 2, 1, 2, 0]  # [::2] -> the requests 3, 1, 0
+_QSA_NC_ACTUAL = [3, 1, 0]
+_QSA_NC_STRIDELESS = [3, 2, 1]
+_QSA_NC_LENS = [8, 0, 3]
+_QSA_NC_QUERY_LENS = [2, 0, 1]
+_QSA_NC_TOPK = 4
+
+
+def _qsa_noncontiguous_fixture(device):
+    """One description of the ragged strided-request batch, built on any device.
+
+    Upstream's own shape rules are followed so the GPU half compares attention
+    and not a broken fixture: every request id that either read can address
+    exists in the table, a query row selects only within its own
+    ``prefix_len = kv_len - query_len`` plus its position, and the row with no
+    packed KV carries no query tokens at all.
+    """
+    torch.manual_seed(7)
+    heads, dim, table_rows, table_width = 2, 128, 4, 16
+    pool = table_rows * table_width
+    table = (
+        torch.randperm(pool, device=device)
+        .reshape(table_rows, table_width)
+        .to(torch.int32)
+    )
+    k = torch.randn(pool, heads, dim, device=device, dtype=torch.bfloat16).to(
+        torch.float8_e4m3fn
+    )
+    v = torch.randn(pool, heads, dim, device=device, dtype=torch.bfloat16).to(
+        torch.float8_e4m3fn
+    )
+    # Stored two apart: the values are the requests below, the strideless
+    # req_indices + batch read would address the decoy at storage slot 1.
+    rows = torch.tensor(_QSA_NC_ROWS, dtype=torch.int64, device=device)[::2]
+    prefix_lens = [kv - q for kv, q in zip(_QSA_NC_LENS, _QSA_NC_QUERY_LENS)]
+    indices = torch.full(
+        (sum(_QSA_NC_QUERY_LENS), _QSA_NC_TOPK), -1, dtype=torch.int32, device=device
+    )
+    row = 0
+    for count, prefix in zip(_QSA_NC_QUERY_LENS, prefix_lens):
+        for offset in range(count):
+            selected = torch.randperm(prefix + offset + 1, device=device)[:_QSA_NC_TOPK]
+            indices[row, : selected.numel()] = selected
+            row += 1
+    return SimpleNamespace(
+        heads=heads,
+        dim=dim,
+        table_rows=table_rows,
+        pool=pool,
+        table=table,
+        k=k,
+        v=v,
+        rows=rows,
+        lens=list(_QSA_NC_LENS),
+        query_lens=list(_QSA_NC_QUERY_LENS),
+        prefix_lens=prefix_lens,
+        actual=list(_QSA_NC_ACTUAL),
+        strideless=list(_QSA_NC_STRIDELESS),
+        indices=indices,
+        q=torch.randn(
+            sum(_QSA_NC_QUERY_LENS),
+            heads * 6,
+            dim,
+            device=device,
+            dtype=torch.bfloat16,
+        ),
+        cu_q=torch.tensor(
+            [0, *torch.tensor(_QSA_NC_QUERY_LENS).cumsum(0).tolist()],
+            dtype=torch.int32,
+            device=device,
+        ),
+    )
+
+
+def test_qsa_noncontiguous_request_fixture_is_a_valid_attention_batch():
+    """The prepared GPU fixture is sound before a driver ever sees it."""
+    fx = _qsa_noncontiguous_fixture("cpu")
+    assert not fx.rows.is_contiguous() and fx.rows.tolist() == fx.actual
+    # The fused kernel addresses req_indices + batch, i.e. the leading storage.
+    assert fx.rows.as_strided((fx.rows.numel(),), (1,)).tolist() == fx.strideless
+    assert fx.strideless != fx.actual
+    # Neither read may leave the request table, decoy included.
+    assert max([*fx.actual, *fx.strideless]) < fx.table_rows
+    # A row with no packed KV has no query tokens, and cu_q follows query_lens.
+    assert [q for kv, q in zip(fx.lens, fx.query_lens) if kv == 0] == [0]
+    assert fx.cu_q.tolist() == [
+        0,
+        *torch.tensor(fx.query_lens).cumsum(0).tolist(),
+    ], "cu_q must follow query_lens"
+    assert fx.indices.shape[0] == sum(fx.query_lens)
+    row = 0
+    for count, prefix, kv_len in zip(fx.query_lens, fx.prefix_lens, fx.lens):
+        for offset in range(count):
+            selected = fx.indices[row]
+            selected = selected[selected >= 0]
+            assert selected.numel() > 0
+            assert (selected < prefix + offset + 1).all(), "causal bound"
+            assert (selected < kv_len).all(), "inside the request"
+            row += 1
+    assert row == sum(fx.query_lens)
+    actual = torch.cat([fx.table[r, :n].long() for r, n in zip(fx.actual, fx.lens)])
+    decoy = torch.cat([fx.table[r, :n].long() for r, n in zip(fx.strideless, fx.lens)])
+    assert actual.numel() == sum(fx.lens) == 11
+    assert not torch.equal(actual, decoy)
+    assert not qsa_prefill_kv_pack_supported(fx.k, fx.v, fx.table, fx.rows, fx.lens)
+    assert qsa_prefill_kv_pack_supported(
+        fx.k, fx.v, fx.table, fx.rows.contiguous(), fx.lens
+    )
+
+
 def test_qsa_noncontiguous_request_ids_pack_the_right_requests_on_gpu():
     """Prepared GPU check: a strided request row is not advertised, and the
-    route that serves it gathers the requests the rows actually hold.
-
-    The fused kernel reads ``req_indices + batch``, so ``[3, 9, 1, 9, 0][::2]``
-    would gather requests 3, 9, 1 instead of 3, 1, 0; 9 is only a decoy here, but
-    an out-of-range slot would read KV outside the pool.  Everything runs on the
-    real request table, FP8 pool and chunk-prefill attention kernel.
+    route that serves it gathers the requests the rows actually hold, with the
+    accepted fused gather byte-identical on the same ragged batch.
     """
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() < (8, 9):
         pytest.skip("FP8-capable CUDA GPU required")
-    torch.manual_seed(7)
-    heads, dim = 2, 128
-    lens, query_lens = [8, 0, 3], [2, 1, 1]
-    table = torch.randperm(64, device="cuda").reshape(4, 16).to(torch.int32)
-    k = torch.randn(64, heads, dim, device="cuda", dtype=torch.bfloat16).to(
-        torch.float8_e4m3fn
-    )
-    v = torch.randn(64, heads, dim, device="cuda", dtype=torch.bfloat16).to(
-        torch.float8_e4m3fn
-    )
-    rows = torch.tensor([3, 9, 1, 9, 0], dtype=torch.int64, device="cuda")[::2]
-    assert rows.tolist() == [3, 1, 0] and not rows.is_contiguous()
-    assert not qsa_prefill_kv_pack_supported(k, v, table, rows, lens)
+    fx = _qsa_noncontiguous_fixture("cuda")
+    assert not qsa_prefill_kv_pack_supported(fx.k, fx.v, fx.table, fx.rows, fx.lens)
 
     packed_k, packed_v, cu_k, kv_lens = _qsa_pack_backend(True)._pack_qsa_prefill_kv(
-        k,
-        v,
-        table,
-        SimpleNamespace(req_pool_indices=rows),
-        list(lens),
-        k.device,
+        fx.k,
+        fx.v,
+        fx.table,
+        SimpleNamespace(req_pool_indices=fx.rows),
+        list(fx.lens),
+        fx.k.device,
         0,
         None,
     )
-    slots = torch.cat(
-        [table[row, :n].long() for row, n in zip([3, 1, 0], lens)]
-    ).contiguous()
-    torch.testing.assert_close(packed_k, k.index_select(0, slots), rtol=0, atol=0)
-    torch.testing.assert_close(packed_v, v.index_select(0, slots), rtol=0, atol=0)
-    assert cu_k.tolist() == [0, 8, 8, 11] and kv_lens.tolist() == lens
+    actual = torch.cat([fx.table[r, :n].long() for r, n in zip(fx.actual, fx.lens)])
+    torch.testing.assert_close(packed_k, fx.k.index_select(0, actual), rtol=0, atol=0)
+    torch.testing.assert_close(packed_v, fx.v.index_select(0, actual), rtol=0, atol=0)
+    assert cu_k.tolist() == [0, 8, 8, 11] and kv_lens.tolist() == fx.lens
     # What the strideless kernel read would have addressed instead.
-    decoy = torch.cat([table[row, :n].long() for row, n in zip([3, 9, 1], lens)])
-    assert not torch.equal(slots, decoy)
+    decoy = torch.cat([fx.table[r, :n].long() for r, n in zip(fx.strideless, fx.lens)])
+    assert not torch.equal(actual, decoy)
 
     # A contiguous copy of the same rows is accepted, and it gathers exactly the
     # bytes the joined-index path produced for this ragged/zero-length batch.
-    dense = rows.contiguous()
-    assert qsa_prefill_kv_pack_supported(k, v, table, dense, lens)
+    dense = fx.rows.contiguous()
+    assert qsa_prefill_kv_pack_supported(fx.k, fx.v, fx.table, dense, fx.lens)
     fused_k, fused_v = pack_qsa_prefill_kv(
-        k, v, table, dense, cu_k, sum(lens), max(lens)
+        fx.k, fx.v, fx.table, dense, cu_k, sum(fx.lens), max(fx.lens)
     )
     torch.testing.assert_close(fused_k, packed_k, rtol=0, atol=0)
     torch.testing.assert_close(fused_v, packed_v, rtol=0, atol=0)
-
-    q = torch.randn(
-        sum(query_lens), heads * 6, dim, device="cuda", dtype=torch.bfloat16
-    )
-    indices = torch.full((sum(query_lens), 4), -1, dtype=torch.int32, device="cuda")
-    row = 0
-    for count, prefix in zip(query_lens, lens):
-        for offset in range(count):
-            selected = torch.randperm(prefix + offset + 1, device="cuda")[:4]
-            indices[row, : selected.numel()] = selected
-            row += 1
-    cu_q = torch.tensor([0, 2, 3, 4], dtype=torch.int32, device="cuda")
     torch.testing.assert_close(
         sparse_gqa_fwd_interface_triton_ck(
-            q, fused_k, fused_v, indices, cu_q, cu_k, kv_lens, dim**-0.5
+            fx.q, fused_k, fused_v, fx.indices, fx.cu_q, cu_k, kv_lens, fx.dim**-0.5
         ),
         sparse_gqa_fwd_interface_triton_ck(
-            q, packed_k, packed_v, indices, cu_q, cu_k, kv_lens, dim**-0.5
+            fx.q, packed_k, packed_v, fx.indices, fx.cu_q, cu_k, kv_lens, fx.dim**-0.5
         ),
         rtol=0,
         atol=0,
