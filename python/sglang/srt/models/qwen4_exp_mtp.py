@@ -1,7 +1,7 @@
 """Inference-only Qwen4-Exp MTP speculative decoding."""
 
 # The draft-vocab placeholder path below (`_draft_vocab_weights_are_shared`,
-# `_build_with_placeholder_vocab_weight`, `_is_draft_vocab_weight` and the
+# `_placeholder_vocab_weight`, `_is_draft_vocab_weight` and the
 # `_Qwen4ExpDraftModel` embedding hook) is adapted from
 # aiueo52/sglang-rtxpro6000 (flash-next-fast), file
 # python/sglang/srt/models/qwen4_exp_mtp.py, donor commit
@@ -9,8 +9,10 @@
 # f55c4d61cc08b7e29c15a553a02b154d505660e0; the same file at the donor full
 # snapshot 5105985116eb00dea8e6138aabeb5363387cb9de is blob
 # bb1cc38f78701f0077bbd6ea34a743583ada0e82), Apache-2.0. Selective reuse: the
-# donor's gate let any speculative algorithm through, this one requires the
-# workers that really hand in the target's tensors, and the donor's
+# donor's gate let any speculative algorithm through and assumed the vocab
+# module owns one plain `weight` (asserting it), while this file requires the
+# workers that actually hand in the target's tensors and declines the placeholder
+# per module on the vocab representation it really registers. The donor's
 # `_fc_embed_table` entry projection / MTP-entry GEMV -- and the ~2.4 GB once
 # reported for it -- are its own work, not taken here (and not established for
 # this checkpoint, TP layout or quantization).
@@ -30,6 +32,10 @@ from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_r
 from sglang.srt.layers.layernorm import GemmaRMSNorm
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.layers.quantization.unquant import (
+    UnquantizedEmbeddingMethod,
+    UnquantizedLinearMethod,
+)
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.models.qwen3_5_mtp import Qwen3_5ForCausalLMMTP, _mtp_quant_config
@@ -40,7 +46,7 @@ from sglang.srt.utils import add_prefix, is_npu, set_weight_attrs
 logger = logging.getLogger(__name__)
 
 
-def _draft_vocab_weights_are_shared(quant_config) -> bool:
+def _draft_vocab_weights_are_shared() -> bool:
     """Whether the worker will hand this draft the target's vocab tensors.
 
     The EAGLE-family (NEXTN resolves to EAGLE) and FROZEN_KV_MTP workers both
@@ -49,13 +55,12 @@ def _draft_vocab_weights_are_shared(quant_config) -> bool:
     `set_embed_and_head`), so building the two [vocab, hidden] tables here only
     for that handoff to `del` and replace them is start-up peak for nothing.
     EAGLE3 keeps a draft-owned head unless it loads the target's
-    (`load_lm_head_from_target`), STANDALONE and DFLASH drafts own their vocab
-    outright and a quantized head carries packed/scaled parameters rather than
-    one swappable `weight`: all of those stay on the full-size path.
+    (`load_lm_head_from_target`) and STANDALONE / DFLASH drafts own their vocab
+    outright, so those stay on the full-size path. Whether the served quant
+    configuration still allows a placeholder is answered per module, by what it
+    actually registers -- see `_placeholder_vocab_weight`.
     """
     if not envs.SGLANG_DRAFT_SKIP_VOCAB_WEIGHTS.get():
-        return False
-    if quant_config is not None:
         return False
 
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
@@ -64,7 +69,12 @@ def _draft_vocab_weights_are_shared(quant_config) -> bool:
     return algo in (SpeculativeAlgorithm.EAGLE, SpeculativeAlgorithm.FROZEN_KV_MTP)
 
 
-def _build_with_placeholder_vocab_weight(build: Callable[[], nn.Module]) -> nn.Module:
+# Methods that read the raw weight straight out of the parameter (a plain matmul
+# / gather), so swapping the target's tensor in keeps the computation correct.
+_UNQUANTIZED_VOCAB_METHODS = (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
+
+
+def _placeholder_vocab_weight(build: Callable[[], nn.Module]) -> Optional[nn.Module]:
     """Build a vocab-sized module without materialising its [vocab, hidden] table.
 
     Construction runs on the meta device, so the layout metadata (shard indices,
@@ -73,28 +83,58 @@ def _build_with_placeholder_vocab_weight(build: Callable[[], nn.Module]) -> nn.M
     agree -- while the table costs nothing. The module then gets a 1-row
     parameter on the ambient device for `set_embed_and_head` to delete and
     replace.
+
+    Returns None (caller builds for real) unless the module's vocab
+    representation is a single unquantized table: a quantized head answers
+    through packed/scaled parameters that would stay behind, decoupled from the
+    target's real tensor, after the handoff. The served draft quantization -- an
+    online-expert NVFP4 config whose `get_quant_method` returns None for the
+    head, and the embedding, which takes no quant config at all -- registers one
+    plain `weight` and does qualify; the expert quantization is untouched either
+    way.
     """
-    with torch.device("meta"):
-        module = build()
-    weight = getattr(module, "weight", None)
-    assert isinstance(weight, nn.Parameter) and weight.is_meta, (
-        f"{type(module).__name__} does not own a single meta weight parameter; "
-        "the draft vocab placeholder path only covers the unquantized layout"
-    )
+    try:
+        with torch.device("meta"):
+            module = build()
+    except Exception:
+        # A quant method that cannot even be probed without real storage; the
+        # full-size build below reproduces the normal load path (and its errors).
+        return None
+
+    params = dict(module.named_parameters(recurse=False))
+    weight = params.get("weight")
+    rows = getattr(module, "num_embeddings_per_partition", None)
+    if (
+        set(params) != {"weight"}
+        or not isinstance(weight, nn.Parameter)
+        or not weight.is_meta
+        or weight.dim() != 2
+        or not isinstance(module.quant_method, _UNQUANTIZED_VOCAB_METHODS)
+        or (rows is not None and weight.shape[0] != rows)
+    ):
+        return None
+
     placeholder = nn.Parameter(
         torch.empty(1, weight.shape[1], dtype=weight.dtype),
         requires_grad=False,
     )
     set_weight_attrs(
         placeholder,
-        {"input_dim": 1, "output_dim": 0, "weight_loader": module.weight_loader},
+        {
+            "input_dim": 1,
+            "output_dim": 0,
+            "weight_loader": module.weight_loader,
+            # Read off the live parameter, so the loader filter below stops
+            # applying the moment the handoff replaces this tensor.
+            "is_draft_vocab_placeholder": True,
+        },
     )
     module.register_parameter("weight", placeholder)
     return module
 
 
 def _is_draft_vocab_weight(name: str) -> bool:
-    """Checkpoint tensors that would target a placeholder (see above)."""
+    """Checkpoint tensors that name the draft's two vocab tables."""
     if "mtp" not in name:
         return False
     return (
@@ -107,14 +147,18 @@ def _is_draft_vocab_weight(name: str) -> bool:
 class _Qwen4ExpDraftModel(Qwen4ExpModel):
     """Draft backbone whose input embedding is a placeholder.
 
-    Only used when the target's table gets shared in; see
-    `_draft_vocab_weights_are_shared`.
+    Only used when the target's table gets shared in; falls back to the real
+    table if the embedding module cannot be placeheld (see
+    `_placeholder_vocab_weight`).
     """
 
     def _build_embed_tokens(self, config) -> nn.Module:
-        return _build_with_placeholder_vocab_weight(
+        module = _placeholder_vocab_weight(
             lambda: super(_Qwen4ExpDraftModel, self)._build_embed_tokens(config)
         )
+        if module is None:
+            return super(_Qwen4ExpDraftModel, self)._build_embed_tokens(config)
+        return module
 
 
 class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
@@ -147,15 +191,10 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
         self.hc_count = config.hc_count
         self._mtp_input_fusion = self._init_mtp_input_fusion(config)
 
-        self.skip_vocab_weights = _draft_vocab_weights_are_shared(quant_config)
-        model_cls = _Qwen4ExpDraftModel if self.skip_vocab_weights else Qwen4ExpModel
-        self.model = model_cls(
-            config,
-            quant_config,
-            prefix=add_prefix("mtp", prefix),
-            is_nextn=True,
-        )
-
+        # The head answers for the pair: it is the one of the two vocab modules
+        # a quant configuration can hand a packed/scaled representation, and the
+        # tables are placeheld together or not at all. Built before the backbone
+        # choice, registered after it so parameter order matches the base model.
         def build_lm_head() -> nn.Module:
             return ParallelLMHead(
                 config.vocab_size,
@@ -165,10 +204,21 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
                 use_attn_tp_group=get_parallel().config.enable_dp_lm_head,
             )
 
+        placeholder_head = None
+        self.skip_vocab_weights = False
+        if _draft_vocab_weights_are_shared():
+            placeholder_head = _placeholder_vocab_weight(build_lm_head)
+            self.skip_vocab_weights = placeholder_head is not None
+
+        model_cls = _Qwen4ExpDraftModel if self.skip_vocab_weights else Qwen4ExpModel
+        self.model = model_cls(
+            config,
+            quant_config,
+            prefix=add_prefix("mtp", prefix),
+            is_nextn=True,
+        )
         self.lm_head = (
-            _build_with_placeholder_vocab_weight(build_lm_head)
-            if self.skip_vocab_weights
-            else build_lm_head()
+            placeholder_head if placeholder_head is not None else build_lm_head()
         )
         if self.skip_vocab_weights:
             # Nominal (unsharded, unquantized) size of the two tables left
@@ -185,26 +235,43 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
         self, weights: Iterable[Tuple[str, torch.Tensor]], is_mtp: bool = False
     ):
         if self.skip_vocab_weights:
-            weights = self._drop_draft_vocab_weights(weights)
+            weights = self._drop_placeholder_rows(weights)
         return super().load_weights(weights, is_mtp)
 
-    @staticmethod
-    def _drop_draft_vocab_weights(
-        weights: Iterable[Tuple[str, torch.Tensor]],
-    ) -> Iterable[Tuple[str, torch.Tensor]]:
-        """Drop the rows that would target a placeholder vocab table.
+    def _vocab_param_for_row(self, name: str):
+        """The live parameter a draft-vocab checkpoint row would be loaded into."""
+        if name.endswith("embed_tokens.weight"):
+            module = getattr(self.model, "embed_tokens", None)
+        else:
+            module = getattr(self, "lm_head", None)
+        return getattr(module, "weight", None)
 
-        The worker hands in the target's embedding and head either way, so the
-        checkpoint's own copy would be overwritten -- but say so, a draft that
-        really needs an independent table belongs on the full-size path.
+    def _drop_placeholder_rows(
+        self, weights: Iterable[Tuple[str, torch.Tensor]]
+    ) -> Iterable[Tuple[str, torch.Tensor]]:
+        """Skip the rows that would land on a live 1-row placeholder table.
+
+        The check reads the live parameter, not just the flag: once
+        `set_embed_and_head` hands the target's tensors in, the marker is gone
+        and this class loads exactly like the base draft, so a later load of
+        those rows is neither dropped nor written into a 1-row parameter.
         """
         for name, weight in weights:
-            if _is_draft_vocab_weight(name):
+            param = (
+                self._vocab_param_for_row(name)
+                if _is_draft_vocab_weight(name)
+                else None
+            )
+            if param is not None and getattr(
+                param, "is_draft_vocab_placeholder", False
+            ):
                 logger.warning_once(
-                    "MTP draft checkpoint tensor %r targets a placeholder "
-                    "(SGLANG_DRAFT_SKIP_VOCAB_WEIGHTS): the worker shares the "
-                    "target's embedding / head in, so this row is discarded as "
-                    "before; turn the flag off to keep a draft-owned table.",
+                    "MTP draft checkpoint tensor %r names the draft's own "
+                    "embedding / head, which is a live 1-row placeholder here; "
+                    "skipped, because the spec worker hands the target's tensors "
+                    "in either way and this row would only be overwritten "
+                    "(SGLANG_DRAFT_SKIP_VOCAB_WEIGHTS decides the draft's "
+                    "allocation, not which table it ends up with).",
                     name,
                 )
                 continue
