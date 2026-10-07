@@ -7,6 +7,8 @@ import math
 import pytest
 import torch
 import torch.nn.functional as F
+from torch import nn
+
 from sglang.kernels.ops.gemm import sm120_w8a16_gemv
 from sglang.kernels.ops.gemm.sm120_online_fp8 import (
     configure_online_fp8,
@@ -16,9 +18,8 @@ from sglang.kernels.ops.gemm.sm120_online_fp8 import (
     rowwise_scale_of,
 )
 from sglang.test.ci.ci_register import register_cuda_ci
-from torch import nn
 
-register_cuda_ci(est_time=180, stage="base-b", runner_config="1-gpu-small")
+register_cuda_ci(est_time=240, stage="base-b", runner_config="1-gpu-small")
 
 
 def _is_exact_sm120() -> bool:
@@ -190,18 +191,17 @@ def test_rowwise_head_shape_matches_dequantized_reference_and_replays(
     hidden = _randn((rows, HIDDEN_SIZE), seed=800 + rows, scale=0.25)
     scale = rowwise_scale_of(rowwise_draft_head_weight)
     assert scale.shape == (DRAFT_HEAD_ROWS,)
-    assert sm120_w8a16_gemv.lowrow_gemv_supported(
-        hidden, rowwise_draft_head_weight, scale
-    ) is gemv_candidate
+    assert (
+        sm120_w8a16_gemv.lowrow_gemv_supported(hidden, rowwise_draft_head_weight, scale)
+        is gemv_candidate
+    )
 
     for _ in range(2):
         rowwise_fp8_lm_head_logits(hidden, rowwise_draft_head_weight)
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        graph_output = rowwise_fp8_lm_head_logits(
-            hidden, rowwise_draft_head_weight
-        )
+        graph_output = rowwise_fp8_lm_head_logits(hidden, rowwise_draft_head_weight)
     hidden.copy_(_randn((rows, HIDDEN_SIZE), seed=900 + rows, scale=0.25))
     graph.replay()
     torch.cuda.synchronize()
@@ -248,6 +248,138 @@ def test_flashinfer_cutlass_mxfp8_linear_quantizes_and_applies() -> None:
             _assert_normalized_error(actual, expected, max_nrmse=0.12, min_cosine=0.99)
     finally:
         fp8_utils.FP8_GEMM_RUNNER_BACKEND = original_backend
+
+
+# (N, K) at Flash-Next dense-projection widths: shared_expert / attention /
+# linear-attention / MTP scale, small enough for CI, big enough that the
+# underfilled grid the candidate exists for is the grid under test.  The wide pair
+# is the range (N >= 12032 on 188 SMs) where the planner takes the wide multirow
+# tile, whose shared-memory footprint is the launch that Triton refused; the two
+# tiles it can pick are 147456 B (over the part's 101376 B) and 73728 B.
+DENSE_PROJECTIONS = [(1024, 2560), (12288, 2560)]
+DENSE_ROWS = [1, 4, 16, 24]  # 24 is C6 verification: never the candidate
+
+
+@pytest.fixture(
+    scope="module",
+    params=DENSE_PROJECTIONS,
+    ids=[f"{n}x{k}" for n, k in DENSE_PROJECTIONS],
+)
+def mxfp8_dense_layer(request):
+    """One online-quantized MXFP8 dense linear, in the stored representation."""
+    from sglang.srt.layers.quantization import fp8_utils
+    from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
+    from sglang.srt.layers.quantization.fp8_utils import (
+        Fp8GemmRunnerBackend,
+        Mxfp8DenseGemmBackend,
+    )
+
+    class Dense(nn.Module):
+        def __init__(self, weight: torch.Tensor):
+            super().__init__()
+            self.weight = nn.Parameter(weight, requires_grad=False)
+
+    n, k = request.param
+    original_backend = fp8_utils.FP8_GEMM_RUNNER_BACKEND
+    fp8_utils.FP8_GEMM_RUNNER_BACKEND = Fp8GemmRunnerBackend.FLASHINFER_CUTLASS
+    try:
+        method = Fp8LinearMethod(
+            Fp8Config(
+                is_checkpoint_fp8_serialized=False,
+                activation_scheme="dynamic",
+                use_mxfp8=True,
+            )
+        )
+        assert method.mxfp8_dense_backend is Mxfp8DenseGemmBackend.FLASHINFER_CUTLASS
+        layer = Dense(_randn((n, k), seed=1101, scale=1.0 / math.sqrt(k)).clone())
+        method.process_weights_after_loading(layer)
+        # The candidate's whole contract is this stored format, so pin it here:
+        # fp8 e4m3 values with UE8M0 bytes at [N, K/32], row-major, on the layer.
+        assert layer.weight.dtype == torch.float8_e4m3fn
+        assert layer.weight_scale_inv.dtype == torch.uint8
+        assert layer.weight_scale_inv.shape == (n, k // sm120_w8a16_gemv.MXFP8_SF)
+        assert layer.weight_scale_inv.format_ue8m0 is True
+        assert layer.weight.stride(1) == 1 and layer.weight_scale_inv.stride(1) == 1
+        yield method, layer
+    finally:
+        fp8_utils.FP8_GEMM_RUNNER_BACKEND = original_backend
+
+
+def _stored_mxfp8_reference(layer: nn.Module) -> torch.Tensor:
+    return sm120_w8a16_gemv.dequantize_mxfp8_weight(
+        layer.weight, layer.weight_scale_inv, dtype=torch.float32
+    )
+
+
+@pytest.mark.parametrize("rows", DENSE_ROWS)
+@pytest.mark.parametrize("gemv_candidate", [False, True])
+def test_dense_mxfp8_linear_lowrow_gemv_matches_the_stored_weight(
+    mxfp8_dense_layer, rows: int, gemv_candidate: bool, monkeypatch
+) -> None:
+    """The dense candidate against the dequantized stored weight, gate on and off.
+
+    W8A16 by design: the activation stays BF16, so the candidate is compared with
+    the dequantized MXFP8 weight, NOT claimed to be bitwise equal with the
+    activation-quantized W8A8 dispatch that the same gate leaves untouched.
+    """
+    method, layer = mxfp8_dense_layer
+    if gemv_candidate:
+        monkeypatch.setenv(sm120_w8a16_gemv.MX_GEMV_ENV, "1")
+    else:
+        monkeypatch.delenv(sm120_w8a16_gemv.MX_GEMV_ENV, raising=False)
+    assert sm120_w8a16_gemv.mxfp8_gemv_enabled() is gemv_candidate
+
+    _n, k = layer.weight.shape
+    x = _randn((rows, k), seed=1200 + rows, scale=0.25)
+    uses_candidate = gemv_candidate and rows <= sm120_w8a16_gemv.MAX_ROWS
+    assert (
+        sm120_w8a16_gemv.lowrow_mxfp8_gemv_supported(
+            x, layer.weight, layer.weight_scale_inv
+        )
+        is uses_candidate
+    )
+
+    actual = method.apply(layer, x)
+    expected = x.float() @ _stored_mxfp8_reference(layer).T
+    if uses_candidate:
+        # Only the fp32 reduction order and the bf16 output round differ.
+        _assert_normalized_error(actual, expected, max_nrmse=0.005, min_cosine=0.9999)
+    else:
+        # Gate off (and C6's 24 rows): the qualified W8A8 dispatch, which also
+        # quantizes the activation per 32-column group.
+        _assert_normalized_error(actual, expected, max_nrmse=0.12, min_cosine=0.99)
+
+
+@pytest.mark.parametrize("rows", [4, 16])
+def test_dense_mxfp8_linear_lowrow_gemv_cuda_graph_replays(
+    mxfp8_dense_layer, rows: int, monkeypatch
+) -> None:
+    """Split-K dense launches are replayable without a memset between calls."""
+    method, layer = mxfp8_dense_layer
+    monkeypatch.setenv(sm120_w8a16_gemv.MX_GEMV_ENV, "1")
+    _n, k = layer.weight.shape
+    x = _randn((rows, k), seed=1300 + rows, scale=0.25)
+    # Warm up and materialize the split-K scratch the way weight post-processing
+    # does: allocating inside the capture would hand it to that graph's pool.
+    sm120_w8a16_gemv.prealloc(x.device)
+    for _ in range(2):
+        method.apply(layer, x)
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_output = method.apply(layer, x)
+    x.copy_(_randn((rows, k), seed=1400 + rows, scale=0.25))
+    expected = x.float() @ _stored_mxfp8_reference(layer).T
+
+    # Three replays: the per-N-block counters must return themselves to 0, or the
+    # second and third replay drift away from the first.
+    for _ in range(3):
+        graph.replay()
+        torch.cuda.synchronize()
+        _assert_normalized_error(
+            graph_output.clone(), expected, max_nrmse=0.005, min_cosine=0.9999
+        )
 
 
 @pytest.fixture(scope="module")
