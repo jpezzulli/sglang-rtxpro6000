@@ -78,6 +78,19 @@ EXACT_SM120 = (12, 0)
 #: batches (C6's 24-row verification, prefill) stay on the original path.
 MAX_ROWS = 16
 
+#: Dynamic shared memory one CTA may ask for on the part EXACT_SM120 names
+#: (99 KB).  Fitting it is a launch requirement, not a tuning preference: an
+#: over-subscribed plan is a Triton OutOfResources at launch, and the dense
+#: block-MXFP8 [128, 256] tile asks for 147456 B, 45 KB too much.  See
+#: ``_smem_bytes`` for where that number comes from.
+SMEM_LIMIT_SM120 = 101376
+
+#: Copies of each K-loop tile the pipeliner holds at the num_stages=3 every plan
+#: here asks for (measured; it is also the upper bound at lower stage counts), and
+#: the narrowest tile edge the shrink below is allowed to reach.
+_SMEM_COPIES = 2
+_SMEM_MIN_TILE = 16
+
 _WS_FLOATS = 1 << 21
 _WS_COUNTERS = 4096
 _MAX_SPLITS = 32
@@ -352,29 +365,34 @@ _BY_SHAPE = {
 
 
 @functools.lru_cache(maxsize=512)
-def _plan(M: int, N: int, K: int, sms: int, tuned: bool = True):
+def _plan(M: int, N: int, K: int, sms: int, tuned: bool = True, sf_group: int = 0):
     """(BLOCK_N, BLOCK_K, SPLITS, USE_DOT, num_warps, num_stages) for one call.
 
     ``tuned`` selects the donor's head-shape table.  The dense block-MXFP8 caller
     passes False: those tiles were measured on the rowwise output heads, and a
     dense projection that happens to share an (N, K) is not that measurement.
+    ``sf_group`` is the caller's scale granularity (0 = rowwise).  It says how
+    many tiles the K loop has to stage, so every return goes through ``_fit``, the
+    one place that knows the launch has to fit the hardware.
     """
     table = _BY_SHAPE.get((_m_bucket(M), N, K)) if tuned else None
     if table is not None:
-        return _fit(M, N, table)
+        return _fit(M, N, table, sf_group)
     # N alone fills the machine: a long BLOCK_K keeps more bytes in flight.  The
     # M == 4 bucket is the exception, where the donor measured the narrow tile
     # faster on both 2560-K shapes.
     if triton.cdiv(N, 128) * 2 >= sms and _m_bucket(M) != 4:
         if M == 1:
-            return (32, 256, 1, False, 4, 3)
-        # A [128, 256] bf16 tile needs 144 KB of smem, over the 99 KB sm_120 limit.
-        return (128, 256, 1, True, 8, 3)
+            return _fit(M, N, (32, 256, 1, False, 4, 3), sf_group)
+        # The [128, 256] tile the rowwise heads are measured with does not fit a
+        # block-MXFP8 launch, whose gathered scale tile doubles the K-loop smem;
+        # _fit shortens BLOCK_K for that caller and leaves this one alone.
+        return _fit(M, N, (128, 256, 1, True, 8, 3), sf_group)
     use_dot = M > 1
     block_n = 16 if M == 1 else 32
     block_k, warps = 128, 4
     if triton.cdiv(N, 32) >= sms:
-        return (block_n, block_k, 1, use_dot, warps, 3)
+        return _fit(M, N, (block_n, block_k, 1, use_dot, warps, 3), sf_group)
     # Underfilled grid: split K.  Aim for ~2 CTAs per SM, ~5 at M == 1 where an
     # M_PAD 1 partial is 16x cheaper; shrink BLOCK_K if K has too few blocks.
     per_sm = 5 if M == 1 else 2
@@ -387,23 +405,54 @@ def _plan(M: int, N: int, K: int, sms: int, tuned: bool = True):
         if n_kb % cand == 0 and cand <= _MAX_SPLITS:
             splits = cand
             break
-    return _fit(M, N, (block_n, block_k, splits, use_dot, warps, 3))
+    return _fit(M, N, (block_n, block_k, splits, use_dot, warps, 3), sf_group)
 
 
-def _fit(M: int, N: int, cfg):
-    """Drop to SPLITS=1 if the plan would not fit the preallocated scratch."""
+def _smem_bytes(block_n: int, block_k: int, m_pad: int, sf_group: int) -> int:
+    """Dynamic shared memory one K-loop plan costs on sm_120, in bytes.
+
+    The pipeliner stages ``_SMEM_COPIES`` copies of every tile the K loop reads:
+    the fp8 weight tile (``BLOCK_N * BLOCK_K`` bytes), the bf16 activation tile
+    (``M_PAD * BLOCK_K * 2``) and, for the block-MXFP8 layout only, the gathered
+    [1, 32] weight-scale tile.  That last one is one byte per weight element --
+    the gather is at ``kk // SF_GROUP``, so a [BLOCK_N, BLOCK_K] tile of bytes --
+    exactly the size of the weight tile it travels with.  Checked against triton
+    3.8 compiling this kernel for sm_120: [128, 256] at M_PAD 16 reports 147456 B
+    with a scale group and 81920 B without, i.e. the donor's rowwise head tile
+    plus the second tile only the dense layout pays for.
+    """
+    tiles = block_n * block_k * (2 if sf_group else 1) + m_pad * block_k * 2
+    return _SMEM_COPIES * tiles
+
+
+def _fit(M: int, N: int, cfg, sf_group: int = 0):
+    """Shrink a plan that would not fit the part's shared memory or split-K scratch.
+
+    Shared memory first: over it and the launch never starts.  Halving a tile edge
+    is the cheap fix -- the same bytes stream through, only in more iterations --
+    and shortening BLOCK_K keeps BLOCK_N, so the grid and the N-block ownership
+    the planner chose are untouched.  SPLITS is bounded by a fixed scratch pool
+    rather than by the hardware, so an over-subscribed split-K plan still falls
+    back to a single K block instead of a smaller tile.
+    """
     block_n, block_k, splits, use_dot, warps, stages = cfg
-    if splits == 1:
-        return cfg
     m_pad = 16 if (use_dot or M > 1) else 1
+    while (
+        _smem_bytes(block_n, block_k, m_pad, sf_group) > SMEM_LIMIT_SM120
+        and min(block_n, block_k) > _SMEM_MIN_TILE
+    ):
+        if block_k >= block_n:
+            block_k //= 2
+        else:
+            block_n //= 2
     n_blocks = triton.cdiv(N, block_n)
-    if (
+    if splits > 1 and (
         splits > _MAX_SPLITS
         or n_blocks > _WS_COUNTERS
         or n_blocks * splits * m_pad * block_n > _WS_FLOATS
     ):
-        return (block_n, block_k, 1, use_dot, warps, stages)
-    return cfg
+        splits = 1
+    return (block_n, block_k, splits, use_dot, warps, stages)
 
 
 def lowrow_gemv_supported(
@@ -600,7 +649,7 @@ def lowrow_mxfp8_gemv(
     N = weight.shape[0]
     device = hidden_2d.device
     block_n, block_k, splits, use_dot, num_warps, num_stages = _plan(
-        M, N, K, _num_sms(device), False
+        M, N, K, _num_sms(device), False, MXFP8_SF
     )
     use_dot = use_dot or M > 1
     out = torch.empty((M, N), dtype=torch.bfloat16, device=device)

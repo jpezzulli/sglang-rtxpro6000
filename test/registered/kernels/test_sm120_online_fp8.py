@@ -19,7 +19,7 @@ from sglang.kernels.ops.gemm.sm120_online_fp8 import (
 )
 from sglang.test.ci.ci_register import register_cuda_ci
 
-register_cuda_ci(est_time=180, stage="base-b", runner_config="1-gpu-small")
+register_cuda_ci(est_time=240, stage="base-b", runner_config="1-gpu-small")
 
 
 def _is_exact_sm120() -> bool:
@@ -250,15 +250,22 @@ def test_flashinfer_cutlass_mxfp8_linear_quantizes_and_applies() -> None:
         fp8_utils.FP8_GEMM_RUNNER_BACKEND = original_backend
 
 
-# (N, K) at a Flash-Next dense-projection width: shared_expert / attention /
+# (N, K) at Flash-Next dense-projection widths: shared_expert / attention /
 # linear-attention / MTP scale, small enough for CI, big enough that the
-# underfilled grid the candidate exists for is the grid under test.
-DENSE_PROJECTION = (1024, 2560)
+# underfilled grid the candidate exists for is the grid under test.  The wide pair
+# is the range (N >= 12032 on 188 SMs) where the planner takes the wide multirow
+# tile, whose shared-memory footprint is the launch that Triton refused; the two
+# tiles it can pick are 147456 B (over the part's 101376 B) and 73728 B.
+DENSE_PROJECTIONS = [(1024, 2560), (12288, 2560)]
 DENSE_ROWS = [1, 4, 16, 24]  # 24 is C6 verification: never the candidate
 
 
-@pytest.fixture(scope="module")
-def mxfp8_dense_layer():
+@pytest.fixture(
+    scope="module",
+    params=DENSE_PROJECTIONS,
+    ids=[f"{n}x{k}" for n, k in DENSE_PROJECTIONS],
+)
+def mxfp8_dense_layer(request):
     """One online-quantized MXFP8 dense linear, in the stored representation."""
     from sglang.srt.layers.quantization import fp8_utils
     from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
@@ -272,7 +279,7 @@ def mxfp8_dense_layer():
             super().__init__()
             self.weight = nn.Parameter(weight, requires_grad=False)
 
-    n, k = DENSE_PROJECTION
+    n, k = request.param
     original_backend = fp8_utils.FP8_GEMM_RUNNER_BACKEND
     fp8_utils.FP8_GEMM_RUNNER_BACKEND = Fp8GemmRunnerBackend.FLASHINFER_CUTLASS
     try:
@@ -322,7 +329,7 @@ def test_dense_mxfp8_linear_lowrow_gemv_matches_the_stored_weight(
         monkeypatch.delenv(sm120_w8a16_gemv.MX_GEMV_ENV, raising=False)
     assert sm120_w8a16_gemv.mxfp8_gemv_enabled() is gemv_candidate
 
-    _n, k = DENSE_PROJECTION
+    _n, k = layer.weight.shape
     x = _randn((rows, k), seed=1200 + rows, scale=0.25)
     uses_candidate = gemv_candidate and rows <= sm120_w8a16_gemv.MAX_ROWS
     assert (
@@ -350,7 +357,7 @@ def test_dense_mxfp8_linear_lowrow_gemv_cuda_graph_replays(
     """Split-K dense launches are replayable without a memset between calls."""
     method, layer = mxfp8_dense_layer
     monkeypatch.setenv(sm120_w8a16_gemv.MX_GEMV_ENV, "1")
-    _n, k = DENSE_PROJECTION
+    _n, k = layer.weight.shape
     x = _randn((rows, k), seed=1300 + rows, scale=0.25)
     # Warm up and materialize the split-K scratch the way weight post-processing
     # does: allocating inside the capture would hand it to that graph's pool.

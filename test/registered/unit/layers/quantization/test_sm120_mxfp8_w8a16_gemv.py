@@ -34,8 +34,11 @@ SF = sm120_w8a16_gemv.MXFP8_SF
 # gate_up/down, attention qkv/o, linear-attention in_proj_qkvz/in_proj_ba/out_proj
 # and the MTP dense projections.  Routers, the indexer, PLE, embeddings and the
 # routed experts are not dense MXFP8 linears, so they are never offered to this
-# gate; the last row is the small-N, underfilled case the [1, 32] conversion itself
-# skips (it requires N >= 128) and that the split-K plan still has to serve.
+# gate; the small-N row is the underfilled case the [1, 32] conversion itself
+# skips (it requires N >= 128) and that the split-K plan still has to serve.  The
+# two wide rows are the range where the planner takes the wide multirow tile
+# (cdiv(N, 128) * 2 >= 188 SMs, i.e. N >= 12032) and where the shared-memory
+# budget, not the grid, is the binding constraint.
 DENSE_SHAPES = [
     (1024, 2560),  # shared_expert gate_up_proj
     (2560, 512),  # shared_expert down_proj
@@ -44,11 +47,25 @@ DENSE_SHAPES = [
     (8192, 2560),  # GDN in_proj_qkvz
     (64, 2560),  # GDN in_proj_ba (2 * num_v_heads)
     (1024, 1280),  # NEXTN / MTP dense projection
+    (12288, 2560),  # wide gate_up_proj shard: multirow tile, over smem at BK 256
+    (24576, 2560),  # wider still: same tile, more N blocks
 ]
+
+# Every M bucket the gate admits: M == 1, the 2..4 bucket, the 5..16 bucket.
+ROW_BUCKETS = (1, 2, 4, 5, 8, 12, 16)
 
 
 def _cdiv(a: int, b: int) -> int:
     return (a + b - 1) // b
+
+
+def _m_pad(rows: int, plan) -> int:
+    """The M_PAD ``_launch`` will pass for this plan, same expression."""
+    return 16 if (plan[3] or rows > 1) else 1
+
+
+def _planned_smem(rows: int, plan, sf_group: int = SF) -> int:
+    return sm120_w8a16_gemv._smem_bytes(plan[0], plan[1], _m_pad(rows, plan), sf_group)
 
 
 def _gate_env(monkeypatch, *, dense: bool, head: bool = False):
@@ -279,7 +296,7 @@ def test_dense_plan_bounds_the_scratch_and_skips_the_head_tile_table(monkeypatch
     for rows in (1, 4, 16):
         for n, k in DENSE_SHAPES:
             block_n, block_k, splits, use_dot, _w, _s = sm120_w8a16_gemv._plan(
-                rows, n, k, SMS, False
+                rows, n, k, SMS, False, SF
             )
             assert 0 < block_k and 1 <= splits <= sm120_w8a16_gemv._MAX_SPLITS
             n_blocks = _cdiv(n, block_n)
@@ -297,9 +314,91 @@ def test_dense_plan_bounds_the_scratch_and_skips_the_head_tile_table(monkeypatch
     # The donor's tiles were measured on the rowwise output heads, so the dense
     # path has to bypass that table instead of inheriting an unknown measurement.
     tuned = sm120_w8a16_gemv._plan(4, 32768, 2560, SMS)
-    generic = sm120_w8a16_gemv._plan(4, 32768, 2560, SMS, False)
+    generic = sm120_w8a16_gemv._plan(4, 32768, 2560, SMS, False, SF)
     assert tuned == (128, 256, 1, True, 8, 3)
     assert generic != tuned
+
+
+def test_dense_plan_fits_the_sm120_shared_memory_budget():
+    """The launch plan for every admitted shape has to fit the part's smem.
+
+    Red on the base revision for the wide multirow shape: that plan was
+    ``[128, 256]`` at M_PAD 16, whose gathered [1, 32] scale tile makes it
+    147456 B -- the exact figure Triton's OutOfResources named against the
+    101376 B sm_120 gives a launch.  The plan the fix selects is the same tile
+    with a shorter K loop, and the rowwise heads' measured tile is untouched.
+    """
+    assert sm120_w8a16_gemv.SMEM_LIMIT_SM120 == 101376
+    # The old dense tile spelled out, so this check names the failure it guards.
+    assert sm120_w8a16_gemv._smem_bytes(128, 256, 16, SF) == 147456
+    assert (
+        sm120_w8a16_gemv._smem_bytes(128, 256, 16, SF)
+        > sm120_w8a16_gemv.SMEM_LIMIT_SM120
+    )
+    # Without the scale tile -- the rowwise head contract -- the same tile fits,
+    # which is why the heads keep their donor-measured plan and its 8 warps.
+    assert sm120_w8a16_gemv._smem_bytes(128, 256, 16, 0) == 81920
+    assert (
+        sm120_w8a16_gemv._smem_bytes(128, 256, 16, 0)
+        < sm120_w8a16_gemv.SMEM_LIMIT_SM120
+    )
+
+    for rows in ROW_BUCKETS:
+        for n, k in DENSE_SHAPES:
+            plan = sm120_w8a16_gemv._plan(rows, n, k, SMS, False, SF)
+            assert _planned_smem(rows, plan) <= sm120_w8a16_gemv.SMEM_LIMIT_SM120, (
+                rows,
+                n,
+                k,
+                plan,
+            )
+
+    # The regression itself: BLOCK_N, the grid and the N-block ownership stay as
+    # the planner chose them, only the K tile shortens, for both multirow buckets.
+    for rows in (5, 8, 12, 16):
+        assert sm120_w8a16_gemv._plan(rows, 12288, 2560, SMS, False, SF) == (
+            128,
+            128,
+            1,
+            True,
+            8,
+            3,
+        )
+        assert sm120_w8a16_gemv._plan(rows, 24576, 2560, SMS, False, SF) == (
+            128,
+            128,
+            1,
+            True,
+            8,
+            3,
+        )
+    # M == 1 takes the broadcast-reduce tile at any N and was never over budget.
+    assert sm120_w8a16_gemv._plan(1, 12288, 2560, SMS, False, SF) == (
+        32,
+        256,
+        1,
+        False,
+        4,
+        3,
+    )
+    # The head path is not retuned as a side effect of the dense fix.
+    assert sm120_w8a16_gemv._plan(8, 24576, 2560, SMS) == (128, 256, 1, True, 8, 3)
+    assert sm120_w8a16_gemv._plan(16, 248320, 2560, SMS) == (128, 256, 1, True, 8, 3)
+
+
+def test_dense_wide_launch_keeps_the_candidate_on_the_safe_tile(monkeypatch):
+    """The wide multirow call still launches the candidate, just on a shorter K tile.
+
+    A resource failure has to be planned around, not caught: an OutOfResources
+    swallowed here would silently put every wide projection back on W8A8.
+    """
+    _out, _x, (grid_n, splits), _args, cfg, _w, _s = _dense_launch(
+        monkeypatch, 16, 12288, 2560
+    )
+    assert (cfg["BLOCK_N"], cfg["BLOCK_K"]) == (128, 128)
+    assert cfg["SF_GROUP"] == SF and cfg["USE_DOT"] is True and cfg["M_PAD"] == 16
+    assert cfg["EVEN_K"] is True and splits == 1 and grid_n == _cdiv(12288, 128)
+    assert _m_pad(16, (128, 128, 1, True, 8, 3)) == cfg["M_PAD"]
 
 
 def test_dense_split_k_scratch_is_per_call_site(monkeypatch):
