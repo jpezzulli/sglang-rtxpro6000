@@ -7,16 +7,18 @@ import math
 import pytest
 import torch
 import torch.nn.functional as F
+from sglang.kernels.ops.gemm import sm120_w8a16_gemv
 from sglang.kernels.ops.gemm.sm120_online_fp8 import (
     configure_online_fp8,
     dequantize_rowwise_weight,
     replace_linear_weight_rowwise_fp8,
     rowwise_fp8_lm_head_logits,
+    rowwise_scale_of,
 )
 from sglang.test.ci.ci_register import register_cuda_ci
 from torch import nn
 
-register_cuda_ci(est_time=120, stage="base-b", runner_config="1-gpu-small")
+register_cuda_ci(est_time=180, stage="base-b", runner_config="1-gpu-small")
 
 
 def _is_exact_sm120() -> bool:
@@ -29,8 +31,26 @@ pytestmark = pytest.mark.skipif(
 
 HIDDEN_SIZE = 2560
 VOCAB_ROWS = 1024
+# The donor's Flash-Next head shapes; the candidate GEMV's tuned tiles are keyed
+# on them, and a vocab-sharded (TP2) head takes the generic planner instead.
+DRAFT_HEAD_ROWS = 32768
 HC_COUNT = 4
 HC_LOWRANK = 320
+
+# Row counts: 1 decode, 4/12/16 the W4 C3/C4 verify widths, 24 C6 verification
+# (which must stay on the original larger-row path), 33 the dequantizing fallback.
+LM_HEAD_ROWS = [1, 4, 12, 16, 24, 33]
+GEMV_CANDIDATES = [False, True]
+
+
+@pytest.fixture(params=GEMV_CANDIDATES)
+def gemv_candidate(request, monkeypatch) -> bool:
+    """Run the coverage twice: original path and opt-in candidate GEMV."""
+    if request.param:
+        monkeypatch.setenv(sm120_w8a16_gemv.GEMV_ENV, "1")
+    else:
+        monkeypatch.delenv(sm120_w8a16_gemv.GEMV_ENV, raising=False)
+    return bool(request.param)
 
 
 def _randn(shape, *, seed: int, scale: float) -> torch.Tensor:
@@ -91,11 +111,21 @@ def _rowwise_reference(hidden: torch.Tensor, weight: torch.Tensor) -> torch.Tens
     return hidden.bfloat16() @ dense_weight.T
 
 
-@pytest.mark.parametrize("rows", [1, 4, 16, 33])
+@pytest.mark.parametrize("rows", LM_HEAD_ROWS)
 def test_rowwise_lm_head_matches_dequantized_bf16_reference(
-    rowwise_lm_head_weight: torch.Tensor, rows: int
+    rowwise_lm_head_weight: torch.Tensor, rows: int, gemv_candidate: bool
 ) -> None:
     hidden = _randn((rows, HIDDEN_SIZE), seed=200 + rows, scale=0.25)
+    # The candidate owns a call iff it is gated on AND the rows fit its own limit;
+    # everything else (gate off, C6's 24 rows, the 33-row fallback) stays on the
+    # original implementation and must still validate numerically.
+    uses_candidate = gemv_candidate and rows <= sm120_w8a16_gemv.MAX_ROWS
+    assert (
+        sm120_w8a16_gemv.lowrow_gemv_supported(
+            hidden, rowwise_lm_head_weight, rowwise_scale_of(rowwise_lm_head_weight)
+        )
+        is uses_candidate
+    )
 
     actual = rowwise_fp8_lm_head_logits(hidden, rowwise_lm_head_weight)
     expected = _rowwise_reference(hidden, rowwise_lm_head_weight)
@@ -103,9 +133,9 @@ def test_rowwise_lm_head_matches_dequantized_bf16_reference(
     _assert_normalized_error(actual, expected, max_nrmse=0.025, min_cosine=0.999)
 
 
-@pytest.mark.parametrize("rows", [1, 4, 16, 33])
+@pytest.mark.parametrize("rows", LM_HEAD_ROWS)
 def test_rowwise_lm_head_cuda_graph_replays_mutated_input(
-    rowwise_lm_head_weight: torch.Tensor, rows: int
+    rowwise_lm_head_weight: torch.Tensor, rows: int, gemv_candidate: bool
 ) -> None:
     static_hidden = _randn((rows, HIDDEN_SIZE), seed=300 + rows, scale=0.25)
 
@@ -129,6 +159,55 @@ def test_rowwise_lm_head_cuda_graph_replays_mutated_input(
     actual = graph_output.clone()
 
     _assert_normalized_error(actual, expected, max_nrmse=0.025, min_cosine=0.999)
+
+
+@pytest.fixture(scope="module")
+def rowwise_draft_head_weight() -> torch.nn.Parameter:
+    """A head at the donor's tuned draft shape (single-split tiles)."""
+    linear = nn.Linear(
+        HIDDEN_SIZE,
+        DRAFT_HEAD_ROWS,
+        bias=False,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    linear.weight.data.copy_(
+        _randn(
+            (DRAFT_HEAD_ROWS, HIDDEN_SIZE),
+            seed=102,
+            scale=1.0 / math.sqrt(HIDDEN_SIZE),
+        )
+    )
+    replace_linear_weight_rowwise_fp8(linear)
+    return linear.weight
+
+
+@pytest.mark.parametrize("rows", [1, 4, 12, 16])
+def test_rowwise_head_shape_matches_dequantized_reference_and_replays(
+    rowwise_draft_head_weight: torch.Tensor, rows: int, gemv_candidate: bool
+) -> None:
+    """Numerics and replay on the affected (tuned) head shape, no BF16 fallback."""
+    hidden = _randn((rows, HIDDEN_SIZE), seed=800 + rows, scale=0.25)
+    scale = rowwise_scale_of(rowwise_draft_head_weight)
+    assert scale.shape == (DRAFT_HEAD_ROWS,)
+    assert sm120_w8a16_gemv.lowrow_gemv_supported(
+        hidden, rowwise_draft_head_weight, scale
+    ) is gemv_candidate
+
+    for _ in range(2):
+        rowwise_fp8_lm_head_logits(hidden, rowwise_draft_head_weight)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_output = rowwise_fp8_lm_head_logits(
+            hidden, rowwise_draft_head_weight
+        )
+    hidden.copy_(_randn((rows, HIDDEN_SIZE), seed=900 + rows, scale=0.25))
+    graph.replay()
+    torch.cuda.synchronize()
+
+    expected = _rowwise_reference(hidden, rowwise_draft_head_weight)
+    _assert_normalized_error(graph_output, expected, max_nrmse=0.025, min_cosine=0.999)
 
 
 def test_flashinfer_cutlass_mxfp8_linear_quantizes_and_applies() -> None:
