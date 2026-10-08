@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "Pennyroyal Next adaptive MTP widths: pass this file as --speculative-adaptive-config.",
+    "Keys are batch-size floors and candidate steps are speculative_num_steps; at topk=1 a",
+    "width's draft-token count is steps+1, so C1 may pick W4/W8 (3/7) and C>=2 stays W4.",
+    "Launch for it: --speculative-num-steps 7 (a candidate wider than the launch width",
+    "is refused, not resized under captured graphs) and a BS1 bucket in --cuda-graph-bs-decode",
+    "for the W8 state; without BS1 a C1 batch pads up into the C>=2 tier and stays W4."
+  ],
+  "1": {
+    "candidate_steps": [3, 7],
+    "up_hysteresis": 0.0,
+    "down_hysteresis": -0.25,
+    "ceiling_coeff": 0
+  },
+  "2": {
+    "candidate_steps": [3],
+    "up_hysteresis": 0.0,
+    "down_hysteresis": -0.25,
+    "ceiling_coeff": 0
+  }
+}
