@@ -1634,11 +1634,13 @@ class KVCacheConfigurator:
                 qsa_compress_ratio=qsa_profile.compress_ratio,
                 qsa_token_topk=qsa_profile.budget,
                 num_request_slots=req_to_token_pool.req_to_token.shape[0],
-                # Fixed wider-than-ratio verify windows (optional W8 NEXTN)
-                # need the pending index-K ring to span the whole published
-                # window plus the retained prefix tail a partial group may
-                # still read (pending_ring_num_groups); the shipped W4 stays
-                # at one group.
+                # Wider-than-ratio verify windows (fixed W8/W16 NEXTN, or the
+                # widest candidate of an adaptive-MTP step) need the pending
+                # index-K ring to span the whole published window plus the
+                # retained prefix tail a partial group may still read. Size it
+                # off the resolved LAUNCH maximum, never the active width, so
+                # narrower widths (the shipped W4 stays at one group) reuse the
+                # allocation the captured graphs already bind.
                 qsa_num_groups=QSATokenToKVPool.pending_ring_num_groups(
                     max_num_draft_tokens=max_speculative_num_draft_tokens() or 0,
                     compress_ratio=qsa_profile.compress_ratio,
