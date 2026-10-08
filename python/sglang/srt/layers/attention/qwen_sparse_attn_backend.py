@@ -34,6 +34,8 @@ from sglang.srt.layers.attention.qsa.metadata import (
     build_qsa_row_ranges,
     build_rope_position_matrix,
     compressed_decode_view,
+    pending_ring_groups,
+    pending_ring_groups_required,
 )
 from sglang.srt.layers.attention.qsa.sparse_attn import (
     qwen_sparse_fa2_cu_seqlens_triton,
@@ -279,8 +281,14 @@ class QwenSparseAttnBackend(AttentionBackend):
 
     @property
     def _pending_ring_groups(self) -> int:
-        """Groups the pending index-K ring holds; the pool fixes this at construction."""
-        return self.token_to_kv_pool.qsa_num_groups
+        """Groups the pending index-K ring holds; the pool fixes this at construction.
+
+        Read defensively: a backend built before its pool resolves (the capture
+        path, and every ``__new__``-style harness) has no pool to ask, and the
+        single-group layout is the right answer for it -- the guard then refuses
+        any window wider than one group rather than raising AttributeError.
+        """
+        return pending_ring_groups(getattr(self, "token_to_kv_pool", None))
 
     @staticmethod
     def _can_use_qsa_prefill_all_visible(
@@ -301,19 +309,27 @@ class QwenSparseAttnBackend(AttentionBackend):
                 "Qwen QSA target verification supports only " "speculative_eagle_topk=1"
             )
         draft_tokens = int(getattr(spec_info, "draft_token_num", 0) or 0)
-        window = self.compress_ratio * self._pending_ring_groups
-        if draft_tokens > window:
-            # The ring keys state by position % ratio within a group, so a
-            # window wider than every group it holds would collide within
-            # one forward. The pool sizes its group count off the resolved
-            # maximum draft-token window with headroom for the retained
-            # prefix (see QSATokenToKVPool.pending_ring_num_groups; W4 -> 1,
-            # W8 -> 3 at R4), so only an inconsistent configuration raises.
+        # One span model for both sides of the ring: the pool sized its group
+        # count off the resolved LAUNCH-MAXIMUM draft-token window (with
+        # headroom for the retained prefix a partial group may still read), so
+        # a verify window is legal exactly when the groups it needs are among
+        # the groups the allocation holds. W4 -> 1 group (the shipped layout,
+        # bit-for-bit), W8 -> 3, W16 -> 5 at ratio 4. Asking for a window wider
+        # than the launch capacity -- an active width the ring was never sized
+        # for, which would alias two live positions onto one slot -- is the
+        # only thing that raises here.
+        required = pending_ring_groups_required(
+            draft_tokens=draft_tokens, compress_ratio=self.compress_ratio
+        )
+        groups = self._pending_ring_groups
+        if required > groups:
             raise NotImplementedError(
-                "Qwen QSA requires speculative_num_draft_tokens <= the QSA "
-                f"compress ratio ({self.compress_ratio}) times the pending "
-                f"index-key ring's group count ({self._pending_ring_groups}): "
-                f"got {draft_tokens}"
+                "Qwen QSA requires a verify window the pending index-key ring "
+                f"can hold: {draft_tokens} draft tokens need {required} ring "
+                f"groups at compress ratio {self.compress_ratio}, the QSA pool "
+                f"holds {groups}; raise the launch maximum draft-token count "
+                "(speculative_num_draft_tokens / the adaptive candidate table) "
+                "so the ring is sized for every width the run can select"
             )
 
     @staticmethod
@@ -1389,7 +1405,7 @@ class QwenSparseAttnBackend(AttentionBackend):
                 logical_positions=current_positions,
                 compress_ratio=ratio,
                 is_extend=False,
-                num_groups=pool.qsa_num_groups,
+                num_groups=pending_ring_groups(pool),
             )
         )
         metadata.graph_ring_group_locs.copy_(
@@ -1398,7 +1414,7 @@ class QwenSparseAttnBackend(AttentionBackend):
                 group_end_positions=current_positions,
                 sequence_ids=metadata.token_to_batch_idx.long(),
                 compress_ratio=ratio,
-                num_groups=pool.qsa_num_groups,
+                num_groups=pending_ring_groups(pool),
             ).to(torch.int32)
         )
 

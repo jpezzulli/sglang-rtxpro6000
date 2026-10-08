@@ -9,6 +9,12 @@ speculative-window guard. The ring holds ``num_groups`` groups of
 maps every position to a distinct slot. ``num_groups == 1`` is the
 historical single-group layout, and these tests pin the new arithmetic to
 it bit-for-bit: the shipped W4/default path must not move.
+
+The width-support layer added on top of that port is pinned here too: the
+group count is the LAUNCH capacity derived from the resolved maximum
+draft-token window (W4 -> 1, W8 -> 3, W16 -> 5 groups at ratio 4), eager and
+in-graph metadata must derive slots from that one capacity, and a narrower
+active width must reuse the allocation the captured graphs hold.
 """
 
 import unittest
@@ -19,6 +25,8 @@ import torch
 from sglang.srt.layers.attention.qsa.metadata import (
     build_group_ring_slots,
     build_pending_ring_slots,
+    pending_ring_groups,
+    pending_ring_groups_required,
     pending_ring_slot,
 )
 from sglang.srt.mem_cache.qsa_kv_pool import QSATokenToKVPool
@@ -143,7 +151,9 @@ class TestBuildPendingRingSlots(unittest.TestCase):
             compress_ratio=RATIO,
             is_extend=False,
         )
-        want = _legacy_slots(torch.tensor([1, 1, 1, 1]), torch.tensor(positions), RATIO)
+        want = _legacy_slots(
+            torch.tensor([1, 1, 1, 1]), torch.tensor(positions), RATIO
+        )
         self.assertTrue(torch.equal(got, want))
 
     def test_extend_dump_stays_in_the_inert_region(self):
@@ -359,7 +369,9 @@ class TestPublishedWindowRingLifetime(unittest.TestCase):
         width = 128
         cols = torch.arange(width)
         table = (
-            ((self.REQ + cols // 64) * 64 + cols % 64).to(torch.int32).repeat(rows, 1)
+            ((self.REQ + cols // 64) * 64 + cols % 64)
+            .to(torch.int32)
+            .repeat(rows, 1)
         )
         backend = QwenSparseAttnBackend.__new__(QwenSparseAttnBackend)
         backend.token_to_kv_pool = SimpleNamespace(qsa_compress_ratio=self.R)
@@ -456,7 +468,9 @@ class TestPublishedWindowRingLifetime(unittest.TestCase):
         )
         first_group_loc = int(meta.write_locs[0])
         compressed = pool.get_qsa_compressed_k_buffer(0)[first_group_loc]
-        return float(state[p0_slot].float().mean()), float(compressed.float().mean())
+        return float(state[p0_slot].float().mean()), float(
+            compressed.float().mean()
+        )
 
     def test_derived_capacity_preserves_the_retained_prefix(self):
         num_groups = QSATokenToKVPool.pending_ring_num_groups(
@@ -502,40 +516,118 @@ class TestPublishedWindowRingLifetime(unittest.TestCase):
 
 
 class TestRequireChainSpeculation(unittest.TestCase):
-    """The verify-window guard reads the ring's capacity, not the bare ratio."""
+    """The verify-window guard asks the ring's own span model, not a bare ratio.
+
+    ``_require_chain_speculation`` and the pool's construction-time capacity
+    must be the same arithmetic: a window is legal exactly when the groups it
+    needs -- ``pending_ring_groups_required``, the function that sized the ring
+    -- fit in the groups the pool holds. The pre-change RC2 guard refused every
+    window wider than the ratio outright; a guard that merely multiplies the
+    ratio by the group count waves through windows the ring cannot actually
+    hold (8 draft tokens at 2 groups alias the retained prefix member, which is
+    the clobber TestPublishedWindowRingLifetime pins).
+    """
 
     class _Mode:
         def is_target_verify(self):
             return True
 
-    def _check(self, draft_tokens, num_groups):
-        from types import SimpleNamespace
+    class _NonVerifyMode:
+        def is_target_verify(self):
+            return False
 
+    def _check(self, draft_tokens, num_groups, ratio=RATIO):
+        from sglang.srt.layers.attention.qwen_sparse_attn_backend import (
+            QwenSparseAttnBackend,
+        )
+
+        backend = QwenSparseAttnBackend.__new__(QwenSparseAttnBackend)
+        backend.compress_ratio = ratio
+        backend.token_to_kv_pool = (
+            None if num_groups is None else SimpleNamespace(qsa_num_groups=num_groups)
+        )
+        spec_info = SimpleNamespace(topk=1, draft_token_num=draft_tokens)
+        backend._require_chain_speculation(
+            TestRequireChainSpeculation._Mode(), spec_info
+        )
+
+    # (draft tokens, ring groups, accepted) -- legal iff
+    # pending_ring_groups_required(draft) <= groups, at ratio 4.
+    WINDOW_CASES = (
+        (4, 1, True),  # shipped W4 layout, untouched
+        (8, 1, False),  # RC2's restriction stays for a pool nobody re-sized
+        (8, 2, False),  # two groups alias the retained prefix member
+        (8, 3, True),  # the W8 launch capacity
+        (9, 3, False),  # one position past the W8 span
+        (9, 4, True),
+        (12, 4, True),
+        (16, 3, False),  # W16 needs its own launch capacity
+        (16, 4, False),
+        (16, 5, True),  # the W16 launch capacity
+        (17, 5, False),
+    )
+
+    def test_window_accepted_exactly_when_the_ring_holds_its_groups(self):
+        for draft_tokens, num_groups, accepted in self.WINDOW_CASES:
+            with self.subTest(draft_tokens=draft_tokens, num_groups=num_groups):
+                if accepted:
+                    self._check(draft_tokens, num_groups)
+                else:
+                    with self.assertRaises(NotImplementedError):
+                        self._check(draft_tokens, num_groups)
+
+    def test_launch_capacity_serves_every_narrower_active_width(self):
+        """W16-to-W4-to-W16 needs no re-allocation: one capacity serves all.
+
+        The ring is sized off the launch maximum, so any active width the run
+        can step down to must still pass the guard against that same group
+        count (the adaptive-MTP prerequisite).
+        """
+        for launch_max in (4, 8, 16):
+            groups = QSATokenToKVPool.pending_ring_num_groups(
+                max_num_draft_tokens=launch_max, compress_ratio=RATIO
+            )
+            for active in (1, 2, 4, 8, 16):
+                if active > launch_max:
+                    continue
+                with self.subTest(launch_max=launch_max, active=active):
+                    self._check(active, groups)
+
+    def test_guard_matches_the_capacity_the_pool_allocates(self):
+        """Guard and pool never disagree about what fits (one span model)."""
+        for launch_max in (0, 1, 4, 5, 8, 9, 12, 16, 32):
+            groups = QSATokenToKVPool.pending_ring_num_groups(
+                max_num_draft_tokens=launch_max, compress_ratio=RATIO
+            )
+            with self.subTest(launch_max=launch_max):
+                self._check(launch_max, groups)
+                self.assertEqual(
+                    groups,
+                    pending_ring_groups_required(
+                        draft_tokens=launch_max, compress_ratio=RATIO
+                    ),
+                )
+
+    def test_missing_ring_geometry_keeps_the_single_group_guard(self):
+        """Tokenwise QSA / unresolved pools have no ring groups: W4-era rules."""
+        self._check(4, None)
+        with self.assertRaises(NotImplementedError):
+            self._check(5, None)
+
+    def test_non_verify_modes_are_not_guarded(self):
         from sglang.srt.layers.attention.qwen_sparse_attn_backend import (
             QwenSparseAttnBackend,
         )
 
         backend = QwenSparseAttnBackend.__new__(QwenSparseAttnBackend)
         backend.compress_ratio = RATIO
-        backend.token_to_kv_pool = SimpleNamespace(qsa_num_groups=num_groups)
-        spec_info = SimpleNamespace(topk=1, draft_token_num=draft_tokens)
+        backend.token_to_kv_pool = SimpleNamespace(qsa_num_groups=1)
+        # A wide window on a decode/extend forward is not a verify window.
         backend._require_chain_speculation(
-            TestRequireChainSpeculation._Mode(), spec_info
+            TestRequireChainSpeculation._NonVerifyMode(),
+            SimpleNamespace(topk=1, draft_token_num=64),
         )
-
-    def test_w4_default_accepted_at_one_group(self):
-        self._check(4, 1)
-
-    def test_w8_rejected_at_one_group(self):
-        with self.assertRaises(NotImplementedError):
-            self._check(8, 1)
-
-    def test_w8_accepted_at_two_groups(self):
-        self._check(8, 2)
-
-    def test_beyond_capacity_rejected(self):
-        with self.assertRaises(NotImplementedError):
-            self._check(9, 2)
+        backend._require_chain_speculation(None, None)
 
 
 if __name__ == "__main__":
