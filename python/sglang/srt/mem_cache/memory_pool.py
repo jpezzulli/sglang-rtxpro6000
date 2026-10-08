@@ -2016,6 +2016,16 @@ class MHATokenToKVPool(KVCache):
                     assert self.head_dim % self._kv_vector_x == 0
                     assert self.v_head_dim % self._kv_vector_x == 0
 
+        # The fused NHD writer can store E4M3 directly. Native FP8 storage has
+        # the same bytes as the legacy uint8 view, and avoids a source view cast.
+        if (
+            envs.SGLANG_KV_FP8_FUSED_STORE.get()
+            and _is_cuda
+            and self.kv_cache_layout == "nhd"
+            and self.dtype == torch.float8_e4m3fn
+        ):
+            self.store_dtype = self.dtype
+
         self.quant_method = (
             quant_method if quant_method is not None else UnquantizedKVCacheMethod()
         )
@@ -2521,6 +2531,40 @@ class MHATokenToKVPool(KVCache):
                 loc,
                 cache_k,
                 cache_v,
+                k_scale,
+                v_scale,
+            )
+            return
+
+        if (
+            envs.SGLANG_KV_FP8_FUSED_STORE.get()
+            and self.dtype == torch.float8_e4m3fn
+            and self.store_dtype == self.dtype
+            and self.kv_cache_layout == "nhd"
+            and not self.use_hnd
+            and dcp_kv_mask is None
+            and cache_k.dim() == 3
+            and cache_v.shape == cache_k.shape
+            and 1 <= cache_k.shape[0] <= 64
+            and cache_k.dtype == torch.bfloat16
+            and cache_v.dtype == torch.bfloat16
+            and cache_k.stride(2) == 1
+            and cache_k.stride(1) == cache_k.shape[2]
+            and cache_v.stride(2) == 1
+            and cache_v.stride(1) == cache_v.shape[2]
+            and loc.dim() == 1
+            and loc.shape[0] == cache_k.shape[0]
+            and loc.dtype in (torch.int32, torch.int64)
+            and loc.is_contiguous()
+        ):
+            from sglang.srt.mem_cache.fp8_kv_store import fp8_kv_store
+
+            fp8_kv_store(
+                cache_k,
+                cache_v,
+                self.k_buffer[layer_id - self.start_layer],
+                self.v_buffer[layer_id - self.start_layer],
+                loc,
                 k_scale,
                 v_scale,
             )
