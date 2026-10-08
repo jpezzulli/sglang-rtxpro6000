@@ -20,7 +20,7 @@ import inspect
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -230,6 +230,13 @@ from sglang.srt.utils.offloader import (
 from sglang.srt.utils.profile_utils import build_step_span_name
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.srt.utils.weight_checker import WeightChecker
+
+if TYPE_CHECKING:
+    # Annotation only: the attention backends import this module, so importing
+    # the wrapper at runtime would close a cycle.
+    from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
+        HybridLinearAttnBackend,
+    )
 
 _is_npu = is_npu()
 _is_cpu_amx_available = cpu_has_amx_support()
@@ -1024,8 +1031,8 @@ class ModelRunner:
 
     def maybe_capture_gdn_recovery_graphs(
         self,
-        attn_backend: "HybridLinearAttnBackend | None" = None,
-        capture_bs: "list[int] | None" = None,
+        attn_backend: HybridLinearAttnBackend | None = None,
+        capture_bs: list[int] | None = None,
     ):
         """Capture per-bucket FlashInfer SSM-state recovery cuda graphs at warmup.
 

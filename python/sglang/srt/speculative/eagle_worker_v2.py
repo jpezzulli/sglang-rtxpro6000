@@ -361,9 +361,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
                     )
                     if logits_processor is not None:
                         logits_processor.do_tensor_parallel_all_gather = False
-                        logits_processor.do_tensor_parallel_all_gather_dp_attn = (
-                            False
-                        )
+                        logits_processor.do_tensor_parallel_all_gather_dp_attn = False
                     self.draft_runner.hot_vocab_width = selection.draft_vocab_size
 
             # Share the embedding and lm_head

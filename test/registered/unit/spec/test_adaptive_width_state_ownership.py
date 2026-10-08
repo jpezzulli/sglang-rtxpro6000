@@ -382,9 +382,7 @@ class TestWidthTransitions(PublishedConfigCase):
 
         worker.apply_runtime_state(wide)
         self.assertEqual(worker.speculative_num_draft_tokens, 16)
-        self.assertIs(
-            worker.draft_runner.attn_backend, wide.draft_extend_attn_backend
-        )
+        self.assertIs(worker.draft_runner.attn_backend, wide.draft_extend_attn_backend)
 
         worker.apply_runtime_state(narrow)
         self.assertEqual(worker.speculative_num_steps, 3)
@@ -411,9 +409,7 @@ class TestWidthTransitions(PublishedConfigCase):
 
         worker.apply_runtime_state(wide)
         self.assertEqual(worker.speculative_num_steps, 15)
-        self.assertIs(
-            worker._draft_worker.cuda_graph_runner, wide.cuda_graph_runner
-        )
+        self.assertIs(worker._draft_worker.cuda_graph_runner, wide.cuda_graph_runner)
         self.assertIs(
             worker._draft_worker.cuda_graph_runner_for_draft_extend,
             wide.cuda_graph_runner_for_draft_extend,
@@ -422,9 +418,7 @@ class TestWidthTransitions(PublishedConfigCase):
             worker._target_worker.model_runner.decode_cuda_graph_runner,
             wide.target_graph_runner,
         )
-        self.assertIs(
-            worker.draft_runner.attn_backend, wide.draft_extend_attn_backend
-        )
+        self.assertIs(worker.draft_runner.attn_backend, wide.draft_extend_attn_backend)
 
     def test_a_step_with_no_draft_extend_backend_keeps_the_initialized_one(self):
         # Tokenwise QSA runs draft-extend eagerly; a width switch with a None
@@ -523,9 +517,7 @@ class TestPerStateConstruction(PublishedConfigCase):
         self.assertIsNot(wide.target_attn_backend, narrow.target_attn_backend)
 
     def test_compressed_qsa_state_gets_its_own_draft_extend_backend(self):
-        worker = _WorkerStub(
-            launch_steps=CANDIDATE_STEPS[-1], qsa_variant="compressed"
-        )
+        worker = _WorkerStub(launch_steps=CANDIDATE_STEPS[-1], qsa_variant="compressed")
         launch_backend = worker.draft_runner.attn_backend
 
         wide, _ = self._build(worker, 15)
@@ -547,9 +539,7 @@ class TestPerStateConstruction(PublishedConfigCase):
         self.assertIs(wide.draft_extend_attn_backend.pool, worker.shared_pool)
         # The launch state's own backend survived every build untouched.
         self.assertIs(worker.draft_runner.attn_backend, launch_backend)
-        self.assertIs(
-            worker._draft_worker.draft_extend_attn_backend, launch_backend
-        )
+        self.assertIs(worker._draft_worker.draft_extend_attn_backend, launch_backend)
 
     def test_a_non_qsa_draft_keeps_the_backend_the_factory_chose(self):
         # The generic families receive a fresh object from DraftBackendFactory per
@@ -577,9 +567,7 @@ class TestPerStateConstruction(PublishedConfigCase):
         # Tokenwise QSA has no graph-stable draft-extend metadata: the factory
         # returns None and that width runs draft-extend eagerly. A switch must
         # neither invent a backend for it nor fall back to a dense one.
-        worker = _WorkerStub(
-            launch_steps=CANDIDATE_STEPS[-1], qsa_variant="tokenwise"
-        )
+        worker = _WorkerStub(launch_steps=CANDIDATE_STEPS[-1], qsa_variant="tokenwise")
         runner_backend = worker.draft_runner.attn_backend
 
         wide, _ = self._build(worker, 15)
@@ -618,7 +606,6 @@ class TestOwnershipTrigger(PublishedConfigCase):
         # False no matter how the backend the generic map returns is dressed up.
         _, runner = self._factory(None)
         self.assertFalse(draft_extend_backend_is_runner_own(runner))
-
 
 
 class TestPrivateInputBuffers(PublishedConfigCase):
