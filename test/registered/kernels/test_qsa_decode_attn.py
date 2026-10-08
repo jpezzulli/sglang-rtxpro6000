@@ -860,6 +860,9 @@ def test_graph_capture_replays_shared_tail_rows_workspace_and_counters():
         )
 
     def expect():
+        # _forward_triton_decode hands back the flattened [rows, heads * dim]
+        # contract (its own ``.reshape(q.shape[0], -1)``), so the reference is
+        # compared in that layout, not as [rows, heads, dim].
         return _reference_attention(
             q,
             k_buffer,
@@ -870,7 +873,7 @@ def test_graph_capture_replays_shared_tail_rows_workspace_and_counters():
                 "seq_lens": seq_lens.cpu(),
                 "row_req_pool_indices": reqs.cpu(),
             },
-        )
+        ).reshape(rows, -1)
 
     eager = call()  # the eager warmup owns the workspace the graph then bakes in
     workspace = backend._decode_attn_workspace
@@ -882,7 +885,10 @@ def test_graph_capture_replays_shared_tail_rows_workspace_and_counters():
         graph.replay()
     torch.cuda.synchronize()
     assert backend._decode_attn_workspace is workspace
-    torch.testing.assert_close(captured.float(), expect().float(), rtol=2e-2, atol=2e-3)
+    expected = expect()
+    assert captured.shape == eager.shape == expected.shape
+    assert captured.shape == (rows, _Q_HEADS * _HEAD_DIM)
+    torch.testing.assert_close(captured.float(), expected.float(), rtol=2e-2, atol=2e-3)
     assert torch.equal(captured, eager)
 
     # Change the rows behind the replay: one fewer drafted token per row and a
@@ -904,7 +910,9 @@ def test_graph_capture_replays_shared_tail_rows_workspace_and_counters():
         graph.replay()
     torch.cuda.synchronize()
     assert not torch.equal(captured, stale), "replay kept the previous output"
-    torch.testing.assert_close(captured.float(), expect().float(), rtol=2e-2, atol=2e-3)
+    expected = expect()
+    assert captured.shape == expected.shape
+    torch.testing.assert_close(captured.float(), expected.float(), rtol=2e-2, atol=2e-3)
     assert torch.count_nonzero(captured) > 0
     assert torch.count_nonzero(workspace.arrivals) == 0
 
