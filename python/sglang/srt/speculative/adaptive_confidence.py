@@ -60,16 +60,24 @@ from typing import Optional
 
 import torch
 
-# Ported verbatim (module docstring, producers, policy and all) from
-# https://github.com/aiueo52/sglang-rtxpro6000 branch flash-next-fast, snapshot
-# 5105985116eb00dea8e6138aabeb5363387cb9de, where it is a new file under the
-# project's Apache License 2.0 (upstream MODIFICATIONS.md carries the Aiueo52
-# copyright notice and the list of modified upstream files). The import tidy-up
-# is the only edit: the C1 decision rule, the env configuration surface
-# (SGLANG_ADAPTIVE_POLICY / _TRACE / _DEBUG / SGLANG_ADAPTIVE_STEP_A / _STEP_B)
-# and the donor's fitted default step costs are unchanged, and no synchronisation
-# is added to the hot path. The batch-size gating of the producers/consumer lives
-# with the worker that owns them (eagle_worker_v2), not here.
+# Ported from https://github.com/aiueo52/sglang-rtxpro6000 branch flash-next-fast,
+# snapshot 5105985116eb00dea8e6138aabeb5363387cb9de, where it is a new file under
+# the project's Apache License 2.0 (upstream MODIFICATIONS.md carries the Aiueo52
+# copyright notice and the list of modified upstream files). The C1 decision rule,
+# the env configuration surface (SGLANG_ADAPTIVE_POLICY / _TRACE / _DEBUG /
+# SGLANG_ADAPTIVE_STEP_A / _STEP_B) and the donor's fitted default step costs are
+# its own, unchanged; no synchronisation is added to the hot path. The batch-size
+# gating of the producers/consumer lives with the worker that owns them
+# (eagle_worker_v2), not here.
+#
+# Two local corrections, both in the delivery path rather than the arithmetic:
+# an accept-count sample is credited to the width and the launch that produced it
+# (ConfidenceStepSlot.update / _paired_bucket, keyed on the scheduler's immutable
+# forward id) and a staged confidence is only readable by the request whose chain
+# it describes, within the current invalidation generation (ConfidenceChannel
+# request_key / invalidate_position0). The donor inherited the pre-overlap
+# assumption that "current" still describes the batch being reported; with an
+# overlapped schedule it does not. See test_adaptive_feedback_attribution.py.
 logger = logging.getLogger(__name__)
 
 
@@ -106,6 +114,10 @@ def top1_prob(logits: torch.Tensor) -> torch.Tensor:
     return (f.amax(dim=-1) - torch.logsumexp(f, dim=-1)).exp()
 
 
+# Sentinel for a consumer that has no request identity to pair against.
+_ANY_REQUEST = object()
+
+
 class ConfidenceChannel:
     """Async device->host staging for draft confidences.
 
@@ -119,6 +131,13 @@ class ConfidenceChannel:
     Copies go out non-blocking on the current stream into a ring of pinned
     buffers; each slot carries an event so a reader never has to guess.  Nothing
     here ever synchronises the producing stream.
+
+    A staged sample is a statement about ONE chain -- the one the producer had
+    just drafted -- so it is paired with the request that owns that chain
+    (``request_key``) and dropped outright by any pass that could not have
+    produced it (``invalidate_position0``). Handing "the newest value" to
+    whoever asks is what let a finished request's, or a concurrent batch's,
+    confidence steer an unrelated C1 decision.
     """
 
     RING = 16
@@ -133,9 +152,18 @@ class ConfidenceChannel:
         ]
         self._p0_event = [torch.cuda.Event() for _ in range(self.RING)]
         self._p0_bs = [0] * self.RING
+        # Which request's chain each staged sample describes, and which
+        # invalidation generation it was staged under. The ring otherwise hands
+        # out "the newest value" to whoever asks -- and, because the reader
+        # scans backwards over every slot, a slot that survived an invalidation
+        # can be revived by the copy staged after it.
+        self._p0_key: list[Optional[str]] = [None] * self.RING
+        self._p0_epoch = [0] * self.RING
+        self._epoch = 0
         self._p0_write = 0
         self._p0_read = -1  # index of the newest slot with a copy in flight
         self._p0_cached: Optional[list[float]] = None
+        self._p0_cached_id: Optional[tuple] = None
 
         self._chain_host = None
         self._chain_event = None
@@ -149,7 +177,9 @@ class ConfidenceChannel:
             self._chain_event = [torch.cuda.Event() for _ in range(self.RING)]
 
     # -- producers ---------------------------------------------------------
-    def record_position0(self, p0: torch.Tensor) -> None:
+    def record_position0(
+        self, p0: torch.Tensor, request_key: Optional[str] = None
+    ) -> None:
         bs = p0.shape[0]
         if bs == 0 or bs > self.max_bs or torch.cuda.is_current_stream_capturing():
             return
@@ -157,8 +187,28 @@ class ConfidenceChannel:
         self._p0_host[slot][:bs].copy_(p0.view(-1), non_blocking=True)
         self._p0_event[slot].record()
         self._p0_bs[slot] = bs
+        self._p0_key[slot] = request_key
+        self._p0_epoch[slot] = self._epoch
         self._p0_read = slot
         self._p0_write = (slot + 1) % self.RING
+
+    def invalidate_position0(self) -> None:
+        """Expire every staged chain confidence; host-side bookkeeping, no sync.
+
+        A staged sample is the probability of one specific chain's first token.
+        A decode pass that drafted without staging one (the C>=2 gate) therefore
+        consumed it: what the ring holds predates tokens the request has already
+        committed, so the next C1 decision must see "no sample", not that value.
+
+        Advancing the generation -- rather than only the read pointer and cache
+        -- is what makes that stick: a reader walks back over the whole ring, so
+        a slot left at the previous generation cannot be pulled back into use by
+        the copy staged after the invalidation.
+        """
+        self._epoch += 1
+        self._p0_read = -1
+        self._p0_cached = None
+        self._p0_cached_id = None
 
     def record_chain(self, chain: torch.Tensor, bs: int, steps: int) -> None:
         if (
@@ -175,8 +225,12 @@ class ConfidenceChannel:
         self._chain_pending.append((slot, bs, steps))
 
     # -- consumers ---------------------------------------------------------
-    def latest_position0(self) -> Optional[list[float]]:
+    def latest_position0(self, request_key=_ANY_REQUEST) -> Optional[list[float]]:
         """Newest position-0 confidences whose copy has ALREADY landed.
+
+        *request_key* restricts the answer -- and the cached fallback below --
+        to the sample staged for that request; pass nothing to keep the donor's
+        "newest landed value" behaviour where no identity is available.
 
         Never synchronises.  The scheduler deliberately runs the CPU ahead of
         the GPU (that is why the adaptive controller is fed from
@@ -191,15 +245,28 @@ class ConfidenceChannel:
         """
         newest = self._p0_read
         if newest < 0:
-            return self._p0_cached
+            return self._cached_for(request_key)
         for k in range(self.RING):
             slot = (newest - k) % self.RING
-            if self._p0_bs[slot] == 0:
+            if self._p0_bs[slot] == 0 or self._p0_epoch[slot] != self._epoch:
+                continue
+            if request_key is not _ANY_REQUEST and self._p0_key[slot] != request_key:
                 continue
             if self._p0_event[slot].query():
                 self._p0_cached = self._p0_host[slot][: self._p0_bs[slot]].tolist()
+                self._p0_cached_id = (self._epoch, self._p0_key[slot])
                 return self._p0_cached
-        return self._p0_cached
+        return self._cached_for(request_key)
+
+    def _cached_for(self, request_key) -> Optional[list[float]]:
+        """The last value handed out, if it still belongs to this reader's chain."""
+        if request_key is _ANY_REQUEST:
+            return self._p0_cached
+        return (
+            self._p0_cached
+            if self._p0_cached_id == (self._epoch, request_key)
+            else None
+        )
 
     def pop_chain(self) -> Optional[tuple[list[list[float]], int]]:
         """Oldest recorded chain, paired FIFO with the verify results."""
@@ -455,6 +522,8 @@ class ConfidenceStepSlot:
         self._grace_until = 0
         self._next_bucket = nb // 2
         self._last_conf: Optional[float] = None
+        # (forward_id, bucket_or_None) per reported C1 decision; one popped per
+        # verify result routed to this slot. Bounded by the overlap run-ahead.
         self._inflight_bucket: collections.deque = collections.deque(maxlen=8)
         self._dbg = os.environ.get("SGLANG_ADAPTIVE_DEBUG", "") == "1"
 
@@ -467,55 +536,98 @@ class ConfidenceStepSlot:
             i += 1
         return i
 
-    def observe_confidence(self, confidences: list[float]) -> None:
-        """Position-0 top-1 probability for the chain about to be drafted."""
+    def observe_confidence(
+        self, confidences: list[float], forward_id: Optional[int] = None
+    ) -> None:
+        """Record the bucket that the width decision for this forward used.
+
+        Called once per C1 decode forward, with an empty list when the ring had
+        nothing landed: that is an explicit "no confidence this time" decision,
+        recorded so the verify result of THIS forward can consume exactly the
+        decision taken for it (see ``_paired_bucket``). The key is the
+        scheduler's forward id -- a request id cannot tell two in-flight
+        forwards of one request apart.
+        """
         if not confidences:
+            self._inflight_bucket.append((forward_id, None))
             return
         conf = sum(confidences) / len(confidences)
         self._last_conf = conf
         self._next_bucket = self._bucket(conf)
-        self._inflight_bucket.append(self._next_bucket)
+        self._inflight_bucket.append((forward_id, self._next_bucket))
+
+    def _paired_bucket(self, forward_id: Optional[int]) -> Optional[int]:
+        """Consume the decision entry recorded for this verify result's forward.
+
+        The entry is taken whether or not the counts can then be credited: a
+        result left unpaired shifted every later observation by one, so a
+        rejected batch credited the NEXT batch's confidence. No match -- or a
+        decision that had no sample -- yields None, and the caller credits the
+        pooled twins only. Falling back to "the current bucket" instead is what
+        let a result silently borrow another iteration's confidence.
+        """
+        for i in range(len(self._inflight_bucket)):
+            if self._inflight_bucket[i][0] == forward_id:
+                bucket = self._inflight_bucket[i][1]
+                del self._inflight_bucket[i]
+                return bucket
+        return None
 
     @staticmethod
     def _ema(cur: float, n: int, x: float, a: float) -> float:
         return x if n == 0 else (1 - a) * cur + a * x
 
-    def update(self, num_correct_drafts_per_req: list[int]) -> bool:
+    def update(
+        self,
+        num_correct_drafts_per_req: list[int],
+        steps: Optional[int] = None,
+        forward_id: Optional[int] = None,
+    ) -> bool:
+        """Credit one batch's accept counts. Returns True if params changed.
+
+        *steps* is the draft width the batch actually ran at and *forward_id* the
+        launch it ran at; both come from the result, not from this slot, because
+        under overlap either may have moved on since the forward (see
+        ``AdaptiveController.on_verify_complete``). They default to the live
+        width and to no bucket for callers with no per-result metadata.
+        """
         if not num_correct_drafts_per_req:
             return False
-        S = self.current_steps
+        S = self.current_steps if steps is None else steps
         if S > 0:
-            # Same staleness guard as the EMA slot: a sample longer than the
-            # live chain was produced by the previous, longer state.
+            # Staleness guard, per the width that produced the sample: a count
+            # above the chain that was drafted cannot come from it.
             fresh = [n for n in num_correct_drafts_per_req if n <= S]
+            b = self._paired_bucket(forward_id)
             if fresh:
-                b = (
-                    self._inflight_bucket.popleft()
-                    if self._inflight_bucket
-                    else self._next_bucket
-                )
                 a = self.alpha
                 for c in self.candidate_steps:
                     if c > S:
-                        continue  # censored at this chain length
+                        continue  # censored at the chain this batch drafted
                     v = sum(min(x, c) for x in fresh) / len(fresh)
-                    self._m[b][c] = self._ema(self._m[b][c], self._mn[b][c], v, a)
-                    self._mn[b][c] += 1
+                    if b is not None:
+                        self._m[b][c] = self._ema(self._m[b][c], self._mn[b][c], v, a)
+                        self._mn[b][c] += 1
                     self._pm[c] = self._ema(self._pm[c], self._pmn[c], v, a)
                     self._pmn[c] += 1
-                sat = sum(x >= S for x in fresh) / len(fresh)
-                satp = sum(x >= S - 1 for x in fresh) / len(fresh)
-                self._sat[b][S] = self._ema(self._sat[b][S], self._satn[b][S], sat, a)
-                self._satp[b][S] = self._ema(
-                    self._satp[b][S], self._satn[b][S], satp, a
-                )
-                self._satn[b][S] += 1
-                self._psat[S] = self._ema(self._psat[S], self._psatn[S], sat, a)
-                self._psatp[S] = self._ema(self._psatp[S], self._psatn[S], satp, a)
-                self._psatn[S] += 1
-                aw = self.weight_alpha
-                for k in range(self._nb):
-                    self._w[k] = (1 - aw) * self._w[k] + (aw if k == b else 0.0)
+                if S in self._psat:  # a width this policy can actually run
+                    sat = sum(x >= S for x in fresh) / len(fresh)
+                    satp = sum(x >= S - 1 for x in fresh) / len(fresh)
+                    if b is not None:
+                        self._sat[b][S] = self._ema(
+                            self._sat[b][S], self._satn[b][S], sat, a
+                        )
+                        self._satp[b][S] = self._ema(
+                            self._satp[b][S], self._satn[b][S], satp, a
+                        )
+                        self._satn[b][S] += 1
+                    self._psat[S] = self._ema(self._psat[S], self._psatn[S], sat, a)
+                    self._psatp[S] = self._ema(self._psatp[S], self._psatn[S], satp, a)
+                    self._psatn[S] += 1
+                    if b is not None:
+                        aw = self.weight_alpha
+                        for k in range(self._nb):
+                            self._w[k] = (1 - aw) * self._w[k] + (aw if k == b else 0.0)
 
         self._batch_count += 1
         if self._batch_count <= self.warmup_batches:

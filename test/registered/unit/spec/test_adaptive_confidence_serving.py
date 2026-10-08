@@ -15,7 +15,10 @@ repository had to adapt:
   candidate, steps=3 (W4), so a concurrent batch cannot widen itself;
 * observations route by the batch size that produced them: a C1 chain is never
   steered by a C>=2 sample, and no observation -- stale or not -- moves the
-  fixed tier off W4;
+  fixed tier off W4. A staged value is owned by the request whose chain it
+  describes and the decision that reads it is paired with its own forward, so
+  two C1 forwards in flight at once cannot take each other's confidence (see
+  test_adaptive_feedback_attribution.py for what "its own" means);
 * the producers and consumers keep their discipline: the draft-extend producer
   is skipped for a concurrent batch (no needless reductions over the draft
   vocabulary), the consumer reads the ring only when a C1 decision is being
@@ -116,14 +119,22 @@ class _FakeEvent:
 class _RecordingChannel:
     def __init__(self, landing=None):
         self.recorded = []
+        self.staged_for = []
+        self.drops = 0
         self.reads = 0
+        self.read_keys = []
         self._landing = landing if landing is not None else []
 
-    def record_position0(self, p0):
+    def record_position0(self, p0, request_key=None):
         self.recorded.append(p0)
+        self.staged_for.append(request_key)
 
-    def latest_position0(self):
+    def invalidate_position0(self):
+        self.drops += 1
+
+    def latest_position0(self, request_key=None):
         self.reads += 1
+        self.read_keys.append(request_key)
         return (
             self._landing[self.reads - 1] if self.reads <= len(self._landing) else None
         )
@@ -221,8 +232,8 @@ class TestProducerDiscipline(CustomTestCase):
     def _draft_worker(self, channel):
         worker = SimpleNamespace(_conf_channel=channel)
         worker.record = (
-            lambda logits, bs: EagleDraftWorker._record_position0_confidence(
-                worker, logits, bs
+            lambda logits, bs, key=None: EagleDraftWorker._record_position0_confidence(
+                worker, logits, bs, key
             )
         )
         return worker
@@ -236,7 +247,12 @@ class TestProducerDiscipline(CustomTestCase):
         worker = self._draft_worker(channel)
         worker.record(torch.zeros((4, 8), dtype=torch.float32), 4)
         self.assertEqual(channel.recorded, [], "a C>=2 batch paid for top-1")
-        worker.record(torch.zeros((1, 8), dtype=torch.float32), 1)
+        # ... and it dropped whatever C1 sample was still staged: that chain has
+        # been drafted and committed, so the next C1 decision cannot use it.
+        self.assertEqual(channel.drops, 1)
+        worker.record(torch.zeros((1, 8), dtype=torch.float32), 1, "req-a")
+        self.assertEqual(len(channel.recorded), 1)
+        self.assertEqual(channel.staged_for, ["req-a"], "a sample with no owner")
         self.assertEqual(len(channel.recorded), 1)
         # The staged value is the probability of the row that was drafted, not a
         # constant: a peaked row reads as confident, a flat one does not.
@@ -283,35 +299,54 @@ class TestConsumerDiscipline(CustomTestCase):
         channel = _RecordingChannel(landing=[[0.5]])
         calls = []
         controller = SimpleNamespace(
-            observe_confidence=lambda conf, bs: calls.append(("observe", conf, bs)),
+            observe_confidence=lambda conf, bs, fid=None: calls.append(
+                ("observe", conf, bs, fid)
+            ),
             activate_step_by_batch=lambda bs: calls.append(("activate", bs)),
         )
-        EAGLEWorkerV2.activate_step_by_batch(self._worker(channel, controller), 4)
+        EAGLEWorkerV2.activate_step_by_batch(
+            self._worker(channel, controller), 4, None, 55
+        )
         self.assertEqual(channel.reads, 0)
-        self.assertEqual(calls, [("activate", 4)])
+        self.assertEqual(calls, [("activate", 4)], "a C>=2 batch reported a decision")
 
     def test_c1_reads_the_ring_then_activates(self):
         channel = _RecordingChannel(landing=[[0.42]])
         calls = []
         controller = SimpleNamespace(
-            observe_confidence=lambda conf, bs: calls.append(("observe", conf, bs)),
+            observe_confidence=lambda conf, bs, fid=None: calls.append(
+                ("observe", conf, bs, fid)
+            ),
             activate_step_by_batch=lambda bs: calls.append(("activate", bs)),
         )
-        EAGLEWorkerV2.activate_step_by_batch(self._worker(channel, controller), 1)
-        self.assertEqual(
-            calls, [("observe", [0.42], 1), ("activate", 1)], "wrong order or bs"
+        EAGLEWorkerV2.activate_step_by_batch(
+            self._worker(channel, controller), 1, "req-a", 56
         )
+        self.assertEqual(
+            calls,
+            [("observe", [0.42], 1, 56), ("activate", 1)],
+            "wrong order, bs, or the decision was not paired with its forward",
+        )
+        # The request owns the sample it read; the forward id pairs the decision.
+        self.assertEqual(channel.read_keys, ["req-a"], "read without the request's key")
 
-    def test_unlanded_sample_is_skipped_not_waited_for(self):
+    def test_unlanded_sample_is_reported_absent_not_waited_for(self):
+        # Nothing has landed: the decision is still reported (with no bucket) so
+        # this forward's verify result is credited with that explicit absence,
+        # rather than with whatever bucket happens to be newest in the queue.
         channel = _RecordingChannel(landing=[None])
         calls = []
         controller = SimpleNamespace(
-            observe_confidence=lambda *a: calls.append(a),
+            observe_confidence=lambda conf, bs, fid=None: calls.append(
+                ("observe", conf, bs, fid)
+            ),
             activate_step_by_batch=lambda bs: calls.append(("activate", bs)),
         )
         with patch("torch.cuda.synchronize", side_effect=AssertionError("sync")):
-            EAGLEWorkerV2.activate_step_by_batch(self._worker(channel, controller), 1)
-        self.assertEqual(calls, [("activate", 1)])
+            EAGLEWorkerV2.activate_step_by_batch(
+                self._worker(channel, controller), 1, "req-a", 57
+            )
+        self.assertEqual(calls, [("observe", None, 1, 57), ("activate", 1)])
 
     def test_latest_position0_never_synchronises(self):
         # The donor consumer walks back from the newest slot to the first event
@@ -327,9 +362,13 @@ class TestConsumerDiscipline(CustomTestCase):
         ]
         channel._p0_event = [_FakeEvent(done=False) for _ in range(ring)]
         channel._p0_bs = [max_bs] * ring
+        channel._p0_key = [None] * ring  # unstamped: readable by any consumer
+        channel._p0_epoch = [0] * ring  # all staged under the current generation
+        channel._epoch = 0
         channel._p0_write = 0
         channel._p0_read = 2
         channel._p0_cached = None
+        channel._p0_cached_id = None
         self.assertIsNone(channel.latest_position0())
         # Nothing landed: the last known value is what the policy sees.
         self.assertIsNone(channel.latest_position0())
@@ -342,8 +381,8 @@ class TestConsumerDiscipline(CustomTestCase):
         seen = []
 
         class _Params:
-            def observe_confidence(self, confidences, batch_size):
-                seen.append((confidences, batch_size))
+            def observe_confidence(self, confidences, batch_size, forward_id=None):
+                seen.append((confidences, batch_size, forward_id))
 
         controller = AdaptiveController(
             SimpleNamespace(
@@ -353,8 +392,8 @@ class TestConsumerDiscipline(CustomTestCase):
             )
         )
         controller.params = _Params()
-        _wire("observe_confidence")(controller, [0.5], 1)
-        self.assertEqual(seen, [([0.5], 1)])
+        _wire("observe_confidence")(controller, [0.5], 1, 58)
+        self.assertEqual(seen, [([0.5], 1, 58)])
 
 
 if __name__ == "__main__":

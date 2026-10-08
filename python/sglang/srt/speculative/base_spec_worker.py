@@ -38,6 +38,34 @@ class HiCacheDraftPlan:
     device_pools: tuple[object, ...] = ()
 
 
+def chain_request_key(batch) -> Optional[str]:
+    """The one request a batch continues to draft, or None if it isn't alone.
+
+    Ownership of a staged confidence: the producer (draft-extend) and the
+    consumer (the next forward's width decision) run at different times, and
+    ``rid`` is the host-side identity both hold without a device read. It says
+    whose chain a sample is, NOT which forward of that chain -- two C1 forwards
+    of one request are in flight at once under overlap -- so
+    ``chain_forward_id`` pairs the decision with its result.
+    """
+    reqs = getattr(batch, "reqs", None)
+    if not reqs or len(reqs) != 1:
+        return None
+    return getattr(reqs[0], "rid", None)
+
+
+def chain_forward_id(batch) -> Optional[int]:
+    """Which launched forward this batch is, or None when nothing stamped it.
+
+    Scheduler.run_batch stamps an immutable forward_iter and ScheduleBatch.copy
+    carries it to the queued result, so the width decision and the verify result
+    of the SAME forward name the same number while anything still in flight from
+    an earlier one does not. That is the pairing key the confidence policy needs
+    -- the request id cannot distinguish them.
+    """
+    return getattr(batch, "forward_iter", None)
+
+
 def _can_pack_hicache_mtp(
     spec_algorithm: SpeculativeAlgorithm,
     draft_runners: tuple[ModelRunner, ...],
@@ -350,12 +378,21 @@ class BaseSpecWorker(ABC):
         return True, "Succeeded to update model weights."
 
     def on_verify_complete_cpu(
-        self, num_correct_drafts_per_req: list[int], batch_size: int = 0
+        self,
+        num_correct_drafts_per_req: list[int],
+        batch_size: int = 0,
+        num_draft_tokens: Optional[int] = None,
+        forward_id: Optional[int] = None,
     ) -> None:
         """Hook called after verify finishes and accept counts are on CPU.
 
         Default no-op. Adaptive-aware workers override this to feed the
         controller without forcing a GPU→CPU sync in the worker hot path.
+
+        *num_draft_tokens* / *forward_id* come from the result itself: the verify
+        window it ran against and the launch it ran at (see
+        ``chain_forward_id``). A worker that cannot attribute a count to the batch
+        that produced it must not re-attribute it to the live state.
         """
         pass
 
@@ -367,10 +404,17 @@ class BaseSpecWorker(ABC):
         """
         pass
 
-    def activate_step_by_batch(self, batch_size: int) -> None:
+    def activate_step_by_batch(
+        self,
+        batch_size: int,
+        request_key: Optional[str] = None,
+        forward_id: Optional[int] = None,
+    ) -> None:
         """Activate the optimal adaptive step for the current batch size.
 
         Default no-op. Adaptive-aware workers override this to switch
-        the runtime state before each draft round.
+        the runtime state before each draft round, pairing the confidence sample
+        for that round with ``request_key`` and its decision entry with
+        ``forward_id`` (see ``chain_request_key`` / ``chain_forward_id``).
         """
         pass

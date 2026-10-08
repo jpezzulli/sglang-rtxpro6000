@@ -63,7 +63,12 @@ from sglang.srt.speculative.adaptive_runtime_state import (
     SpecRuntimeState,
     adaptive_target_graph_warmup,
 )
-from sglang.srt.speculative.base_spec_worker import BaseSpecWorker, EagleDraftWorkerBase
+from sglang.srt.speculative.base_spec_worker import (
+    BaseSpecWorker,
+    EagleDraftWorkerBase,
+    chain_forward_id,
+    chain_request_key,
+)
 from sglang.srt.speculative.draft_utils import DraftBackendFactory
 from sglang.srt.speculative.eagle_draft_cuda_graph_runner import (
     EAGLEDraftCudaGraphRunner,
@@ -978,6 +983,13 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             assert pt == batch.input_ids.numel()
             batch.input_ids = new_input_ids
 
+        # A request's first chain comes out of the target's prefill logits, and
+        # this pass stages nothing: whatever the ring still holds describes some
+        # other request's chain, so the first width decision of a new request
+        # must see "no sample" rather than the previous request's confidence.
+        if self._conf_channel is not None:
+            self._conf_channel.invalidate_position0()
+
         # Draft-extend spec_info for the extend forward; carries only
         # hidden_states + shape info.
         batch.spec_info = EagleDraftExtendInput(
@@ -1076,7 +1088,10 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         return buf[:num_tokens]
 
     def _record_position0_confidence(
-        self, next_token_logits: torch.Tensor, batch_size: int
+        self,
+        next_token_logits: torch.Tensor,
+        batch_size: int,
+        request_key: Optional[str] = None,
     ) -> None:
         """Stage the position-0 top-1 probability for the C1 step policy.
 
@@ -1086,10 +1101,18 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         capturing. The batch-size gate is our concurrency adaptation -- a C>=2
         batch runs the fixed W4 tier, so nothing would consume its confidence,
         and top-1 over the draft vocabulary is two reductions of pure cost.
+
+        ``request_key`` ties the staged value to the chain it describes. A C>=2
+        pass drafts without staging anything, so the C1 sample still in the ring
+        is of a chain that request has already committed; drop it rather than
+        let the next C1 decision read it as current.
         """
-        if self._conf_channel is None or batch_size > 1:
+        if self._conf_channel is None:
             return
-        self._conf_channel.record_position0(top1_prob(next_token_logits))
+        if batch_size > 1:
+            self._conf_channel.invalidate_position0()
+            return
+        self._conf_channel.record_position0(top1_prob(next_token_logits), request_key)
 
     def _draft_extend_for_decode(
         self, batch: ScheduleBatch, batch_result: GenerationBatchResult
@@ -1209,7 +1232,9 @@ class EagleDraftWorker(EagleDraftWorkerBase):
                 batch.sampling_info.temperatures,
             )
             self._record_position0_confidence(
-                draft_logits_output.next_token_logits, select_index.shape[0]
+                draft_logits_output.next_token_logits,
+                select_index.shape[0],
+                chain_request_key(batch),
             )
         elif self.topk == 1 and not _is_hip:
             # Gated to CUDA: see #26358 — ROCm's argmax tie-break corrupts
@@ -1224,7 +1249,9 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             # width decision; ret_topk_p stays 1.0 so existing consumers, which
             # never see a real probability here, are unchanged.
             self._record_position0_confidence(
-                draft_logits_output.next_token_logits, select_index.shape[0]
+                draft_logits_output.next_token_logits,
+                select_index.shape[0],
+                chain_request_key(batch),
             )
         else:
             probs = renorm_draft_probs(
@@ -1420,7 +1447,11 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 )
                 return batch_output
         else:
-            self.activate_step_by_batch(batch.seq_lens.shape[0])
+            self.activate_step_by_batch(
+                batch.seq_lens.shape[0],
+                chain_request_key(batch),
+                chain_forward_id(batch),
+            )
 
             if batch.spec_info is None:
                 capture_mode = (
@@ -1563,27 +1594,57 @@ class EAGLEWorkerV2(BaseSpecWorker):
             )
 
     def on_verify_complete_cpu(
-        self, num_correct_drafts_per_req: list[int], batch_size: int = 0
+        self,
+        num_correct_drafts_per_req: list[int],
+        batch_size: int = 0,
+        num_draft_tokens: Optional[int] = None,
+        forward_id: Optional[int] = None,
     ) -> None:
-        if self.adaptive_controller is not None:
-            self.adaptive_controller.on_verify_complete(
-                num_correct_drafts_per_req, batch_size=batch_size
-            )
+        controller = self.adaptive_controller
+        if controller is None:
+            return
+        # The width this result was produced at, off its own verify stride:
+        # topk=1 drafting is a chain whose window is steps + 1 (the relation
+        # _rebuild_topk1_chain_buffers asserts). A tree draft has no such
+        # relation, so leave those counts unattributed rather than guess a
+        # width the batch never ran.
+        steps = (
+            num_draft_tokens - 1
+            if num_draft_tokens is not None and self.topk == 1
+            else None
+        )
+        controller.on_verify_complete(
+            num_correct_drafts_per_req,
+            batch_size=batch_size,
+            steps=steps,
+            forward_id=forward_id,
+        )
 
-    def activate_step_by_batch(self, batch_size: int) -> None:
+    def activate_step_by_batch(
+        self,
+        batch_size: int,
+        request_key: Optional[str] = None,
+        forward_id: Optional[int] = None,
+    ) -> None:
         controller = self.adaptive_controller
         if controller is None:
             return
         # Read the confidence of the chain that is about to be drafted: it was
         # staged during the previous iteration's draft-extend, so its copy has
-        # landed without anyone waiting on it (latest_position0 never syncs). A
-        # concurrent batch skips the read -- its tier is fixed, and a stale value
-        # from a batch of another size must not steer a C1 decision.
+        # landed without anyone waiting on it (latest_position0 never syncs), and
+        # it is only that request's to use. A concurrent batch skips the read --
+        # its tier is fixed, and a value staged for a batch of another size or a
+        # finished request must not steer a C1 decision.
+        #
+        # The decision is reported whether or not a sample was available: this
+        # forward's verify result is credited by forward id, and an unreported
+        # decision leaves that result nothing of its own to consume.
         channel = self._draft_worker._conf_channel
-        if channel is not None and batch_size == 1:
-            confidences = channel.latest_position0()
-            if confidences:
-                controller.observe_confidence(confidences, batch_size)
+        if batch_size == 1:
+            confidences = (
+                channel.latest_position0(request_key) if channel is not None else None
+            )
+            controller.observe_confidence(confidences, batch_size, forward_id)
         controller.activate_step_by_batch(batch_size)
 
     # -- Adaptive speculative decoding protocol --

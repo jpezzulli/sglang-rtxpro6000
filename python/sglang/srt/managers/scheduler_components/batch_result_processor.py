@@ -41,7 +41,10 @@ from sglang.srt.runtime_context import (
     max_speculative_num_draft_tokens,
 )
 from sglang.srt.sampling.sampling_observer import CommittedTokens
-from sglang.srt.speculative.base_spec_worker import BaseSpecWorker
+from sglang.srt.speculative.base_spec_worker import (
+    BaseSpecWorker,
+    chain_forward_id,
+)
 from sglang.srt.state_capturer.indexer_topk import get_global_indexer_capturer
 from sglang.srt.state_capturer.routed_experts import get_global_experts_capturer
 
@@ -704,8 +707,15 @@ class SchedulerBatchResultProcessor:
         # Feed the adaptive controller now that accept_lens is on CPU,
         # instead of doing a synchronous GPU→CPU copy in the worker hot path.
         # BaseSpecWorker provides a no-op default for non-adaptive workers.
+        # The result's OWN width/launch identity goes with it: under overlap the
+        # worker may already be running (or have selected) a different width than
+        # the one that produced these counts, and the queued copy still names the
+        # forward whose width decision this batch must be credited against.
         self.model_worker.on_verify_complete_cpu(
-            result.num_correct_drafts_per_req_cpu, batch_size=len(batch.reqs)
+            result.num_correct_drafts_per_req_cpu,
+            batch_size=len(batch.reqs),
+            num_draft_tokens=result.speculative_num_draft_tokens,
+            forward_id=chain_forward_id(batch),
         )
 
         # Advance the grammar FSM over this batch's committed tokens (idempotent):

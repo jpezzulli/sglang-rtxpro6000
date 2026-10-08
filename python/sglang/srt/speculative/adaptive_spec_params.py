@@ -171,11 +171,22 @@ class AdaptiveStepSlot:
         self.ema_accept_len = float(self.current_steps - 1)
         self._batch_count = 0
 
-    def update(self, num_correct_drafts_per_req: list[int]) -> bool:
+    def update(
+        self,
+        num_correct_drafts_per_req: list[int],
+        steps: int | None = None,
+        forward_id: int | None = None,
+    ) -> bool:
         """Update EMA with observed accept lengths. Returns True if params changed.
 
         Args:
-            num_correct_drafts_per_req: Per-request accepted draft token counts from last verify.
+            num_correct_drafts_per_req: Per-request accepted draft token counts
+                from last verify.
+            steps: Width that produced the counts. Accepted for signature
+                parity with ConfidenceStepSlot; the EMA here is a mean of accept
+                lengths, which is not keyed by width, so the generic rule (and
+                every non-adaptive/EMA launch) is unchanged by it.
+            forward_id: Same reason -- see ConfidenceStepSlot.update.
         """
         if not num_correct_drafts_per_req:
             return False
@@ -313,27 +324,45 @@ class AdaptiveSpeculativeParams:
     def get_steps_for_batch(self, batch_size: int) -> int:
         return self._route(batch_size).current_steps
 
-    def observe_confidence(self, confidences: list[float], batch_size: int) -> None:
+    def observe_confidence(
+        self,
+        confidences: list[float],
+        batch_size: int,
+        forward_id: int | None = None,
+    ) -> None:
         """Feed the draft's position-0 top-1 probabilities to that batch's slot.
 
         No-op for the EMA policy, which has nowhere to put them. Donor
         (flash-next-fast @ 5105985) routes on the batch size, so a C1 chain is
         never steered by a concurrent batch's confidence -- and never by a
-        sample the ring still holds from a batch of another size.
+        sample the ring still holds from a batch of another size. *forward_id* is
+        the launch this decision was made for; the slot pairs it with the verify
+        result that comes back for the same launch.
         """
         if not self._confidence:
             return
-        self._route(batch_size).observe_confidence(confidences)
+        self._route(batch_size).observe_confidence(confidences, forward_id)
 
     def on_verify_complete(
-        self, num_correct_drafts_per_req: list[int], batch_size: int
+        self,
+        num_correct_drafts_per_req: list[int],
+        batch_size: int,
+        steps: int | None = None,
+        forward_id: int | None = None,
     ) -> int | None:
         """Feed verify results to the matching BS slot's EMA.
+
+        *steps* / *forward_id* say which launch produced the counts; they are
+        forwarded rather than inferred, so a delayed result cannot be credited
+        to whatever width the policy happens to hold now, and its confidence
+        pairing is consumed by the decision that actually made it.
 
         Returns the new step if a switch is warranted, else ``None``.
         """
         params = self._route(batch_size)
-        if params.update(num_correct_drafts_per_req):
+        if params.update(
+            num_correct_drafts_per_req, steps=steps, forward_id=forward_id
+        ):
             return params.current_steps
         return None
 

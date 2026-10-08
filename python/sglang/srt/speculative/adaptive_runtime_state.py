@@ -192,21 +192,39 @@ class AdaptiveController:
         if target != self.worker.speculative_num_steps:
             self._activate(target)
 
-    def observe_confidence(self, confidences: list[float], batch_size: int) -> None:
+    def observe_confidence(
+        self,
+        confidences: list[float],
+        batch_size: int,
+        forward_id: int | None = None,
+    ) -> None:
         """Draft confidence for the chain that is about to be drafted.
 
         Routed by ``batch_size`` like every other observation, so a C1 slot only
         ever sees C1 chains; the fixed C>=2 tier has one candidate and cannot be
         widened by a sample at all. The confidence itself arrives through the
         async side channel (``ConfidenceChannel.latest_position0``), which never
-        synchronises a stream.
+        synchronises a stream, and ``forward_id`` is the launch this decision was
+        made for, so the policy pairs it with that launch's own result.
         """
-        self.params.observe_confidence(confidences, batch_size)
+        self.params.observe_confidence(confidences, batch_size, forward_id)
 
     def on_verify_complete(
-        self, num_correct_drafts_per_req: list[int], batch_size: int
+        self,
+        num_correct_drafts_per_req: list[int],
+        batch_size: int,
+        steps: int | None = None,
+        forward_id: int | None = None,
     ) -> None:
         """Feed verify results to the policy of the batch that produced them.
+
+        *steps* and *forward_id* identify the batch the counts came from, straight
+        off that result's own metadata. They are not the live state: a sample
+        credited to a width that never produced it reads as a chain that was
+        drafted and rejected (or accepted and censored) when it wasn't, and a
+        confidence consumed by the wrong launch leaves every later association
+        shifted -- the request id cannot tell two in-flight forwards of one
+        request apart, which is why this is the scheduler's forward counter.
 
         This deliberately never touches the active runtime state. It runs from
         the batch-result processor as soon as a batch's accept counts reach the
@@ -220,7 +238,12 @@ class AdaptiveController:
         forward boundary and from its own size, which is also where the outgoing
         state is drained before anything is repointed.
         """
-        self.params.on_verify_complete(num_correct_drafts_per_req, batch_size)
+        self.params.on_verify_complete(
+            num_correct_drafts_per_req,
+            batch_size,
+            steps=steps,
+            forward_id=forward_id,
+        )
 
     def _activate(self, speculative_num_steps: int) -> None:
         state = self._states.get(speculative_num_steps)
