@@ -42,6 +42,7 @@ from sglang.srt.model_executor.cuda_graph_config import (
 )
 from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardBatch
 from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
+from sglang.srt.model_executor.input_buffers import set_private_input_buffers
 from sglang.srt.model_executor.runner import (
     DecodeCudaGraphRunner,
     get_batch_sizes_to_capture,
@@ -1251,6 +1252,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 speculative_moe_backend_context(),
                 speculative_moe_a2a_backend_context(),
             ):
+                self._validate_adaptive_widths()
                 self.adaptive_controller.register(
                     SpecRuntimeState(
                         speculative_num_steps=self.speculative_num_steps,
@@ -1467,6 +1469,59 @@ class EAGLEWorkerV2(BaseSpecWorker):
 
     # -- Adaptive speculative decoding protocol --
 
+    def _validate_adaptive_widths(self) -> None:
+        """Refuse a selectable width the fixed launch allocation cannot serve.
+
+        The candidate table can select a width only if the buffers CUDA graphs
+        bind for their lifetime were sized for it -- above all the QSA pending
+        index-K ring, whose group count the pool derives once from the resolved
+        launch-maximum draft-token window. Ask the ring's own span model
+        (``qsa.metadata.pending_ring_groups_required``, the single expression
+        that sizes the allocation and addresses it) of every width the run can
+        reach, the launch state's included, and raise at start-up: widening the
+        ring here would free the rows the captured graphs already point at, and
+        leaving it is what aliases two live verify positions onto one slot --
+        which the verify forward would otherwise only report at the first
+        sampled token, mid-serve.
+
+        The target and draft pools are both checked: a draft model with its own
+        QSA cache has its own ring, and one narrow ring is enough to corrupt.
+        """
+        controller = self.adaptive_controller
+        if controller is None:
+            return
+        from sglang.srt.layers.attention.qsa.metadata import (
+            pending_ring_groups_required,
+        )
+
+        widths = {steps + 1 for steps in controller.candidate_steps}
+        widths.add(self.speculative_num_draft_tokens)
+        pools = {
+            "target": self._target_worker.model_runner.token_to_kv_pool,
+            "draft": self._draft_worker.draft_runner.token_to_kv_pool,
+        }
+        for pool_name, pool in pools.items():
+            groups = getattr(pool, "qsa_num_groups", None)
+            compress_ratio = getattr(pool, "qsa_compress_ratio", None)
+            if groups is None or compress_ratio is None:
+                continue  # a pool with no pending index-K ring (tokenwise QSA / 27B)
+            for width in sorted(widths):
+                required = pending_ring_groups_required(
+                    draft_tokens=width, compress_ratio=compress_ratio
+                )
+                if required > groups:
+                    raise ValueError(
+                        f"adaptive speculative decoding cannot select a "
+                        f"{width}-token verify window: the {pool_name} QSA pending "
+                        f"index-key ring holds {groups} group(s) at compress ratio "
+                        f"{compress_ratio}, which covers "
+                        f"{groups * compress_ratio} published positions. Raise the "
+                        "launch maximum draft-token count (the adaptive "
+                        "candidate_steps table / --speculative-num-steps) so it "
+                        f"needs at most {required} groups; the ring is fixed at "
+                        "pool construction because CUDA graphs bind it."
+                    )
+
     def build_adaptive_runtime_state(
         self,
         speculative_num_steps: int,
@@ -1481,8 +1536,12 @@ class EAGLEWorkerV2(BaseSpecWorker):
             speculative_num_steps,
             speculative_num_draft_tokens,
             cuda_graph_bs=cuda_graph_bs,
-        ):
+        ), self._private_capture_scope():
             self._draft_worker.init_attention_backend()
+            # Only a compressed-QSA draft takes the runner's own backend as its
+            # draft-extend backend; every other family keeps the backend the
+            # factory built for this state.
+            self._own_draft_extend_backend()
             self._draft_worker._capture_cuda_graphs()
 
             # Build target attention backend and CUDA graph runner
@@ -1509,6 +1568,13 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     attn_backend=target_attn_backend,
                     speculative_num_steps=speculative_num_steps,
                     speculative_num_draft_tokens=speculative_num_draft_tokens,
+                )
+                # This state's target backend owns its own GDN recovery graphs
+                # (they bake its recovery index buffers and plan); the startup
+                # capture ran against the launch state's backend only.
+                target_model_runner.maybe_capture_gdn_recovery_graphs(
+                    attn_backend=target_attn_backend,
+                    capture_bs=getattr(target_graph_runner, "capture_bs", None),
                 )
                 target_graph_after_mem = get_available_gpu_memory(
                     self.device, self.gpu_id
@@ -1545,10 +1611,100 @@ class EAGLEWorkerV2(BaseSpecWorker):
 
         return state
 
+    @contextlib.contextmanager
+    def _private_capture_scope(self):
+        """Keep one extra runtime state's capture off the live state's buffers.
+
+        Two live graphs may share a static input tensor as long as fill and replay
+        stay serialized -- that is what the process-wide input-buffer pool and the
+        graph registry already rely on. Capture is the case that does not carry:
+        the build's dummy forward fills whichever storage the pool handed out with
+        capture-time padding, and the capture records writes against it, so an
+        extra state that aliased the live state's canonical buffer would end up
+        with two graphs whose content only the later capture decided. Hence private
+        allocations for the build window -- and a fresh kernel workspace for the
+        draft backends built through the attention registry (which reads that
+        flag), so the launch graphs keep the plan data they captured.
+        """
+        draft_runner = self._draft_worker.draft_runner
+        backup_workspace = getattr(draft_runner, "init_new_workspace", False)
+        draft_runner.init_new_workspace = True
+        backup_buffers = set_private_input_buffers(True)
+        try:
+            yield
+        finally:
+            draft_runner.init_new_workspace = backup_workspace
+            set_private_input_buffers(backup_buffers)
+
+    def _own_draft_extend_backend(self) -> None:
+        """Give the state under construction a draft-extend backend of its own.
+
+        Only a compressed-QSA draft takes the draft runner's own backend as its
+        draft-extend backend, and the trigger is the factory's own branch
+        (``draft_utils.draft_extend_backend_is_runner_own``, the parsed QSA
+        profile), asked here before capture. The twin is then built the way the
+        draft runner built its own backend, with a fresh kernel workspace, and it
+        still addresses the shared KV / Mamba / QSA-ring pools.
+
+        Without it every candidate state's draft-extend graph runner binds ONE
+        backend: ``init_cuda_graph_state`` reallocates that backend's ``_graph_*``
+        metadata tensors -- freeing what an earlier width's captured graph baked
+        in -- and the captured metadata cache is keyed only by
+        ``(forward_mode, bs)``, so the narrower state's DRAFT_EXTEND_V2 entry
+        replaces the wider state's and its replay reads selection sized for
+        another width. An identity test cannot make that decision:
+        ``init_attention_backend`` assigns ``draft_runner.attn_backend =
+        draft_extend_attn_backend`` for every non-null factory backend, so
+        identity is always equal and the generic families would be rebuilt through
+        the runner's target-style build path, losing the choice the draft factory
+        made (cutedsl_mla deliberately falls back to TRTLLM-gen for draft-extend,
+        a Blackwell hybrid_linear_attn draft takes plain Triton, and so on). A
+        tokenwise-QSA draft has no draft-extend backend at all (the eager path)
+        and the launch state keeps the runner's original backend either way.
+        """
+        from sglang.srt.speculative.draft_utils import (
+            draft_extend_backend_is_runner_own,
+        )
+
+        draft_worker = self._draft_worker
+        draft_runner = draft_worker.draft_runner
+        if draft_worker.draft_extend_attn_backend is None:
+            return
+        if not draft_extend_backend_is_runner_own(draft_runner):
+            return
+        fresh = draft_runner._get_attention_backend(init_new_workspace=True)
+        draft_worker.draft_extend_attn_backend = fresh
+        draft_runner.attn_backend = fresh
+
     def apply_runtime_state(self, state: SpecRuntimeState) -> None:
         """Apply a pre-built runtime state to this worker."""
         if self.speculative_num_steps == state.speculative_num_steps:
             return
+
+        # Order the transition before anything is repointed: the backends being
+        # retired may still have a side-stream SSM recovery in flight, and only
+        # they know about it. Swapping first would leave the incoming state's
+        # first target forward free to overwrite the SSM pool that recovery is
+        # reading.
+        from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
+            HybridLinearAttnBackend,
+        )
+
+        dw = self._draft_worker
+        outgoing_backends = (
+            self._target_worker.model_runner.attn_backend,
+            dw.draft_attn_backend,
+            dw.draft_extend_attn_backend,
+            dw.draft_runner.attn_backend,
+        )
+        drained: set = set()
+        for backend in outgoing_backends:
+            if (
+                isinstance(backend, HybridLinearAttnBackend)
+                and id(backend) not in drained
+            ):
+                backend.drain_pending_recovery()
+                drained.add(id(backend))
 
         log_info_on_rank0(
             logger,
@@ -1563,7 +1719,6 @@ class EAGLEWorkerV2(BaseSpecWorker):
         self.speculative_num_draft_tokens = state.speculative_num_draft_tokens
 
         # Draft side
-        dw = self._draft_worker
         dw.speculative_num_steps = state.speculative_num_steps
         dw.speculative_num_draft_tokens = state.speculative_num_draft_tokens
         dw.draft_attn_backend = state.draft_attn_backend

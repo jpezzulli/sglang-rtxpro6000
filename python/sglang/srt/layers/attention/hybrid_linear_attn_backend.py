@@ -1078,6 +1078,24 @@ class HybridLinearAttnBackend(AttentionBackend):
             self._recovery_event.wait()
             self._recovery_event_pending = False
 
+    def drain_pending_recovery(self) -> None:
+        """Join a side-stream recovery that no forward has joined yet.
+
+        The join normally happens in ``init_forward_metadata*`` of THIS wrapper
+        and only there. An adaptive-MTP width switch replaces the whole backend
+        set, so after a switch the incoming backend's first target forward has
+        no reason to look at the outgoing one's ``_recovery_event_pending`` --
+        and that still-running recovery reads the SSM pool (one allocation every
+        state's backend addresses) exactly where the new state's forward writes.
+        Whoever retires a backend therefore drains it first (see
+        ``EAGLEWorkerV2.apply_runtime_state``); the SSM/KV pools stay shared,
+        only the join is ordered.
+
+        Ported from https://github.com/aiueo52/sglang-rtxpro6000 branch
+        flash-next-fast (snapshot 5105985).
+        """
+        self._wait_recovery_if_pending()
+
     def init_forward_metadata_out_graph(
         self,
         forward_batch: ForwardBatch,

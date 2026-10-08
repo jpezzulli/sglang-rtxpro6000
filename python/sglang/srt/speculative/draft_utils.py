@@ -24,6 +24,27 @@ def _assert_draft_needs_no_conv_sidecar(draft_model_runner) -> None:
         )
 
 
+def draft_extend_backend_is_runner_own(draft_model_runner) -> bool:
+    """True when ``create_draft_extend_backend()`` returns the draft runner's OWN
+    backend instead of building one, i.e. the compressed-QSA path.
+
+    Keyed off the parsed profile -- the same branch the factory itself takes --
+    rather than off ``draft_extend_attn_backend is draft_runner.attn_backend``:
+    ``init_attention_backend`` assigns that pair equal for every non-null
+    factory backend, so an identity test would answer True for the generic
+    families as well and a caller would replace a deliberate factory choice
+    (cutedsl_mla's TRTLLM draft-extend fallback, Blackwell's plain-Triton
+    hybrid_linear_attn one) with a generic build.
+    """
+    from sglang.srt.layers.attention.qsa.config import (
+        QSA_VARIANT_COMPRESSED,
+        parse_qsa_profile,
+    )
+
+    profile = parse_qsa_profile(draft_model_runner.model_config.hf_config)
+    return profile is not None and profile.variant == QSA_VARIANT_COMPRESSED
+
+
 class DraftBackendFactory:
     def __init__(
         self,
@@ -116,22 +137,16 @@ class DraftBackendFactory:
 
     def create_draft_extend_backend(self):
         if self._is_qwen_qsa_draft_model():
-            from sglang.srt.layers.attention.qsa.config import (
-                QSA_VARIANT_COMPRESSED,
-                parse_qsa_profile,
-            )
-
-            profile = parse_qsa_profile(self.draft_model_runner.model_config.hf_config)
-            if profile is not None and profile.variant != QSA_VARIANT_COMPRESSED:
-                # Tokenwise QSA has no graph-stable indexer metadata; keep
-                # the intentional eager draft-extend path and never fall
-                # back to a dense backend.
-                return None
-            # Compressed QSA draft-extend uses the draft model runner's own
-            # (QSA-wrapped hybrid) backend.  Its replay path pads the
-            # variable accepted-token rows to the captured static width, so
-            # the draft-extend CUDA graph expresses the dynamic accept count.
-            return self.draft_model_runner.attn_backend
+            if draft_extend_backend_is_runner_own(self.draft_model_runner):
+                # Compressed QSA draft-extend uses the draft model runner's own
+                # (QSA-wrapped hybrid) backend.  Its replay path pads the
+                # variable accepted-token rows to the captured static width, so
+                # the draft-extend CUDA graph expresses the dynamic accept count.
+                return self.draft_model_runner.attn_backend
+            # Tokenwise QSA has no graph-stable indexer metadata; keep
+            # the intentional eager draft-extend path and never fall
+            # back to a dense backend.
+            return None
 
         backend_map = {
             "flashinfer": self._create_flashinfer_prefill_backend,

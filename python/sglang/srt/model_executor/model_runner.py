@@ -1022,7 +1022,11 @@ class ModelRunner:
         # final addresses. Self-guards (no-op in full mode / non-recovery paths).
         self.maybe_capture_gdn_recovery_graphs()
 
-    def maybe_capture_gdn_recovery_graphs(self):
+    def maybe_capture_gdn_recovery_graphs(
+        self,
+        attn_backend: "HybridLinearAttnBackend | None" = None,
+        capture_bs: "list[int] | None" = None,
+    ):
         """Capture per-bucket FlashInfer SSM-state recovery cuda graphs at warmup.
 
         Called from init_cuda_graphs after the decode/target_verify graphs are
@@ -1030,6 +1034,18 @@ class ModelRunner:
         final addresses. HybridLinearAttnBackend pads the serving batch up to a
         captured bucket and replays on the side stream, and owns the
         capture-failure fallback to eager recovery -- so nothing is wrapped here.
+
+        *attn_backend* / *capture_bs* override the runner's live backend and
+        bucket list. Adaptive speculative decoding builds one target backend and
+        one decode graph runner per candidate width, so each state must capture
+        its OWN recovery graphs against its own buckets: the graphs bake the
+        backend's address-stable recovery index buffers and its plan, and the
+        startup call above only ever sees the launch state's pair. Left to the
+        default, an activated state silently recovers eagerly on the side stream
+        (the graphs self-guard), which is the known-good path but not the one the
+        run was qualified on. Ported from
+        https://github.com/aiueo52/sglang-rtxpro6000 branch flash-next-fast
+        (snapshot 5105985).
         """
         if self.device != "cuda" or self.is_draft_worker:
             return
@@ -1040,13 +1056,14 @@ class ModelRunner:
             HybridLinearAttnBackend,
         )
 
-        if not isinstance(self.attn_backend, HybridLinearAttnBackend):
+        backend = self.attn_backend if attn_backend is None else attn_backend
+        if not isinstance(backend, HybridLinearAttnBackend):
             return
-        if self.decode_cuda_graph_runner is None:
-            return
-        self.attn_backend.capture_recovery_graphs(
-            self.decode_cuda_graph_runner.capture_bs
-        )
+        if capture_bs is None:
+            if self.decode_cuda_graph_runner is None:
+                return
+            capture_bs = self.decode_cuda_graph_runner.capture_bs
+        backend.capture_recovery_graphs(capture_bs)
 
     def init_routed_experts_capturer(self):
         if self.is_draft_worker:
