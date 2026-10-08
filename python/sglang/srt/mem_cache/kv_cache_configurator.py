@@ -49,7 +49,6 @@ from sglang.srt.mem_cache.allocator.swa import (
 from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
 from sglang.srt.mem_cache.hisparse_memory_pool import HiSparseDSATokenToKVPool
 from sglang.srt.mem_cache.memory_pool import (
-    conv_window_dedup_enabled,
     DSATokenToKVPool,
     HybridLinearKVPool,
     HybridReqToTokenPool,
@@ -63,6 +62,7 @@ from sglang.srt.mem_cache.memory_pool import (
     NoOpMHATokenToKVPool,
     PageMajorMHATokenToKVPool,
     ReqToTokenPool,
+    conv_window_dedup_enabled,
 )
 from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
 from sglang.srt.platforms import current_platform
@@ -2175,8 +2175,7 @@ class KVCacheConfigurator:
                 ),
             )
             if unified_pool or (
-                not replayssm_active
-                and get_exec().mamba.gdn_mtp_cache_mode != "none"
+                not replayssm_active and get_exec().mamba.gdn_mtp_cache_mode != "none"
             ):
                 intermediate_bytes += cache_params.intermediate_ssm_bytes_per_slot(
                     draft_tokens
@@ -2225,9 +2224,7 @@ class KVCacheConfigurator:
             # Reserve intermediate memory based on capped max_num_reqs (+1: the
             # pool's padding slot).
             if spec_intermediate_per_slot:
-                padded_slots = (
-                    get_schedule().max_mamba_cache_size + spec_scratch_slots
-                )
+                padded_slots = get_schedule().max_mamba_cache_size + spec_scratch_slots
                 intermediate_size = padded_slots * spec_intermediate_per_slot
                 total_rest_memory = total_rest_memory - (intermediate_size / (1 << 30))
         else:
@@ -2255,9 +2252,11 @@ class KVCacheConfigurator:
             # scratch the equation is the non-spec one and no ratio is consulted.
             ratio = self._calculate_mamba_ratio() if spec_intermediate_per_slot else 1
             get_context().override(
-                "mamba_pool.memory_budget_spec"
-                if spec_intermediate_per_slot
-                else "mamba_pool.memory_budget",
+                (
+                    "mamba_pool.memory_budget_spec"
+                    if spec_intermediate_per_slot
+                    else "mamba_pool.memory_budget"
+                ),
                 max_mamba_cache_size=int(
                     (
                         mamba_budget_bytes

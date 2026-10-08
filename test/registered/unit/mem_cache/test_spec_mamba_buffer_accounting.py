@@ -65,8 +65,6 @@ MAMBA_MEM_RATIO = 0.5
 MAX_RUNNING = 8
 
 
-
-
 # --- per-spec-slot byte expectations, written out from the pool's shapes -------
 def ssm_charge(draft=DRAFT, *, layers=N_LAYERS, itemsize=4, elems=SSM_ELEMS):
     return elems[0] * elems[1] * elems[2] * itemsize * draft * layers
@@ -587,9 +585,7 @@ class TestExplicitSizeReserve(CustomTestCase):
         )
         rest_plain, slots_plain, _, _ = self._rest(mode="none", size=size)
         self.assertEqual(slots_dec, slots_plain)  # explicit size is not solved
-        self.assertAlmostEqual(
-            rest_plain - rest_dec, extra * per_slot / GB, delta=1e-9
-        )
+        self.assertAlmostEqual(rest_plain - rest_dec, extra * per_slot / GB, delta=1e-9)
 
     def test_disabled_radix_pd_decode_prealloc_exact_bytes(self):
         extra, max_running = 16, 12
@@ -605,9 +601,7 @@ class TestExplicitSizeReserve(CustomTestCase):
             spec=DRAFT, disable_radix=True, max_running_requests=max_running
         )
         self.assertEqual((slots_dec, slots_plain), (max_running, max_running))
-        self.assertAlmostEqual(
-            rest_plain - rest_dec, extra * per_slot / GB, delta=1e-9
-        )
+        self.assertAlmostEqual(rest_plain - rest_dec, extra * per_slot / GB, delta=1e-9)
 
     def test_dp_shard_divides_the_explicit_pool(self):
         rest, slots, _ = self.solver.solve(
