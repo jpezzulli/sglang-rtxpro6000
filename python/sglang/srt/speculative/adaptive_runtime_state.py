@@ -68,7 +68,10 @@ class AdaptiveController:
     The worker only needs to:
       1. Call register() for the initial state, then init_states()
          once during startup.
-      2. Call on_verify_complete(num_correct_drafts_per_req) after each decode verify.
+      2. Call on_verify_complete(results, batch_size) after each decode verify,
+         to feed the policy of that batch's size.
+      3. Call activate_step_by_batch(batch_size) before each decode forward --
+         that is the only place the active width changes at run time.
     """
 
     def __init__(self, worker: AdaptiveSpecWorker, config_path: str | None = None):
@@ -152,12 +155,21 @@ class AdaptiveController:
     def on_verify_complete(
         self, num_correct_drafts_per_req: list[int], batch_size: int
     ) -> None:
-        """Feed verify results; switch runtime state if EMA warrants it."""
-        new_step = self.params.on_verify_complete(
-            num_correct_drafts_per_req, batch_size
-        )
-        if new_step is not None:
-            self._activate(new_step)
+        """Feed verify results to the policy of the batch that produced them.
+
+        This deliberately never touches the active runtime state. It runs from
+        the batch-result processor as soon as a batch's accept counts reach the
+        CPU, which under overlap is after the NEXT batch has already been
+        launched; activating here repointed the backends and graph runners that
+        in-flight batch was still running against. The donor controller did
+        exactly that, and a completion of an old C1 batch left its wider policy
+        (steps=15) pending over a C4 batch whose own slot says steps=3. Results
+        still land on the slot routed by their own batch size; the width a batch
+        runs at is chosen by activate_step_by_batch(), at that batch's own
+        forward boundary and from its own size, which is also where the outgoing
+        state is drained before anything is repointed.
+        """
+        self.params.on_verify_complete(num_correct_drafts_per_req, batch_size)
 
     def _activate(self, speculative_num_steps: int) -> None:
         state = self._states.get(speculative_num_steps)
