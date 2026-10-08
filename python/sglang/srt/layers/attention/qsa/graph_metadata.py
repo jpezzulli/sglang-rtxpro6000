@@ -28,6 +28,8 @@ import torch
 import triton
 import triton.language as tl
 
+from sglang.srt.layers.attention.qsa.metadata import pending_ring_groups
+
 
 @triton.jit
 def _qsa_graph_layout_kernel(
@@ -125,6 +127,7 @@ def _qsa_graph_row_metadata_kernel(
     req_to_token_row_stride,
     max_pages,
     RATIO: tl.constexpr,
+    NUM_GROUPS: tl.constexpr,  # ring groups per request; see QSATokenToKVPool
     FULL_PAGE: tl.constexpr,  # full-KV tokens per page
     PAGE_BLOCK: tl.constexpr,
 ):
@@ -148,11 +151,20 @@ def _qsa_graph_row_metadata_kernel(
     tl.store(write_locs_ptr + row, write_loc)
 
     tl.store(logical_positions_ptr + row, current)
-    tl.store(state_slots_ptr + row, req * RATIO + (current % RATIO).to(tl.int64))
+    # One compression group is one ring group, so every member of this row's
+    # group shares the group index of the row's own position (mirrors
+    # qsa.metadata.pending_ring_slot; both must move together with the
+    # pool's ring capacity).
+    ring_span = RATIO * NUM_GROUPS
+    group = ((current // RATIO) % NUM_GROUPS).to(tl.int64)
+    tl.store(
+        state_slots_ptr + row,
+        req * ring_span + group * RATIO + (current % RATIO).to(tl.int64),
+    )
     ring_base = row.to(tl.int64) * RATIO
     for k in tl.static_range(RATIO):
         member = tl.maximum(current - (RATIO - 1 - k), 0)
-        slot = req * RATIO + (member % RATIO).to(tl.int64)
+        slot = req * ring_span + group * RATIO + (member % RATIO).to(tl.int64)
         tl.store(ring_locs_ptr + ring_base + k, slot.to(tl.int32))
 
     # Page-table entries are the request's FULL-KV page ids, read from the
@@ -235,6 +247,7 @@ def launch_graph_metadata(
         req_to_token.stride(0),
         max_pages,
         RATIO=indexer.compress_ratio,
+        NUM_GROUPS=pending_ring_groups(pool),
         FULL_PAGE=pool.qsa_compressed_page_size * indexer.compress_ratio,
         PAGE_BLOCK=128,
         num_warps=1,

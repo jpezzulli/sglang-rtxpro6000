@@ -68,11 +68,20 @@ class AdaptiveController:
     The worker only needs to:
       1. Call register() for the initial state, then init_states()
          once during startup.
-      2. Call on_verify_complete(num_correct_drafts_per_req) after each decode verify.
+      2. Call on_verify_complete(results, batch_size) after each decode verify,
+         to feed the policy of that batch's size.
+      3. Call activate_step_by_batch(batch_size) before each decode forward --
+         that is the only place the active width changes at run time.
     """
 
     def __init__(self, worker: AdaptiveSpecWorker, config_path: str | None = None):
         self.worker = worker
+        # The width the server launched with. Everything the start-up path sizes
+        # off the flat speculative-num-steps / num-draft-tokens leaf -- the
+        # draft-extend graph metadata of a backend shared between states, the
+        # QSA MTP shared-selection tail width -- is dimensioned for THIS width,
+        # so no candidate may be wider; see validate_candidates().
+        self.initial_steps = worker.speculative_num_steps
         self.params = AdaptiveSpeculativeParams(
             initial_steps=worker.speculative_num_steps,
             cfg_path=config_path,
@@ -93,6 +102,7 @@ class AdaptiveController:
 
     def init_states(self, cuda_graph_bs: list[int] | None = None) -> None:
         """Build and register runtime states for all candidate steps."""
+        self.validate_candidates()
         self.params.set_cuda_graph_bs(cuda_graph_bs)
 
         for steps in self.candidate_steps:
@@ -110,6 +120,33 @@ class AdaptiveController:
         # Start on the initial step.
         self._activate(self.worker.speculative_num_steps)
 
+    def validate_candidates(self) -> None:
+        """Refuse a candidate wider than the launch width before capturing graphs.
+
+        ``--speculative-num-steps`` is what the start-up path sizes against
+        (``speculative_num_draft_tokens`` resolves to it + 1), so a candidate
+        above it would run a verify window wider than the buffers that were
+        sized once at the launch width. Growing those buffers after the fact
+        frees what the launch state's captured graphs bake in -- an illegal
+        memory access at the next replay, not a clean error -- so raise here
+        instead. The narrower side of the candidate table needs no such check:
+        the fixed launch-maximum allocations (the QSA pending ring, the request
+        reservation) are sized off the widest candidate and every narrower
+        width reuses them.
+
+        Ported from https://github.com/aiueo52/sglang-rtxpro6000 branch
+        flash-next-fast (snapshot 5105985).
+        """
+        over = sorted(s for s in self.candidate_steps if s > self.initial_steps)
+        if over:
+            raise ValueError(
+                f"speculative_adaptive_config candidate_steps {over} exceed the "
+                f"launch --speculative-num-steps ({self.initial_steps}); launch "
+                "with the widest candidate as --speculative-num-steps and list "
+                "the narrower ones as candidates, so nothing has to be resized "
+                "while CUDA graphs still point at the old buffers"
+            )
+
     def activate_step_by_batch(self, batch_size: int) -> None:
         target = self.params.get_steps_for_batch(batch_size)
         if target != self.worker.speculative_num_steps:
@@ -118,12 +155,21 @@ class AdaptiveController:
     def on_verify_complete(
         self, num_correct_drafts_per_req: list[int], batch_size: int
     ) -> None:
-        """Feed verify results; switch runtime state if EMA warrants it."""
-        new_step = self.params.on_verify_complete(
-            num_correct_drafts_per_req, batch_size
-        )
-        if new_step is not None:
-            self._activate(new_step)
+        """Feed verify results to the policy of the batch that produced them.
+
+        This deliberately never touches the active runtime state. It runs from
+        the batch-result processor as soon as a batch's accept counts reach the
+        CPU, which under overlap is after the NEXT batch has already been
+        launched; activating here repointed the backends and graph runners that
+        in-flight batch was still running against. The donor controller did
+        exactly that, and a completion of an old C1 batch left its wider policy
+        (steps=15) pending over a C4 batch whose own slot says steps=3. Results
+        still land on the slot routed by their own batch size; the width a batch
+        runs at is chosen by activate_step_by_batch(), at that batch's own
+        forward boundary and from its own size, which is also where the outgoing
+        state is drained before anything is repointed.
+        """
+        self.params.on_verify_complete(num_correct_drafts_per_req, batch_size)
 
     def _activate(self, speculative_num_steps: int) -> None:
         state = self._states.get(speculative_num_steps)
