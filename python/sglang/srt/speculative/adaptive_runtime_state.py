@@ -152,6 +152,17 @@ class AdaptiveController:
         if target != self.worker.speculative_num_steps:
             self._activate(target)
 
+    def observe_confidence(self, confidences: list[float], batch_size: int) -> None:
+        """Draft confidence for the chain that is about to be drafted.
+
+        Routed by ``batch_size`` like every other observation, so a C1 slot only
+        ever sees C1 chains; the fixed C>=2 tier has one candidate and cannot be
+        widened by a sample at all. The confidence itself arrives through the
+        async side channel (``ConfidenceChannel.latest_position0``), which never
+        synchronises a stream.
+        """
+        self.params.observe_confidence(confidences, batch_size)
+
     def on_verify_complete(
         self, num_correct_drafts_per_req: list[int], batch_size: int
     ) -> None:

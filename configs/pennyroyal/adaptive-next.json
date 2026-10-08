@@ -5,13 +5,38 @@
     "width's draft-token count is steps+1, so C1 may pick W4/W8/W16 (3/7/15) and C>=2 stays",
     "W4. Launch for it: --speculative-num-steps 15 (a candidate wider than the launch width",
     "is refused, not resized under captured graphs) and a BS1 bucket in --cuda-graph-bs-decode",
-    "for the W8/W16 states; without BS1 a C1 batch pads up into the C>=2 tier and stays W4."
+    "for the W8/W16 states; without BS1 a C1 batch pads up into the C>=2 tier and stays W4.",
+    "",
+    "The C1 tuning keys are the donor public wa configuration (bench/adaptive/w16_3_7_15_c.json",
+    "of https://github.com/aiueo52/sglang-rtxpro6000, flash-next-fast @ 5105985) and are read",
+    "only by the opt-in confidence policy: SGLANG_ADAPTIVE_POLICY=confidence with the donor's",
+    "fitted step costs SGLANG_ADAPTIVE_STEP_A=7.943 SGLANG_ADAPTIVE_STEP_B=0.5554. Those are",
+    "fitted cost estimates, not measured guarantees. Without the env flag the slot is the",
+    "shipped acceptance EMA and the confidence keys it does not read are inert."
   ],
   "1": {
     "candidate_steps": [3, 7, 15],
     "up_hysteresis": 0.0,
     "down_hysteresis": -0.25,
-    "ceiling_coeff": 0
+    "ceiling_coeff": 0,
+    "rate_alpha": 0.1,
+    "weight_alpha": 0.05,
+    "warmup_batches": 15,
+    "switch_grace_batches": 40,
+    "update_interval": 10,
+    "grace_backoff": 2.0,
+    "max_grace_batches": 80,
+    "switch_margin": 0.1,
+    "up_margin": 0.04,
+    "down_margin": {
+      "3": 0.03,
+      "7": 0.15
+    },
+    "adjacent_only_promotion": true,
+    "tail_bias": 0.75,
+    "confidence_weight": 1.0,
+    "min_bucket_samples": 20,
+    "buckets": [0.8, 0.95, 0.99, 0.999]
   },
   "2": {
     "candidate_steps": [3],

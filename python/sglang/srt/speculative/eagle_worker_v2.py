@@ -57,6 +57,7 @@ from sglang.srt.runtime_context import (
     get_spec,
 )
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.speculative.adaptive_confidence import top1_prob
 from sglang.srt.speculative.adaptive_runtime_state import (
     AdaptiveController,
     SpecRuntimeState,
@@ -1073,6 +1074,22 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             self.dsa_extend_topk_buf = buf
         return buf[:num_tokens]
 
+    def _record_position0_confidence(
+        self, next_token_logits: torch.Tensor, batch_size: int
+    ) -> None:
+        """Stage the position-0 top-1 probability for the C1 step policy.
+
+        Donor producer (flash-next-fast @ 5105985): the copy goes out
+        non-blocking on the current stream into the channel's pinned ring, which
+        never synchronises the producing stream and is skipped while a graph is
+        capturing. The batch-size gate is our concurrency adaptation -- a C>=2
+        batch runs the fixed W4 tier, so nothing would consume its confidence,
+        and top-1 over the draft vocabulary is two reductions of pure cost.
+        """
+        if self._conf_channel is None or batch_size > 1:
+            return
+        self._conf_channel.record_position0(top1_prob(next_token_logits))
+
     def _draft_extend_for_decode(
         self, batch: ScheduleBatch, batch_result: GenerationBatchResult
     ):
@@ -1190,6 +1207,9 @@ class EagleDraftWorker(EagleDraftWorkerBase):
                 draft_logits_output.next_token_logits,
                 batch.sampling_info.temperatures,
             )
+            self._record_position0_confidence(
+                draft_logits_output.next_token_logits, select_index.shape[0]
+            )
         elif self.topk == 1 and not _is_hip:
             # Gated to CUDA: see #26358 — ROCm's argmax tie-break corrupts
             # MTP draft selection on FP8 logits.
@@ -1198,6 +1218,13 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             )
             ret_topk_p = torch.ones_like(ret_topk_index, dtype=torch.float32)
             ret_draft_probs = None
+            # The confidence of position 0 -- the token this pass just picked --
+            # is the only measurement that exists before the next iteration's
+            # width decision; ret_topk_p stays 1.0 so existing consumers, which
+            # never see a real probability here, are unchanged.
+            self._record_position0_confidence(
+                draft_logits_output.next_token_logits, select_index.shape[0]
+            )
         else:
             probs = renorm_draft_probs(
                 draft_logits_output.next_token_logits,
@@ -1543,8 +1570,20 @@ class EAGLEWorkerV2(BaseSpecWorker):
             )
 
     def activate_step_by_batch(self, batch_size: int) -> None:
-        if self.adaptive_controller is not None:
-            self.adaptive_controller.activate_step_by_batch(batch_size)
+        controller = self.adaptive_controller
+        if controller is None:
+            return
+        # Read the confidence of the chain that is about to be drafted: it was
+        # staged during the previous iteration's draft-extend, so its copy has
+        # landed without anyone waiting on it (latest_position0 never syncs). A
+        # concurrent batch skips the read -- its tier is fixed, and a stale value
+        # from a batch of another size must not steer a C1 decision.
+        channel = self._draft_worker._conf_channel
+        if channel is not None and batch_size == 1:
+            confidences = channel.latest_position0()
+            if confidences:
+                controller.observe_confidence(confidences, batch_size)
+        controller.activate_step_by_batch(batch_size)
 
     # -- Adaptive speculative decoding protocol --
 
