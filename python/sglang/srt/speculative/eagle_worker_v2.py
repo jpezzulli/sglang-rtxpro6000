@@ -61,6 +61,7 @@ from sglang.srt.speculative.adaptive_confidence import top1_prob
 from sglang.srt.speculative.adaptive_runtime_state import (
     AdaptiveController,
     SpecRuntimeState,
+    adaptive_target_graph_warmup,
 )
 from sglang.srt.speculative.base_spec_worker import BaseSpecWorker, EagleDraftWorkerBase
 from sglang.srt.speculative.draft_utils import DraftBackendFactory
@@ -1686,12 +1687,19 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     self.device, self.gpu_id
                 )
                 target_graph_tic = time.perf_counter()
-                target_graph_runner = TargetGraphRunnerCls(
-                    target_model_runner,
-                    attn_backend=target_attn_backend,
-                    speculative_num_steps=speculative_num_steps,
-                    speculative_num_draft_tokens=speculative_num_draft_tokens,
-                )
+                # The one-per-model target warmup already ran for the launch
+                # width, so opt this state's capture back into it against the
+                # backend its own graphs are about to be captured against
+                # (adaptive_target_graph_warmup restores both attributes).
+                with adaptive_target_graph_warmup(
+                    target_model_runner, target_attn_backend
+                ):
+                    target_graph_runner = TargetGraphRunnerCls(
+                        target_model_runner,
+                        attn_backend=target_attn_backend,
+                        speculative_num_steps=speculative_num_steps,
+                        speculative_num_draft_tokens=speculative_num_draft_tokens,
+                    )
                 # This state's target backend owns its own GDN recovery graphs
                 # (they bake its recovery index buffers and plan); the startup
                 # capture ran against the launch state's backend only.
