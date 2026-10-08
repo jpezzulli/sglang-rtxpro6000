@@ -143,6 +143,18 @@ def _qsa_index_share_requested(hf_config) -> bool:
 
 
 class EagleDraftWorker(EagleDraftWorkerBase):
+
+    # Set by EAGLEWorkerV2._override_worker_state while an extra adaptive runtime
+    # state is being built, so the state's shared QSA selection is installed once
+    # -- after the draft-extend twin decision, against the backends the state owns.
+    _qsa_index_share_deferred = False
+
+    # Widths of the configured adaptive candidate table that cannot share the QSA
+    # MTP selection (steps <= 1). Non-empty disables sharing for EVERY width of
+    # that table, decided once by EAGLEWorkerV2 from the complete set so no state
+    # can mix a seeded cache with an unseeded one.
+    _qsa_index_share_unsupported_widths: tuple = ()
+
     def __init__(
         self,
         server_args: ServerArgs,
@@ -391,7 +403,8 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         self.draft_runner.draft_attn_backend = self.draft_attn_backend
         if self.draft_extend_attn_backend is not None:
             self.draft_runner.attn_backend = self.draft_extend_attn_backend
-        self._configure_qsa_mtp_index_share()
+        if not self._qsa_index_share_deferred:
+            self._configure_qsa_mtp_index_share()
         self.tree_mask_mode = default_tree_mask_mode()
 
     def _configure_qsa_mtp_index_share(self) -> None:
@@ -400,6 +413,24 @@ class EagleDraftWorker(EagleDraftWorkerBase):
 
         Chain speculation only: with topk > 1 the decode rows are not
         request-major, so the captured per-request row has no unique reader.
+
+        Under adaptive speculative decoding every candidate width builds its own
+        backends and captures its own graphs, and a captured graph keeps the
+        buffer addresses it wrote/read at capture time, so each width allocates
+        and owns selection buffers sized for its own step count (tail_width =
+        steps + 1) instead of inheriting the launch width's. A width that reused
+        a wider state would look up tail columns its own draft-extend never
+        captures; a narrower one would waste columns every decode step pays.
+        apply_runtime_state hands the live rows to the incoming width's cache
+        before its graphs first replay (QSAMTPSharedSparseIndices.handoff_from).
+        An adaptive table that can reach steps <= 1 opts out entirely
+        (_qsa_index_share_unsupported_widths): such a width never seeds a cache,
+        and the widths of one table must not straddle the two regimes.
+
+        Ported from https://github.com/aiueo52/sglang-rtxpro6000 branch
+        flash-next-fast (snapshot 5105985), which allocates the per-width state
+        the same way; the deferred call site below is our state-ownership
+        adaptation (see build_adaptive_runtime_state).
         """
         from sglang.srt.layers.attention.qsa.config import is_qwen_qsa
         from sglang.srt.layers.attention.qsa.qsa_indexer import QSAIndexer
@@ -418,14 +449,11 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             or self.draft_extend_attn_backend is None
         ):
             return
-        if get_spec().speculative_adaptive:
-            # Adaptive candidates rebuild this worker per step count around
-            # one shared draft-extend backend; the shared selection state is
-            # not sized or validated for that regime.
-            logger.warning(
-                "index_share_for_mtp_iteration is disabled under adaptive "
-                "speculative decoding"
-            )
+        if self._qsa_index_share_unsupported_widths and get_spec().speculative_adaptive:
+            # Whole-table opt-out: this width could hand its cache to a 0/1-step
+            # width, which never seeds one, so the indexer runs on every draft
+            # step at every width of the table (the behaviour before per-width
+            # sharing). Logged once at start-up where the table was read.
             return
         layer_ids = sorted(
             {
@@ -440,7 +468,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
 
         extend_backend = resolve_qsa_sparse_backend(self.draft_extend_attn_backend)
         state = getattr(extend_backend, "_mtp_shared_sparse_indices", None)
-        if state is None:
+        if state is None or get_spec().speculative_adaptive:
             pool = self.draft_runner.token_to_kv_pool
             # The expansion emits token_topk + ratio - 1 columns (top-k blocks
             # plus the uncompressed tail of the capture position).
@@ -449,17 +477,41 @@ class EagleDraftWorker(EagleDraftWorkerBase):
                 layer_ids=layer_ids,
                 num_requests=self.draft_runner.req_to_token_pool.req_to_token.shape[0],
                 token_topk=expanded_width,
-                tail_width=get_spec().speculative_num_steps + 1,
+                # The worker's own width, not the flat spec leaf: under adaptive
+                # decoding the leaf is the launch width while a candidate build
+                # runs with this attribute set to the candidate.
+                tail_width=self.speculative_num_steps + 1,
                 device=self.draft_runner.device,
             )
-        for backend in (self.draft_attn_backend, self.draft_extend_attn_backend):
+        self._install_qsa_mtp_index_share(
+            state=state,
+            draft_attn_backend=self.draft_attn_backend,
+            draft_extend_attn_backend=self.draft_extend_attn_backend,
+        )
+        logger.info(
+            "QSA MTP index sharing enabled: draft decode steps reuse the "
+            f"draft-extend selection for layers {layer_ids} (tail width "
+            f"{state.tail_width}, steps={self.speculative_num_steps})"
+        )
+
+    @staticmethod
+    def _install_qsa_mtp_index_share(
+        *, state, draft_attn_backend, draft_extend_attn_backend
+    ) -> None:
+        """Bind one selection buffer set to the backends that will write/read it.
+
+        Same shape as the donor's installer; the assert is ours -- a resolved
+        backend without the hook would silently keep running the indexer every
+        draft step, which is the thing this config asks the server not to do.
+        """
+        from sglang.srt.layers.attention.qsa.glue import resolve_qsa_sparse_backend
+
+        for backend in (draft_attn_backend, draft_extend_attn_backend):
+            if backend is None:
+                continue
             resolved = resolve_qsa_sparse_backend(backend)
             assert hasattr(resolved, "set_mtp_shared_sparse_indices"), type(resolved)
             resolved.set_mtp_shared_sparse_indices(state)
-        logger.info(
-            "QSA MTP index sharing enabled: draft decode steps reuse the "
-            f"draft-extend selection for layers {layer_ids}"
-        )
 
     def _capture_cuda_graphs(self):
         """Capture the draft worker's own cuda graphs (decode + draft-extend)."""
@@ -1213,6 +1265,26 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 self,
                 config_path=get_spec().speculative_adaptive_config,
             )
+            # QSA MTP index sharing is a per-draft-step optimisation: a width at
+            # steps <= 1 has no draft decode steps and its draft-extend never
+            # seeds the shared selection (EagleDraftWorker
+            # ._configure_qsa_mtp_index_share). If the configured table can reach
+            # such a width, sharing stays OFF for every width of that table -- so
+            # no transition mixes a seeded cache with an unseeded one -- and the
+            # draft indexer keeps running each step, the behaviour these widths
+            # had before per-width sharing existed. Eligibility is read from the
+            # complete candidate set, never from the width currently active.
+            low = self._qsa_index_share_unsupported(
+                self.adaptive_controller.candidate_steps
+            )
+            self._draft_worker._qsa_index_share_unsupported_widths = low
+            if low:
+                logger.warning(
+                    "index_share_for_mtp_iteration is disabled for adaptive "
+                    "candidate_steps %s (no draft step to reuse the selection "
+                    "on); every width runs the QSA indexer each draft step",
+                    low,
+                )
 
         # Some dummy tensors
         self.num_new_pages_per_topk = torch.empty(
@@ -1221,6 +1293,15 @@ class EAGLEWorkerV2(BaseSpecWorker):
         self.extend_lens = torch.empty((), dtype=torch.int64, device=self.device)
 
         self.plan_stream, self.plan_stream_ctx = get_plan_stream(self.device)
+
+    @staticmethod
+    def _qsa_index_share_unsupported(candidate_steps) -> tuple:
+        """The candidates of a table that cannot share the QSA MTP selection.
+
+        Any width at steps <= 1 disqualifies the whole table (see the call site);
+        an empty tuple means every configured width seeds and reads its own cache.
+        """
+        return tuple(sorted({int(s) for s in candidate_steps if int(s) <= 1}))
 
     @property
     def last_shared_read_runner(self):
@@ -1540,6 +1621,11 @@ class EAGLEWorkerV2(BaseSpecWorker):
             # draft-extend backend; every other family keeps the backend the
             # factory built for this state.
             self._own_draft_extend_backend()
+            # Bind this width's shared QSA selection to the backends it now owns
+            # (the twin above may have replaced the one the factory built): the
+            # draft-extend graph records its writes and every decode graph its
+            # lookup against these addresses, for the state's whole lifetime.
+            self._draft_worker._configure_qsa_mtp_index_share()
             self._draft_worker._capture_cuda_graphs()
 
             # Build target attention backend and CUDA graph runner
@@ -1674,6 +1760,42 @@ class EAGLEWorkerV2(BaseSpecWorker):
         draft_worker.draft_extend_attn_backend = fresh
         draft_runner.attn_backend = fresh
 
+    @staticmethod
+    def _qsa_mtp_shared_state(backend):
+        """The selection buffers installed on (possibly hybrid-wrapped) backend."""
+        if backend is None:
+            return None
+        from sglang.srt.layers.attention.qsa.glue import resolve_qsa_sparse_backend
+
+        return getattr(
+            resolve_qsa_sparse_backend(backend), "_mtp_shared_sparse_indices", None
+        )
+
+    @classmethod
+    def _hand_off_qsa_mtp_index_share(cls, *, outgoing, incoming) -> None:
+        """Seed the incoming width's frozen selection from the outgoing width's.
+
+        Each candidate owns its own ``QSAMTPSharedSparseIndices`` (its captured
+        graphs bake those addresses) while the draft-extend that writes it runs at
+        whatever width is live, so the two caches are only ever as fresh as the
+        last writer. The most recent writer is the outgoing draft-extend backend;
+        the decode side of that state shares the very same object. No-op unless
+        index sharing is on in both states and they do not already share buffers.
+        """
+        source = None
+        for backend in outgoing:
+            source = cls._qsa_mtp_shared_state(backend)
+            if source is not None:
+                break
+        target = None
+        for backend in incoming:
+            target = cls._qsa_mtp_shared_state(backend)
+            if target is not None:
+                break
+        if source is None or target is None or source is target:
+            return
+        target.handoff_from(source)
+
     def apply_runtime_state(self, state: SpecRuntimeState) -> None:
         """Apply a pre-built runtime state to this worker."""
         if self.speculative_num_steps == state.speculative_num_steps:
@@ -1703,6 +1825,24 @@ class EAGLEWorkerV2(BaseSpecWorker):
             ):
                 backend.drain_pending_recovery()
                 drained.add(id(backend))
+
+        # The recovery drain above and this handoff both address the state being
+        # retired, while the incoming state's draft-extend graph may be the next
+        # thing the stream runs: hand the authoritative QSA selection over before
+        # anything is repointed, so the first draft of the new width looks up the
+        # rows its prefill/previous iteration actually captured. See
+        # QSAMTPSharedSparseIndices.handoff_from.
+        self._hand_off_qsa_mtp_index_share(
+            outgoing=(
+                dw.draft_extend_attn_backend,
+                dw.draft_runner.attn_backend,
+                dw.draft_attn_backend,
+            ),
+            incoming=(
+                state.draft_extend_attn_backend,
+                state.draft_attn_backend,
+            ),
+        )
 
         log_info_on_rank0(
             logger,
@@ -1791,10 +1931,16 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 **({"disable_cuda_graph": True} if not cuda_graph_bs else {}),
             )
         dw._rebuild_topk1_chain_buffers()
+        # init_attention_backend below must not bind the QSA shared selection to
+        # the backend the factory hands out: _own_draft_extend_backend may replace
+        # it, and captured graphs keep the addresses they were installed with. The
+        # build configures the share itself, once the final backends exist.
+        dw._qsa_index_share_deferred = True
 
         try:
             yield
         finally:
+            dw._qsa_index_share_deferred = False
             (
                 self.speculative_num_steps,
                 self.speculative_num_draft_tokens,

@@ -148,7 +148,10 @@ class QSAMTPSharedSparseIndices:
     both the capture (inside the draft-extend graph) and the lookup (inside
     the decode graphs) record and replay cleanly.  Row ``num_requests`` is
     the trash row: captures for padded or degenerate requests are routed
-    there (live request rows are always below ``num_requests``).
+    there (live request rows are always below ``num_requests``).  Adaptive
+    speculative decoding keeps one instance per candidate width -- the tail
+    geometries differ and each width's graphs bake these addresses -- which makes
+    ``handoff_from`` part of a width transition.
     """
 
     def __init__(
@@ -179,6 +182,40 @@ class QSAMTPSharedSparseIndices:
             device=device,
         )
         self._tail_offsets = torch.arange(tail_width, device=device)
+
+    def handoff_from(self, other) -> None:
+        """Seed this width's cache from the width being retired, in place.
+
+        The frozen selection and the length it was captured at belong to the
+        request; only the tail columns are per-width, and those ``lookup``
+        recomputes from ``captured_len``.  Adaptive decoding therefore has to
+        move the shared part when the active width changes: the controller
+        activates a width at the next actual forward, so that draft would
+        otherwise read a cache its own draft-extend never wrote -- zeros after a
+        prefill at another width, a previous request's rows on a return.
+
+        Device-to-device into the existing storage, so the incoming graphs keep
+        the addresses they baked; ordered on the current stream behind the
+        outgoing width's draft-extend, with no host/device synchronisation and
+        no copy of the differently sized tail columns.
+        """
+        if other.layer_slots != self.layer_slots:
+            raise ValueError(
+                f"QSA MTP index handoff between different layer sets: "
+                f"{sorted(other.layer_slots)} -> {sorted(self.layer_slots)}"
+            )
+        if other.indices.shape[0] != self.indices.shape[0]:
+            raise ValueError(
+                "QSA MTP index handoff between caches of different request counts"
+            )
+        frozen = self.indices.shape[-1] - self.tail_width
+        if other.indices.shape[-1] - other.tail_width != frozen:
+            raise ValueError(
+                f"QSA MTP index handoff with different frozen widths: "
+                f"{other.indices.shape[-1] - other.tail_width} != {frozen}"
+            )
+        self.indices[..., :frozen].copy_(other.indices[..., :frozen], non_blocking=True)
+        self.captured_len.copy_(other.captured_len, non_blocking=True)
 
     def capture(
         self,
