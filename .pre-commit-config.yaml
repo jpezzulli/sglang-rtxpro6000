@@ -8,7 +8,12 @@ repos:
       - id: check-symlinks
       - id: destroyed-symlinks
       - id: trailing-whitespace
+        # The carried FlashInfer source mailboxes under
+        # scripts/pennyroyal/flashinfer/patches are kept byte-for-byte: their
+        # diff content lines carry the whitespace they were generated with.
+        exclude: ^scripts/pennyroyal/flashinfer/patches/.*\.patch$
       - id: end-of-file-fixer
+        exclude: ^scripts/pennyroyal/flashinfer/patches/.*\.patch$
       - id: check-yaml
         args: [--allow-multiple-documents]
         # Helm chart templates embed Go template syntax ({{- ... -}})

@@ -60,12 +60,14 @@ def test_ram_mode_and_online_fp8_defaults_are_inert():
     )
 
     assert result.returncode == 0, result.stderr
+    # Unset stays unset/blank: the runtime decides automatically, the helper
+    # no longer manufactures a false opt-out.
     assert result.stdout.splitlines() == [
         "original",
         "--ple-offload-embedding",
         "0",
         "true",
-        "false",
+        "",
     ]
 
 
@@ -127,9 +129,19 @@ def test_online_fp8_switch_requires_literal_boolean():
         'echo "$SGLANG_SM120_ONLINE_MXFP8"',
         SGLANG_SM120_ONLINE_MXFP8="true",
     )
+    disabled = _run_helper(
+        'echo "$SGLANG_SM120_ONLINE_MXFP8"',
+        SGLANG_SM120_ONLINE_MXFP8="false",
+    )
+    blank = _run_helper(
+        'echo "$SGLANG_SM120_ONLINE_MXFP8"',
+        SGLANG_SM120_ONLINE_MXFP8="",
+    )
     invalid = _run_helper(":", SGLANG_SM120_ONLINE_MXFP8="1")
 
     assert enabled.returncode == 0 and enabled.stdout.strip() == "true"
+    assert disabled.returncode == 0 and disabled.stdout.strip() == "false"
+    assert blank.returncode == 0  # a saved blank reads as automatic
     assert invalid.returncode != 0
     assert "must be true or false" in invalid.stderr
 

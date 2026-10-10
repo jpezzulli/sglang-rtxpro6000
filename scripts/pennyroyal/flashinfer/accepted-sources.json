@@ -1,0 +1,98 @@
+{
+  "_comment": [
+    "Identity of the accepted FlashInfer source integration that Pennyroyal",
+    "packages into every installation. patches/ holds the git-format-patch",
+    "mailboxes (production files only), retained byte-for-byte with their",
+    "author and donor attribution. The two digests per file are the stock",
+    "flashinfer-python 0.7.0.post1 preimage and the accepted postimage, so the",
+    "install step can tell stock, already-patched and unexpected source apart",
+    "without re-deriving the patch. Regenerate with: install.py --record DIR",
+    "where DIR is a fresh extraction of the pinned wheel below."
+  ],
+  "flashinfer_python": "0.7.0.post1",
+  "flashinfer_base_commit": "946200de1ae94fc93fdd0926f0a13afd1fa7f0f1",
+  "flashinfer_wheel": "flashinfer_python-0.7.0.post1-py3-none-any.whl",
+  "flashinfer_wheel_sha256": "c7adf826568d61fc1b7d3aadd4cae387a35a138bfc08e2deca2f34ecfa280716",
+  "flashinfer_jit_cache": "0.7.0.post1+cu130",
+  "cuda_arch_list": "12.0f",
+  "aot_module": "fused_moe_120",
+  "aot_path": "data/aot/fused_moe_120/fused_moe_120.so",
+  "patches": [
+    {
+      "patch": "patches/moe-source.patch",
+      "root": "data",
+      "author": "Penny <Pennyroyal@agentmail.to>",
+      "commits": [
+        "5e86c489f5759cb4006d3b1b5e7bdd14f7a581df",
+        "b9fa8893102dc3bbcec92762230e7f1678644a4e",
+        "2a4d8d3a9501bf3b3fe3b78d7c6bad38bfc76064"
+      ],
+      "attribution": "Port of the published donor patch set aiueo52/flash-next-rtxpro6000 at 524af49abcca66fcb4377ba8297022804535fccf and e0fa9fa9fc3ccd710a8fb3d2639b85ce62188c23 (docs/optimizations.md D1, 'Flash-Next' work by aiueo52).",
+      "scope": "SM120 CUTLASS fused-MoE C++ headers only: the A0 fused routing prologue for 512 experts / top-10, the folded fused-finalize zeroing and the folded row expansion. FLASHINFER_MOE_FUSED_PROLOGUE=0 stays the kill switch.",
+      "reason": "the accepted SM120 fused-MoE prologue",
+      "files": [
+        {
+          "path": "csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh",
+          "stock_sha256": "ec33e94e1c9c8bff9dc8ddc9dcb4559063deb40061804c245f85c481e7ec70cd",
+          "accepted_sha256": "e06462ecccf802c01d39df3772bc0eba134588f50c243ff2989a41a69aa04ee4"
+        },
+        {
+          "path": "csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h",
+          "stock_sha256": "6c2e002b54b33194511b2af5d5d75c9b9ae32c202edf17fe6da72e8e9cdeb93c",
+          "accepted_sha256": "5acb119265d620c6227343de9eb09dbab145325eaf9dcafae9a2a5d103ab7551"
+        }
+      ]
+    },
+    {
+      "patch": "patches/gdn-source.patch",
+      "root": "..",
+      "author": "aa24aa <2496788660@qq.com>",
+      "commits": [
+        "0b0ba4c2b18173303b46dd8ec381735e1615b313"
+      ],
+      "attribution": "aa24aa, cherry picked from c0771c79b7e2f2bc0edf4fdcb7c43b986a56707a; upstream FlashInfer merge request #6227.",
+      "scope": "SM12x CuTe-DSL GDN delta-rule prefill kernels: opt-in FP16-accumulate MMA with FP32 carry, read from FLASHINFER_GDN_FP16_ACCUM_MMA (stock default off). Only the Next recipes opt in.",
+      "reason": "the accepted FP16-accumulate GDN prefill",
+      "files": [
+        {
+          "path": "flashinfer/gdn_kernels/delta_rule_dsl/delta_rule_cp_sm120.py",
+          "stock_sha256": "b02c8ef1ba98177d3695a2cbece5dfd8c208d8339265ab3dbda6e7e23fec5ba1",
+          "accepted_sha256": "b10c54765a8a77de5a28ca03f405bb0065e7d83037bd2e702c4405e46ac8a89d"
+        },
+        {
+          "path": "flashinfer/gdn_kernels/delta_rule_dsl/delta_rule_sm120.py",
+          "stock_sha256": "94fad8696bed061c577603f82670f038f55497231a6775717f8bef65facddb51",
+          "accepted_sha256": "b14429975d35220cd73a0e06d545b3a2cbbfeeac77171153eedaebd1b1517a5e"
+        },
+        {
+          "path": "flashinfer/gdn_kernels/delta_rule_dsl/helpers.py",
+          "stock_sha256": "ac00e2c267a196087a8adec1cbe74b2b2e1c08eb6d5668c433b4011cdf6948e3",
+          "accepted_sha256": "67d6163a21edbed989e3a4c8c9d55aa735198a078d97923c427738427a1b55cb"
+        },
+        {
+          "path": "flashinfer/gdn_prefill.py",
+          "stock_sha256": "3dc5005eded5c9e152ebf32359e7a3238e0c0924522a1a3482f19fb8138b4f5f",
+          "accepted_sha256": "481884119484af8469341b4577399f6196934ec1c23cf1110f0fdff98e2d042e"
+        }
+      ]
+    },
+    {
+      "patch": "patches/asan-include-compat.patch",
+      "root": "..",
+      "author": "Penny <Pennyroyal@agentmail.to>",
+      "commits": [
+        "c84ae2ff261d08bb212f5d72867185876d9d71e7"
+      ],
+      "attribution": "Penny <Pennyroyal@agentmail.to>, written for this packaging step after a real SM120 build failed on this file; not an upstream FlashInfer change.",
+      "scope": "Build-only compatibility guard, not one of the accepted Xid109 fixes: the stock nv_internal memoryUtils.cu asked for <sanitizer/asan_interface.h> unconditionally while using its macros only under the ASAN detection the file itself makes below, so common_memoryUtils.cuda.o cannot compile on a toolchain whose compiler package omits the sanitizer headers. The include is now asked for under that same condition, and an ASAN-enabled build still requires the real header. Remove this entry when the pinned FlashInfer guards the include upstream, or when the packaging build environment is defined to always install the sanitizer headers.",
+      "reason": "the ASAN interface include is unguarded, so a toolchain without the sanitizer headers cannot compile this file",
+      "files": [
+        {
+          "path": "flashinfer/data/csrc/nv_internal/cpp/common/memoryUtils.cu",
+          "stock_sha256": "b4d493f293db5b0294272ef6a3ad7821fbda3c42ce66ea57268da87f3f24e5ad",
+          "accepted_sha256": "a8c8945ed2c8a5ede9026127f5f923a27bb206ca532c12bed48c22e3df0f1ae8"
+        }
+      ]
+    }
+  ]
+}

@@ -1302,8 +1302,9 @@ class SchedulerBatchResultProcessor:
         ``seq_lens_cpu % interval == 0``.  Subtracting the overlap
         lookahead from ``kv_committed_len`` reproduces that check.
 
-        For spec decode, the boundary is detected by comparing the
-        accepted seq_len range against interval boundaries.
+        For spec decode, the boundary is detected by comparing the committed
+        seq_len range (the grammar-truncated run where a grammar applied)
+        against interval boundaries.
         """
         interval = mamba_track_grid(self.tree_cache.page_size)
 
@@ -1314,7 +1315,19 @@ class SchedulerBatchResultProcessor:
                 return True, committed_len
         elif result.num_correct_drafts_per_req_cpu is not None:
             cur = req.seqlen - 1
-            prev = cur - result.num_correct_drafts_per_req_cpu[i] - 1
+            # A grammar truncates the committed run inside the verify window
+            # (sgl-project/sglang#43029), so step back by what this batch
+            # actually committed rather than by the accepted run; only the
+            # retained prefix reaches KV, so a checkpoint past it was never
+            # written. Retained runs hold exactly this req's verified tokens
+            # (no non-draft token leads the window in our NEXTN/EAGLE or
+            # DFlash2 result contracts), so its length is the commit count.
+            retained = result.grammar_retained_tokens
+            if retained is not None and retained[i] is not None:
+                num_committed = len(retained[i])
+            else:
+                num_committed = result.num_correct_drafts_per_req_cpu[i] + 1
+            prev = cur - num_committed
             if cur // interval != prev // interval:
                 return True, cur // interval * interval
 

@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set, Union
 
 from sglang.srt.disaggregation.utils import DisaggregationMode
+from sglang.srt.function_call.utils import set_tool_parser_event_sink
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.observability.utils import exponential_buckets, generate_buckets
 from sglang.srt.runtime_context import (
@@ -1627,6 +1628,25 @@ class TokenizerMetricsCollector(_StatLoggerDIMixin):
             labelnames=labels.keys(),
         )
 
+        # Aggregate tool-call parser outcomes, emitted by the detectors through
+        # the shared sink. Fixed outcome labels only: never tool names,
+        # arguments, prompts, request ids or other caller data. Fallback
+        # outcomes can overlap accepted, so this is not a tool execution
+        # success rate. Registered only when a collector exists, i.e. when
+        # metrics are enabled; otherwise the sink stays unset and parsing
+        # records nothing.
+        self.tool_parser_events_total = Counter(
+            name="sglang:tool_parser_events_total",
+            documentation=(
+                "Aggregate tool-call parser events by outcome (accepted, "
+                "incomplete, unknown_tool, argument_conversion_failed, "
+                "parse_error); one count per logical parser event, not a tool "
+                "execution success rate."
+            ),
+            labelnames=list(labels.keys()) + ["outcome"],
+        )
+        set_tool_parser_event_sink(self.record_tool_parser_event)
+
         if bucket_time_to_first_token is None:
             bucket_time_to_first_token = [
                 0.1,
@@ -1843,6 +1863,10 @@ class TokenizerMetricsCollector(_StatLoggerDIMixin):
 
     def observe_one_aborted_request(self, labels: Dict[str, str]):
         self.num_aborted_requests_total.labels(**labels).inc(1)
+
+    def record_tool_parser_event(self, outcome: str) -> None:
+        """Emit one aggregate tool-call parser event (sink used by detectors)."""
+        self.tool_parser_events_total.labels(**self.labels, outcome=outcome).inc(1)
 
 
 @dataclass

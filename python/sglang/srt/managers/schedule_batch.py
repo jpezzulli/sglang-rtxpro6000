@@ -494,6 +494,40 @@ class MultimodalDataItem(msgspec.Struct, kw_only=True, dict=True, array_like=Tru
             )
         )
 
+    def _transport_proxies(self):
+        """Every CUDA IPC/VMM pool proxy this item still holds, field by field."""
+        for value in (self.feature, self.precomputed_embeddings):
+            if isinstance(value, CudaIpcTensorTransportProxy):
+                yield value
+        for value in self.model_specific_data.values():
+            if isinstance(value, CudaIpcTensorTransportProxy):
+                yield value
+
+    def release_transport_proxies(self) -> int:
+        """Acknowledge every pool slice this item holds without reconstructing it.
+
+        Used when the request is rejected before any rank consumes it (its
+        shared-memory features were lost in transport). Mirrors the normal
+        per-rank rule of ``reconstruct()``: this rank releases its own consumer
+        slot (consumer_count=1); the producer's recycler counts the whole TP
+        group and frees the slice once every rank has acknowledged. A packed
+        VMM transfer is one slice shared by several typed views, so it is
+        acknowledged through its owner exactly once. Returns the number of
+        slices released; already-acknowledged slices are skipped.
+        """
+        released = 0
+        seen = set()
+        for proxy in self._transport_proxies():
+            target = getattr(proxy, "_packed_owner", None) or proxy
+            if id(target) in seen:
+                continue
+            seen.add(id(target))
+            if getattr(target, "_consumer_acknowledged", False):
+                continue
+            target.acknowledge_consumption(1)
+            released += 1
+        return released
+
     def acknowledge_deferred_cuda_ipc_feature(self, consumer_count: int = 1):
         """Release a lazy IPC feature when an embedding-cache hit skips ViT."""
         if isinstance(self.feature, CudaIpcTensorTransportProxy):
@@ -1885,7 +1919,12 @@ class Req(ReqDllmMixin):
         logger.info(f"{prefix}: {self.time_stats.convert_to_duration()}")
         self.has_log_time_stats = True
 
-    def set_finish_with_abort(self, error_msg: str):
+    def set_finish_with_abort(
+        self,
+        error_msg: str,
+        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        err_type: str = "BadRequestError",
+    ):
         if get_parallel().tp_rank == 0:
             logger.error(f"{error_msg}, {self.rid=}")
         self.multimodal_inputs = None
@@ -1895,9 +1934,7 @@ class Req(ReqDllmMixin):
         )  # set it to one token to skip the long prefill
         self.return_logprob = False
         self.logprob_start_len = -1
-        self.to_finish = FINISH_ABORT(
-            error_msg, HTTPStatus.BAD_REQUEST, "BadRequestError"
-        )
+        self.to_finish = FINISH_ABORT(error_msg, status_code, err_type)
 
     def update_reasoning_tokens(self, token_id, think_end_ids):
         if self._is_reasoning_over:

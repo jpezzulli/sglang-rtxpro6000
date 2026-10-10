@@ -7,16 +7,19 @@ import math
 import pytest
 import torch
 import torch.nn.functional as F
+from torch import nn
+
 from sglang.kernels.ops.gemm.sm120_online_fp8 import (
     configure_online_fp8,
     dequantize_rowwise_weight,
     replace_linear_weight_rowwise_fp8,
     rowwise_fp8_lm_head_logits,
+    rowwise_scale_of,
+    w8a16_gemv_supported,
 )
 from sglang.test.ci.ci_register import register_cuda_ci
-from torch import nn
 
-register_cuda_ci(est_time=120, stage="base-b", runner_config="1-gpu-small")
+register_cuda_ci(est_time=180, stage="base-b", runner_config="1-gpu-small")
 
 
 def _is_exact_sm120() -> bool:
@@ -29,8 +32,27 @@ pytestmark = pytest.mark.skipif(
 
 HIDDEN_SIZE = 2560
 VOCAB_ROWS = 1024
+# The donor's Flash-Next draft-head shape; its tuned tile table is keyed on
+# (N, K), so coverage has to hit it as well as the untuned small head.
+DRAFT_HEAD_ROWS = 32768
 HC_COUNT = 4
 HC_LOWRANK = 320
+
+GEMV_ENV = "SGLANG_FP8_W8A16_GEMV"
+# 1 decode, 4/12/16 the W4 verify widths (inside the donor kernel's 16-row
+# limit), 24 C6 verification and 33 prefill (both must stay on the existing path).
+LM_HEAD_ROWS = [1, 4, 12, 16, 24, 33]
+DONOR_MAX_M = 16
+
+
+@pytest.fixture(params=[False, True])
+def gemv_candidate(request, monkeypatch) -> bool:
+    """Run the coverage twice: the existing path and the opt-in donor GEMV."""
+    if request.param:
+        monkeypatch.setenv(GEMV_ENV, "1")
+    else:
+        monkeypatch.delenv(GEMV_ENV, raising=False)
+    return bool(request.param)
 
 
 def _randn(shape, *, seed: int, scale: float) -> torch.Tensor:
@@ -91,11 +113,26 @@ def _rowwise_reference(hidden: torch.Tensor, weight: torch.Tensor) -> torch.Tens
     return hidden.bfloat16() @ dense_weight.T
 
 
-@pytest.mark.parametrize("rows", [1, 4, 16, 33])
+def _gemv_counters(device, gemv_candidate: bool, rows: int):
+    """The donor split-K counter array, iff this case runs the candidate."""
+    if not gemv_candidate or not 1 <= rows <= DONOR_MAX_M:
+        return None
+    from sglang.srt.layers.quantization.w8a16_gemv import _workspace_slot
+
+    return _workspace_slot(device, 0)[1]
+
+
+def _assert_gemv_routing(hidden, weight, rows: int, gemv_candidate: bool) -> None:
+    expected = gemv_candidate and 1 <= rows <= DONOR_MAX_M
+    assert w8a16_gemv_supported(hidden, weight, rowwise_scale_of(weight)) is expected
+
+
+@pytest.mark.parametrize("rows", LM_HEAD_ROWS)
 def test_rowwise_lm_head_matches_dequantized_bf16_reference(
-    rowwise_lm_head_weight: torch.Tensor, rows: int
+    rowwise_lm_head_weight: torch.Tensor, rows: int, gemv_candidate: bool
 ) -> None:
     hidden = _randn((rows, HIDDEN_SIZE), seed=200 + rows, scale=0.25)
+    _assert_gemv_routing(hidden, rowwise_lm_head_weight, rows, gemv_candidate)
 
     actual = rowwise_fp8_lm_head_logits(hidden, rowwise_lm_head_weight)
     expected = _rowwise_reference(hidden, rowwise_lm_head_weight)
@@ -103,11 +140,18 @@ def test_rowwise_lm_head_matches_dequantized_bf16_reference(
     _assert_normalized_error(actual, expected, max_nrmse=0.025, min_cosine=0.999)
 
 
-@pytest.mark.parametrize("rows", [1, 4, 16, 33])
+@pytest.mark.parametrize("rows", LM_HEAD_ROWS)
 def test_rowwise_lm_head_cuda_graph_replays_mutated_input(
-    rowwise_lm_head_weight: torch.Tensor, rows: int
+    rowwise_lm_head_weight: torch.Tensor, rows: int, gemv_candidate: bool
 ) -> None:
     static_hidden = _randn((rows, HIDDEN_SIZE), seed=300 + rows, scale=0.25)
+    _assert_gemv_routing(static_hidden, rowwise_lm_head_weight, rows, gemv_candidate)
+    # Under the candidate: the split-K scratch must exist before capture, and
+    # its per-N-block counters must sit at 0 (no memset is needed between
+    # replays because the fixup CTA resets its own counter).
+    counters = _gemv_counters(static_hidden.device, gemv_candidate, rows)
+    if counters is not None:
+        assert int(counters.max().item()) == 0
 
     # Compile/JIT and populate allocator state before capture.
     for _ in range(2):
@@ -127,8 +171,17 @@ def test_rowwise_lm_head_cuda_graph_replays_mutated_input(
     graph.replay()
     torch.cuda.synchronize()
     actual = graph_output.clone()
-
     _assert_normalized_error(actual, expected, max_nrmse=0.025, min_cosine=0.999)
+
+    if counters is not None:
+        # Replaying the same graph a second time proves the split-K counters
+        # were left clean instead of relying on an external clear.
+        graph.replay()
+        torch.cuda.synchronize()
+        _assert_normalized_error(
+            graph_output.clone(), expected, max_nrmse=0.025, min_cosine=0.999
+        )
+        assert int(counters.max().item()) == 0
 
 
 def test_flashinfer_cutlass_mxfp8_linear_quantizes_and_applies() -> None:
@@ -248,3 +301,45 @@ def test_rowwise_hyperconnection_fused_and_prefill_paths(
     # Decode rows exercise the persistent fused kernel. At 33 rows the actual
     # GatedResidual path dequantizes transient BF16 operands for prefill.
     _assert_normalized_error(actual, expected, max_nrmse=0.06, min_cosine=0.995)
+
+
+@pytest.fixture(scope="module")
+def rowwise_draft_head_weight() -> torch.nn.Parameter:
+    """A head at the donor's tuned (single-split) draft shape, no BF16 fallback."""
+    linear = nn.Linear(
+        HIDDEN_SIZE,
+        DRAFT_HEAD_ROWS,
+        bias=False,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    linear.weight.data.copy_(
+        _randn(
+            (DRAFT_HEAD_ROWS, HIDDEN_SIZE),
+            seed=102,
+            scale=1.0 / math.sqrt(HIDDEN_SIZE),
+        )
+    )
+    replace_linear_weight_rowwise_fp8(linear)
+    return linear.weight
+
+
+@pytest.mark.parametrize("rows", [1, 4, 12, 16])
+def test_rowwise_tuned_head_shape_matches_reference_and_replays(
+    rowwise_draft_head_weight: torch.Tensor, rows: int, gemv_candidate: bool
+) -> None:
+    hidden = _randn((rows, HIDDEN_SIZE), seed=800 + rows, scale=0.25)
+    _assert_gemv_routing(hidden, rowwise_draft_head_weight, rows, gemv_candidate)
+
+    for _ in range(2):
+        rowwise_fp8_lm_head_logits(hidden, rowwise_draft_head_weight)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_output = rowwise_fp8_lm_head_logits(hidden, rowwise_draft_head_weight)
+    hidden.copy_(_randn((rows, HIDDEN_SIZE), seed=900 + rows, scale=0.25))
+    graph.replay()
+    torch.cuda.synchronize()
+
+    expected = _rowwise_reference(hidden, rowwise_draft_head_weight)
+    _assert_normalized_error(graph_output, expected, max_nrmse=0.025, min_cosine=0.999)

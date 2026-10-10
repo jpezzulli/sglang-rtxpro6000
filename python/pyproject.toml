@@ -33,7 +33,7 @@ dependencies = [
   "einops",
   "fastapi",
   "flash-attn-4>=4.0.0b18",
-  "flashinfer_python[cu13]==0.6.17", # keep it aligned with jit-cache version in Dockerfile
+  "flashinfer_python[cu13]==0.7.0.post1", # keep it aligned with jit-cache version in Dockerfile
   "gguf",
   "humming-kernels[cu13]==0.1.12",
   "interegular",
@@ -46,7 +46,8 @@ dependencies = [
   "ninja",
   "numba==0.65.1",
   "numpy",
-  "nvidia-cutlass-dsl[cu13]==4.6.2",
+  # flashinfer-python 0.7.0.post1's [cu13] extra requires nvidia-cutlass-dsl>=4.7.0a0.
+  "nvidia-cutlass-dsl[cu13]==4.7.1",
   "nvidia-mathdx==25.6.0",
   "nvidia-ml-py",
   "openai==2.6.1",
@@ -63,7 +64,7 @@ dependencies = [
   "pydantic",
   "python-multipart",
   "pyzmq>=25.1.2",
-  "quack-kernels==0.6.4",
+  "quack-kernels==0.6.5", # 0.6.5 is the first release allowing cutlass-dsl>=4.7 (0.6.4 pins ==4.6.2)
   "requests",
   "scipy",
   "sentencepiece",

@@ -85,8 +85,9 @@ is also available by community request and works with the same Pennyroyal launch
 fewer tokens overall in our comparison.
 See [Swift 27B validation and per-case timings](SWIFT-27B.md).
 
-[Online FP8](FP8.md) and [NVMe-backed PLE](NVME-PLE.md) are independent
-Flash-Next options.
+[Online FP8](FP8.md) is selected automatically for eligible Flash-Next
+launches on exact SM120; [NVMe-backed PLE](NVME-PLE.md) stays an independent
+opt-in.
 
 The public 27B measurements used
 [orcarouter/Qwen3.8-27B-Uncensored-FP8](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8),
@@ -128,10 +129,11 @@ or [get started](docker/pennyroyal/README.md).
 
 <a id="v250-options--online-fp8-and-nvme-ple"></a>
 
-## Optional Flash-Next features
+## Flash-Next precision and placement
 
-- **[Online FP8](FP8.md)** converts selected weights during model loading.
-  The measured decode improvements and precision tradeoffs are below.
+- **[Online FP8](FP8.md)** converts eligible weights during model loading and
+  engages automatically on exact SM120; a saved private flag opts out. The
+  measured decode improvements and precision tradeoffs are below.
 - **[NVMe-backed PLE](NVME-PLE.md)** moves the large PLE table from fixed
   host RAM to a prepared SSD snapshot. It saves RAM, with a throughput cost
   in our repeated concurrent-request comparison.
@@ -163,7 +165,7 @@ Measured September 11, 2026, on v2.5.0 with FR-Spec, RAM-backed PLE and an
 
 These are decode rates after the first token. The short result is a three-run
 median; the long-context rows are single runs. Online FP8 also freed about
-**3.86 GiB** after graph capture. See [online FP8 setup](FP8.md) to enable it.
+**3.86 GiB** after graph capture. Eligible launches get it automatically; see [online FP8](FP8.md).
 
 <a id="27b-fp8--dflash2-performance-at-a-glance"></a>
 
@@ -334,8 +336,8 @@ for other users' setups, and [LIMITATIONS.md](LIMITATIONS.md) for known issues.
   Flash-Next alternative, startup checks, and optional settings.
 - [CONFIGURE.md](CONFIGURE.md) — what the beta setup configurator does, how to
   start it for native and container use, and where its settings are saved.
-- [FP8.md](FP8.md) — enable online FP8, understand its precision changes, and
-  see the results.
+- [FP8.md](FP8.md) — how online FP8 selects itself, understand its precision
+  changes, and see the results.
 - [NVME-PLE.md](NVME-PLE.md) — optional reader installation, overlay
   preparation, launch settings and measured RAM/speed tradeoff.
 - [BACKENDS.md](BACKENDS.md) — source-backed resolved backend and SM120 tables.

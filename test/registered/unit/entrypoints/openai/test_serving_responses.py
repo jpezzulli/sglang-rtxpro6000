@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from unittest.mock import Mock, patch
 
@@ -814,6 +815,113 @@ class StatusFromFinishReasonTestCase(CustomTestCase):
         self.assertEqual(fn("length"), "incomplete")
         for other in ({"type": "stop"}, {"type": "tool_calls"}, "stop", None):
             self.assertEqual(fn(other), "completed", other)
+
+    def test_engine_abort_and_error_map_to_failed(self):
+        """TokenizerManager._handle_abort_finish_reason forwards 400/500/503
+        engine aborts as ``finish_reason`` metadata in streaming mode; that is a
+        failure, not a finished answer."""
+        fn = OpenAIServingResponses._status_from_finish_reason
+        for abort in (
+            {"type": "abort"},
+            {"type": "abort", "status_code": 400, "message": "Bad request"},
+            {"type": "abort", "status_code": 500, "message": "boom"},
+            {"type": "abort", "status_code": 503, "message": "Worker unavailable"},
+            "abort",
+            {"type": "error", "message": "boom"},
+        ):
+            self.assertEqual(fn(abort), "failed", abort)
+
+    def test_error_details_reported_only_for_failed(self):
+        err = OpenAIServingResponses._error_from_finish_reason
+        self.assertIsNone(err({"type": "stop"}))
+        self.assertIsNone(err({"type": "length"}))
+        self.assertIsNone(err(None))
+        self.assertEqual(
+            err({"type": "abort", "message": "Worker unavailable"}),
+            {"code": "server_error", "message": "Worker unavailable"},
+        )
+        self.assertEqual(
+            err({"type": "abort"}),
+            {"code": "server_error", "message": "Generation aborted"},
+        )
+
+    def test_terminal_event_class_matches_status(self):
+        from sglang.srt.entrypoints.openai.protocol import ResponsesResponse
+
+        for status in ("completed", "incomplete", "failed"):
+            with self.subTest(status=status):
+                body = ResponsesResponse.from_request(
+                    ResponsesRequest(model="x", input="hi", store=False),
+                    sampling_params={},
+                    model_name="x",
+                    created_time=0,
+                    output=[],
+                    status=status,
+                    usage=None,
+                ).model_dump()
+                event = OpenAIServingResponses._terminal_stream_event(body)
+                self.assertEqual(event.type, f"response.{status}")
+                dumped = json.loads(event.model_dump_json())
+                self.assertEqual(dumped["response"]["status"], status)
+                self.assertEqual(dumped["type"], f"response.{status}")
+
+
+class FullGeneratorTerminalStatusTestCase(CustomTestCase):
+    """Non-streaming path: same status/error agreement as the stream."""
+
+    def test_length_and_abort_set_status_error_and_store(self):
+        serving = make_serving()
+        cases = (
+            ({"type": "length"}, "incomplete", None),
+            (
+                {"type": "abort", "status_code": 503, "message": "boom"},
+                "failed",
+                {"code": "server_error", "message": "boom"},
+            ),
+        )
+        for finish_reason, status, error in cases:
+            with self.subTest(status=status):
+                context = SimpleContext()
+                context.last_output = {
+                    "text": "partial",
+                    "meta_info": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 9,
+                        "finish_reason": finish_reason,
+                    },
+                }
+                request = ResponsesRequest(
+                    model="x", input="hi", request_id=f"resp_{status}", store=True
+                )
+
+                async def empty_generator():
+                    for _ in ():
+                        yield None
+
+                response = asyncio.run(
+                    serving.responses_full_generator(
+                        request,
+                        sampling_params={},
+                        result_generator=empty_generator(),
+                        context=context,
+                        model_name="x",
+                        tokenizer=serving.tokenizer_manager.tokenizer,
+                        request_metadata=RequestResponseMetadata(
+                            request_id=request.request_id
+                        ),
+                        created_time=123,
+                        require_reasoning=False,
+                    )
+                )
+
+                self.assertEqual(response.status, status)
+                self.assertEqual(response.error, error)
+                self.assertEqual(response.usage.completion_tokens, 9)
+                self.assertEqual(
+                    response.incomplete_details,
+                    {"reason": "max_output_tokens"} if status == "incomplete" else None,
+                )
+                self.assertEqual(serving.response_store[response.id].status, status)
 
 
 class BuildOutputTextLogprobsTestCase(CustomTestCase):
