@@ -34,7 +34,7 @@ processing remains available.
 **Penny Royal did almost all the coding for this release.** John, Penny and
 Codex worked through the architecture, tuning and debugging together, down to
 fused kernels, memory layouts and milliseconds per decode cycle.
-See the [draft release notes](RELEASE_NOTES_3.0.md) for the full change list.
+See the [release notes](RELEASE_NOTES_3.0.md) for the full change list.
 
 <a id="models-and-launch-recipes"></a>
 <a id="qualified-model-profiles-and-launch-recipes"></a>

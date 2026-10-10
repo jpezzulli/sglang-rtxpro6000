@@ -27,7 +27,7 @@
 #                              The two choices are separate and must agree.
 #   --nvme-ple                 keep the io_uring-permitting seccomp setting for the
 #                              independent NVMe PLE reader while NIXL is off
-#   --image NAME               container image (default: the current v3.0.0 release staging tag)
+#   --image NAME               container image (default: v3.0.0)
 #   --port HOST_PORT           published server port (default: 8001)
 #   --gpu IDS                  GPU id list, e.g. 0 or 0,1 (default: 0)
 #   --models DIR               host models root, mounted read-only at /models

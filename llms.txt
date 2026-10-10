@@ -6,9 +6,10 @@ Canonical repository: https://github.com/jpezzulli/sglang-rtxpro6000
 Display name: Penny Royal. CLI, API model name, paths and package identifiers
 keep the existing `pennyroyal` spelling.
 
-This is the 3.0 documentation draft. Read release-3.0.json for draft status,
-implementation details, measured configuration, validation, and publication
-work still pending. Do not infer that a 3.0 image or tag exists from this draft.
+Penny Royal 3.0 was released October 10, 2026 as `pennyroyal-v3.0.0`.
+Read release-3.0.json for implementation details, measured configuration and
+validation. The container workflow builds `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.0.0`
+from that tag; check its build status before pulling a newly published release.
 
 ## Hardware and profiles
 
@@ -65,7 +66,7 @@ the actual reasoning settings. A synthetic agent transcript is not a real
 tool workflow.
 
 - [3.0 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.0.md): Human-readable changes and direct contributor acknowledgements.
-- [3.0 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.0.json): Features, source identity, measurements, validation scope and pending release work.
+- [3.0 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.0.json): Features, source identity, measurements, validation scope and container build status.
 - [Results](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RESULTS.md): Measurement rules, current results and dated benchmark history.
 - [Community results](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/COMMUNITY-RESULTS.md): Reports from other users, including TP2.
 - [Changes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/CHANGES.md): Release history and technical lineage.

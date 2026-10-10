@@ -1,22 +1,19 @@
 {
-  "schema": "release-notes/3.0-draft",
+  "schema": "release-notes/3.0",
   "artifact": "release-3.0.json",
   "version_label": "3.0",
-  "draft_date": "2026-10-10",
   "revises": {
     "prior_task": "115a2399-5e31-49c5-b38f-85523fdb64bd",
     "reason": "writing-brief rewrite: human release notes; facts and measurement conditions carried forward"
   },
   "status": {
-    "is_draft": true,
-    "published": false,
+    "is_draft": false,
+    "published": true,
     "native_qualification_complete": true,
-    "note": "Publication draft ready. Accepted native runtime qualification is reused. Packaging, brand, documentation and launch-default integration are complete; publication and container build remain pending.",
+    "note": "Source release published with accepted native qualification, packaging, brand, documentation and launch defaults. Container build and image verification remain pending.",
     "pending_release_owner_work": [
-      "publication approval",
-      "publish reviewed source and release tag",
       "GitHub container build and published image identity",
-      "verify published links and record image size"
+      "verify image size and container installation links"
     ]
   },
   "provenance": {
@@ -712,17 +709,20 @@
     "investigation_and_review": "John and Codex with Penny; contributor work remains credited"
   },
   "version": "3.0.0",
-  "planned_publication": {
-    "source_tag": "pennyroyal-v3.0.0",
-    "container_image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.0.0",
-    "published": false,
-    "container_build": "pending"
-  },
   "launch_default_acceptance": {
     "commit": "db4b0080f7c29cac3612d52a9edbcf622d06398a",
     "checks": "167 focused CPU configuration/recipe tests, 2 skipped; changed shell syntax and diff checks passed",
     "independent_review": "no actionable findings",
     "model_suites": "accepted qualification reused; no new model runs or service restart",
     "nvme_ple": "Existing NVMe PLE implementation is width-aware and preserved. Prior NVMe qualification used fixed W4; no new W8-over-NVMe runtime test was performed."
+  },
+  "release_date": "2026-10-10",
+  "publication": {
+    "source_tag": "pennyroyal-v3.0.0",
+    "container_image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.0.0",
+    "published": true,
+    "container_build": "pending",
+    "release_url": "https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v3.0.0",
+    "container_workflow": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml"
   }
 }

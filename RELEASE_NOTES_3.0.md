@@ -1,6 +1,6 @@
 # Penny Royal 3.0
 
-*Draft — ready for publication.*
+Released October 10, 2026.
 
 Penny Royal 3.0 brings adaptive speculative decoding, faster small-batch
 kernels, and more room for conversation state to Qwen3.8 Flash-Next. The target
@@ -121,6 +121,14 @@ All 30 tool responses were parseable; 28 passed automatically and two hit a
 confirmed fixture-classifier error. Image input and RAM cache restoration
 also passed. [Detailed results](RESULTS.md#penny-royal-30) and the
 [machine-readable release notes](release-3.0.json) retain the exact conditions.
+
+## Install or update
+
+Use the [native installation guide](BUILD.md) or the
+[prebuilt container guide](docker/pennyroyal/README.md). Source tag:
+`pennyroyal-v3.0.0`; container image:
+`ghcr.io/jpezzulli/sglang-rtxpro6000:v3.0.0`. The image becomes available when
+the [container build](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml) finishes.
 
 ## Thanks
 
