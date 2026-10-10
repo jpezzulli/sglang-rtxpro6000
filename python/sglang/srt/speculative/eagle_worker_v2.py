@@ -38,8 +38,10 @@ from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.model_executor.cuda_graph_config import (
     Backend,
     Phase,
+    adaptive_launch_capture_scope,
     check_cuda_graph_backend,
     scoped_capture_cuda_graph_config,
+    set_adaptive_launch_capture_scope,
 )
 from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardBatch
 from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
@@ -274,7 +276,14 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             self.draft_worker.init_cuda_graphs(capture_decode_cuda_graph=False)
             if check_cuda_graph_backend(Phase.PREFILL, Backend.BREAKABLE):
                 self.draft_runner.init_prefill_cuda_graph(force_for_draft_worker=True)
-            self._capture_cuda_graphs()
+            # The launch width's draft decode and draft-extend graphs capture
+            # only the buckets its adaptive policy can reach; the draft
+            # TpModelWorker provisioning above (shared logits, eager buffers)
+            # and the prefill graph stay on the FULL canonical list. Later
+            # per-width captures scope through _override_worker_state instead,
+            # with no pending scope, so this boundary is a no-op for them.
+            with adaptive_launch_capture_scope():
+                self._capture_cuda_graphs()
 
         if (c := self.draft_runner.canary_manager) is not None:
             c.mark_init_finished()
@@ -1347,8 +1356,44 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     )
                 )
                 self.adaptive_controller.init_states(
-                    cuda_graph_bs=self._decode_graph_capture_bs(),
+                    # The FULL canonical bucket list the launch capture read
+                    # (controller.launch_cuda_graph_bs), so the narrower
+                    # widths keep every routing bucket their slots can reach
+                    # even though the launch width's own capture was pruned.
+                    cuda_graph_bs=self.adaptive_controller.launch_cuda_graph_bs,
                 )
+
+    def prepare_adaptive_launch_capture(self):
+        """Plan the launch width's start-up capture prune before it begins.
+
+        ``Scheduler.init_all_cuda_graphs`` calls this BEFORE the target
+        worker's init_cuda_graphs (the launch state's target verify graphs are
+        captured there, first). The pruned config is queued, not applied
+        whole-worker: only the actual decode-capture boundaries -- the target
+        verify capture in cuda_graph_setup.capture_cuda_graphs and the initial
+        EagleDraftWorker draft decode / draft-extend capture -- consume it, so
+        GraphSharedOutput's process-shared logits buffer, the EagerRunner
+        fixed-max buffers and the prefill capture are provisioned off the FULL
+        canonical bucket list and keep serving every bucket and width the run
+        can reach (a shared buffer pruned to C6 cannot be widened after the
+        captured graphs bind it). init_states keeps sizing the narrower
+        candidate widths against the FULL list the controller retained, and
+        the scheduler clears the queue on every exit path.
+
+        No adaptive controller, decode graphs off, or a launch width that
+        already covers every bucket: nothing is queued and every boundary is
+        an ordinary no-op window.
+        """
+        controller = self.adaptive_controller
+        if controller is None:
+            return
+        full_bs = self._decode_graph_capture_bs()
+        reachable_bs = controller.plan_launch_capture(full_bs)
+        if reachable_bs is None or reachable_bs == sorted(full_bs or []):
+            return
+        set_adaptive_launch_capture_scope(
+            scoped_capture_cuda_graph_config(reachable_bs)
+        )
 
     def forward_batch_generation(
         self, batch: ScheduleBatch, on_publish=None, grammar_barrier=None
