@@ -9,6 +9,18 @@ case "$SGLANG_MM_PREPROCESS_DEVICE" in
   cuda:*) IMAGE_PROCESSOR_BACKEND=torchvision ;;
   *) echo "Choose SGLANG_MM_PREPROCESS_DEVICE=cpu or cuda:N" >&2; exit 1 ;;
 esac
+# Accepted FlashInfer GDN fix: run the patched SM12x delta-rule prefill kernels
+# in FP16-accumulate MMA mode. This is the qualified default of the Flash-Next
+# profiles, exported before Python imports FlashInfer. Export
+# FLASHINFER_GDN_FP16_ACCUM_MMA=0 before launch to opt out; FlashInfer's own
+# default stays off and the 27B/DFlash2 recipe never sets it.
+export FLASHINFER_GDN_FP16_ACCUM_MMA="${FLASHINFER_GDN_FP16_ACCUM_MMA:-1}"
+
+# The mode changes the GDN computation, so it is cache identity: the resolved
+# value (not the raw string) goes into the NIXL namespace fields below, and
+# anything but the literal 1 is the released FP32-accumulate representation.
+GDN_FP16_ACCUM_MMA=off
+if [[ "$FLASHINFER_GDN_FP16_ACCUM_MMA" == 1 ]]; then GDN_FP16_ACCUM_MMA=on; fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
@@ -149,6 +161,7 @@ else
     --field "speculative_num_draft_tokens=4" \
     --field "speculative_draft_quantization=unquant" \
     --field "gdn_mtp_cache_mode=none" \
+    --field "gdn_fp16_accum_mma=$GDN_FP16_ACCUM_MMA" \
     --field "hicache_io_backend=kernel" \
     --field "hicache_mem_layout=page_first" \
     --field "mamba_ssm_dtype=$MAMBA_SSM_DTYPE" \

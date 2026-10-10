@@ -2144,13 +2144,17 @@ class ContainerLaunchGenerationTests(FixtureMixin):
         ]
         self.assertEqual(missing, [], f"dropped knobs: {missing}")
 
-        # And the two that are neither managed keys nor script settings still
+        # And those that are neither managed keys nor script settings still
         # reach the container as a saved or inherited value would.
         plan = self.container_plan(
             {
                 **self.base_values(),
                 "PENNY_REASONING_EFFORT": "high",
                 "NCCL_P2P_DISABLE": "1",
+                # The accepted private GDN override: not a wizard question, and
+                # the startup file only names it as a default it honours, so the
+                # saved value has to be forwarded or the opt-out disappears.
+                "FLASHINFER_GDN_FP16_ACCUM_MMA": "0",
             },
             environ={"PENNY_REASONING_EFFORT": "low"},
         )
@@ -2158,9 +2162,37 @@ class ContainerLaunchGenerationTests(FixtureMixin):
         run_sh = self.generated(plan)[self.base / "launch out" / "run.sh"]
         self.assertIn("  -e PENNY_REASONING_EFFORT=high", run_sh)
         self.assertIn("  -e NCCL_P2P_DISABLE=1", run_sh)
+        self.assertIn("  -e FLASHINFER_GDN_FP16_ACCUM_MMA=0", run_sh)
         argv = self.run_printed_command(plan)
         self.assertIn("PENNY_REASONING_EFFORT=high", argv)
         self.assertIn("NCCL_P2P_DISABLE=1", argv)
+        self.assertIn("FLASHINFER_GDN_FP16_ACCUM_MMA=0", argv)
+
+        # Inherited works the same way when nothing was saved, and a saved value
+        # still beats the caller's shell.
+        inherited = self.container_plan(
+            self.base_values(),
+            environ={"FLASHINFER_GDN_FP16_ACCUM_MMA": "0"},
+        )
+        self.assertEqual(inherited.env["FLASHINFER_GDN_FP16_ACCUM_MMA"], "0")
+        self.assertIn(
+            "  -e FLASHINFER_GDN_FP16_ACCUM_MMA=0",
+            self.generated(inherited)[self.base / "launch out" / "run.sh"],
+        )
+        saved_wins = self.container_plan(
+            {**self.base_values(), "FLASHINFER_GDN_FP16_ACCUM_MMA": "0"},
+            environ={"FLASHINFER_GDN_FP16_ACCUM_MMA": "1"},
+        )
+        self.assertEqual(saved_wins.env["FLASHINFER_GDN_FP16_ACCUM_MMA"], "0")
+
+        # Neither saved nor inherited: the launch names nothing, so the Next
+        # startup file's own default of 1 stays in charge.
+        untouched = self.container_plan(self.base_values())
+        self.assertNotIn("FLASHINFER_GDN_FP16_ACCUM_MMA", untouched.env)
+        self.assertNotIn(
+            "FLASHINFER_GDN_FP16_ACCUM_MMA",
+            self.generated(untouched)[self.base / "launch out" / "run.sh"],
+        )
 
     def test_a_saved_key_nothing_reads_is_named_not_promise(self):
         # plan.env carries unknown keys for the native launcher; in the

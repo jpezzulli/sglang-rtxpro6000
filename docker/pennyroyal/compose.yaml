@@ -44,6 +44,10 @@ services:
       # Optional operator workaround exported through the launcher for TP>1
       # NCCL P2P/ACS isolation; empty leaves NCCL defaults untouched.
       NCCL_P2P_DISABLE: ${NCCL_P2P_DISABLE:-}
+      # Accepted private override of the patched FlashInfer SM12x GDN prefill
+      # kernels. Empty keeps the Next startup files' qualified default (1); 0
+      # opts out. The 27b profile uses Triton GDN and does not read it.
+      FLASHINFER_GDN_FP16_ACCUM_MMA: ${FLASHINFER_GDN_FP16_ACCUM_MMA:-}
       MAX_RUNNING_REQUESTS: ${MAX_RUNNING_REQUESTS:-4}
       MAX_MAMBA_CACHE_SIZE: ${MAX_MAMBA_CACHE_SIZE:-24}
       MAX_TOTAL_TOKENS: ${MAX_TOTAL_TOKENS:-}

@@ -85,6 +85,10 @@ NIXL_TOML_BY_PROFILE = {
 # exactly the list the manual docker/pennyroyal/compose.yaml environment block
 # forwards beyond the knobs the startup file states itself: dropping one here
 # would silently lose a setting the compose path already honours.
+#
+# FLASHINFER_GDN_FP16_ACCUM_MMA is the accepted private GDN override rather
+# than a KeySpec: the wizard never asks for it, and the 27b recipe does not name
+# it at all (Triton GDN), so a saved value there is unused, never refused.
 CONTAINER_PASSTHROUGH_KEYS = (
     "SGLANG_HICACHE_NIXL_MAX_CACHE_GB",
     "SGLANG_HICACHE_TORCH_PINNED_ALLOC",
@@ -94,6 +98,7 @@ CONTAINER_PASSTHROUGH_KEYS = (
     "MAX_TOTAL_TOKENS",
     "PENNY_REASONING_EFFORT",
     "NCCL_P2P_DISABLE",
+    "FLASHINFER_GDN_FP16_ACCUM_MMA",
 )
 # Settings that only mean something while the disk tier is mounted, so a
 # generated launch with the tier off does not carry them at all.

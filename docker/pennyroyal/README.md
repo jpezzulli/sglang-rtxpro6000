@@ -5,11 +5,13 @@ as the native installation. The default is Flash-Next with FR-Spec. Native
 installation remains supported and is documented in [`BUILD.md`](../../BUILD.md)
 and [`RUN.md`](../../RUN.md).
 
-The release image is named
-`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3`. It includes Python, the CUDA
-toolchain, NIXL POSIX, and the FlashInfer SM120 fused-MoE kernel built from the
-accepted source in this repository. Nothing has to be compiled, configured or
-overlaid on the host: start the container and the recipe loads the module that
+The image below is named
+`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3`. An image built from this source
+includes Python, the CUDA toolchain, NIXL POSIX, and the FlashInfer SM120
+fused-MoE kernel that the image build compiles from the accepted source in this
+repository; the tag that first carries it is chosen at publication, so older
+tags still run the stock provider kernel. Nothing has to be compiled, configured
+or overlaid on the host: start the container and the recipe loads the module that
 is already inside the image. The host supplies the NVIDIA driver and model
 files. Follow the setup below; Compose will pull the image when you start it.
 Release images become available after the build and CPU installation checks
@@ -237,7 +239,8 @@ Online FP8 is off by default. Read [`FP8.md`](../../FP8.md), then set
 `SGLANG_SM120_ONLINE_MXFP8=true` to opt in. RAM-backed PLE is the default. The
 Next startup files run the patched FlashInfer GDN prefill kernels in
 FP16-accumulate MMA mode; change the exported value to `0` in the startup file,
-or add `FLASHINFER_GDN_FP16_ACCUM_MMA: "0"` to a Compose override, to opt out.
+or set `FLASHINFER_GDN_FP16_ACCUM_MMA=0` in `.env` (or pass it with `-e`), to
+opt out. The 27b profile uses Triton GDN and ignores the setting.
 
 ### WSL2
 

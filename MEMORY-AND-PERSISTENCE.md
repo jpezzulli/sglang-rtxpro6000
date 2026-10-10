@@ -150,6 +150,10 @@ derives a readable directory plus a 12-character SHA-256 suffix from:
 - exact SGLang source HEAD and tracked diff;
 - context, topology, page geometry, dtypes, speculative shape, attention and
   recurrent-state modes;
+- the resolved Flash-Next GDN prefill accumulation mode (`gdn_fp16_accum_mma`,
+  on or off): the FP16-accumulate and FP32-accumulate kernels write different
+  numbers into the same pages, so the two modes get separate roots. The raw
+  environment string is not hashed, only the mode it resolves to;
 - PyTorch version and CUDA architecture.
 
 The v2.5.0 Flash-Next launchers also distinguish online-FP8 state, PLE backend,

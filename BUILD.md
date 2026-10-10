@@ -31,7 +31,12 @@ Run this sequence in Bash. It creates a new checkout and Python environment,
 installs the build tools, then installs SGLang and its dependencies once:
 
 ```bash
-git clone --branch pennyroyal-v2.5.3-setup1 --single-branch \
+# Substitute the tag of the release you are installing; the tag that carries
+# this packaging is chosen when that release is published, so it is not named
+# here. The release's own notes give it.
+RELEASE_REF='<release-tag>'
+
+git clone --branch "$RELEASE_REF" --single-branch \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
 cd pennyroyal
 
@@ -50,17 +55,19 @@ uv pip install --prerelease=allow --index-strategy unsafe-best-match \
 .venv/bin/python scripts/pennyroyal/flashinfer/install.py
 ```
 
-The `setup1` tag includes the WSL2 configurator update and the same v2.5.3
-runtime. SGLang is installed as an editable package from this checkout. Keep the
-checkout in place while using this environment.
+Any release at or after the FlashInfer SM120 packaging carries the step below;
+older tags do not, and neither does the released `setup1` configuration update,
+so use the release that includes this source. SGLang is installed as an editable
+package from this checkout. Keep the checkout in place while using this
+environment.
 
 The last command packages the accepted FlashInfer SM120 source into the
 FlashInfer installation of that same environment and compiles the fused-MoE
 module from it; see
 [FlashInfer SM120 source integration](#flashinfer-sm120-source-integration).
 It compiles once per environment, needs the CUDA 13.3 compiler and Ninja, and
-uses the shared job budget below. Users of the prebuilt image run nothing; the
-image already contains the compiled module.
+uses the shared job budget below. Users of the prebuilt image run nothing: the
+image contains the module its own build compiled from these sources.
 
 Next, complete [NIXL POSIX](#nixl-posix) if it is not already installed,
 [download your checkpoints](#reference-and-measured-checkpoints), then follow
@@ -78,38 +85,39 @@ named `origin`.
 
 ```bash
 cd /path/to/pennyroyal
-git fetch origin tag pennyroyal-v2.5.3-setup1
-git switch --detach pennyroyal-v2.5.3-setup1
+RELEASE_REF='<release-tag>'   # the same release ref as above
+git fetch origin tag "$RELEASE_REF"
+git switch --detach "$RELEASE_REF"
 source .venv/bin/activate
 
 source scripts/pennyroyal/build-env.sh
 
 uv pip install --no-build-isolation --no-deps -e python
 
-.venv/bin/python scripts/pennyroyal/flashinfer/install.py
-```
-
-This updates SGLang without re-resolving the existing dependencies: v2.5.3
-keeps the v2.5.0 PyTorch, `sglang-kernel` and NIXL packages. FlashInfer is the
-one dependency this source does change, and `--no-deps` will not install it for
-you. This source pins `flashinfer-python[cu13]==0.7.0.post1`, which is the
-version the accepted SM120 source patches apply to; environments from v2.5.0 up
-to the `pennyroyal-v2.5.3-setup1` tag have 0.6.17. The FlashInfer step is not
-covered by the dependency reuse either: `--no-deps` leaves the *package* alone,
-but the accepted source has to be present inside it. The step is safe to repeat,
-and rerunning it after any FlashInfer install or upgrade is what keeps the
-environment packaged rather than stock.
-
-The step stops with the version it found if your FlashInfer is not the accepted
-pin. Install the pinned distribution, which re-resolves FlashInfer and its own
-extra and nothing else, then rerun the step:
-
-```bash
+# This source changes one dependency, and --no-deps will not install it for you:
+# FlashInfer. The accepted source needs the pin, and the pin refuses a mismatched
+# JIT cache family while importing, so align the whole family before the step.
 uv pip install --prerelease=allow --index-strategy unsafe-best-match \
   --extra-index-url https://docs.sglang.ai/whl/cu130/ \
   'flashinfer-python[cu13]==0.7.0.post1'
+uv pip install --no-deps --index-url https://flashinfer.ai/whl/cu130 \
+  'flashinfer-jit-cache==0.7.0.post1+cu130' \
+  'flashinfer-jit-cache-sm120f==0.7.0.post1+cu130'
+
 .venv/bin/python scripts/pennyroyal/flashinfer/install.py
 ```
+
+This updates SGLang without re-resolving the existing dependencies: the release
+keeps the PyTorch, `sglang-kernel` and NIXL packages of the v2.5.x dependency
+base, and only the FlashInfer family moves, to the pin this source names
+(`flashinfer-python[cu13]==0.7.0.post1`; the older tags here have 0.6.17). The JIT
+cache family is the one optional part of the block: uninstalling it works too, and
+FlashInfer then compiles the other kernels into its own cache on first use. The
+packaging step is safe to repeat, and rerunning it after any later FlashInfer
+install or upgrade is what keeps the environment packaged rather than stock. If it
+names a FlashInfer that is not the pin, or a cache family that does not match, the
+alignment commands above are the remedy. The step itself needs only the
+`flashinfer-python` distribution and this checkout.
 
 If you use NVMe PLE, also refresh the [isolated reader](#optional-nvme-ple-reader)
 for the new source version. The prepared PLE overlay can be reused.
@@ -285,7 +293,10 @@ unset old overrides if you want the shared budget to apply.
 Our machine used 24 jobs and four NVCC threads. These limits control compilation, not
 inference threads or GPU token-pool sizes. Keep the GCC 15 compiler variables
 consistent: `CXX` participates in both NVCC host-compiler selection and the
-JIT fingerprint.
+JIT fingerprint. The FlashInfer JIT build reads its host compiler from `CC`, so
+export `CUDAHOSTCXX` as well if you want a specific one there -- the packaging
+step maps it onto `CC` for that build; see
+[FlashInfer SM120 source integration](#flashinfer-sm120-source-integration).
 
 ### Optional wheel packaging
 
@@ -313,12 +324,14 @@ bundled in this wheel.
 `scripts/pennyroyal/flashinfer/install.py` is the one packaging step behind both
 sequences above and the container image build. It takes the released
 `flashinfer_python-0.7.0.post1` wheel sources, applies two already accepted
-patches, and builds the SM120 CUTLASS fused-MoE module from the result:
+patches plus one build-only compatibility guard, and builds the SM120 CUTLASS
+fused-MoE module from the result:
 
 | Input | Contents | Attribution |
 |---|---|---|
 | `patches/moe-source.patch` | Three commits through `2a4d8d3a9501bf3b3fe3b78d7c6bad38bfc76064`; two C++ headers | Penny `<Pennyroyal@agentmail.to>`, port of the `aiueo52/flash-next-rtxpro6000` donor patches at `524af49abcca` and `e0fa9fa9fc3c` |
 | `patches/gdn-source.patch` | `0b0ba4c2b18173303b46dd8ec381735e1615b313`; four Python files | aa24aa `<2496788660@qq.com>`, upstream FlashInfer #6227 |
+| `patches/asan-include-compat.patch` | `c84ae2ff261d08bb212f5d72867185876d9d71e7`; one stock `.cu` file | Penny `<Pennyroyal@agentmail.to>`, local to this packaging; not an upstream change |
 
 The mailboxes are kept byte-for-byte; only their install path is adapted. The
 MoE mailbox names the `csrc/` tree of the FlashInfer source repository, which
@@ -337,6 +350,31 @@ first place FlashInfer looks. The stock provider wheels can stay for the other
 kernels; the loader prefers the package-local module. No kernel source is
 redesigned, and no host binary or private overlay is copied into the image.
 
+The build keeps your job budget (`MAX_JOBS`) and your `CXX`, and it honours
+`CUDAHOSTCXX` for nvcc's host compiler. That honouring is a mapping, not a
+pass-through: FlashInfer builds nvcc's `-ccbin` from `CC` and never reads
+`CUDAHOSTCXX`, so a host compiler named only in `CUDAHOSTCXX` would be ignored and
+nvcc would bind whatever `CC` the environment carried. The step sets `CC` from
+`CUDAHOSTCXX` in the build subprocess environment alone, which leaves your shell
+and the C++/link compiler as they were, and keeps FlashInfer's own `CC` behaviour
+when `CUDAHOSTCXX` is unset. A build failure names the host compiler that was
+really used and repeats the compiler's own output, trimmed to its last 40 lines so
+the fatal diagnostic survives underneath Ninja's `build stopped` summary. This is what lets `CC=/usr/bin/gcc CUDAHOSTCXX=/usr/bin/g++-15` mean
+what it says on a CUDA 13.3 host whose default GCC is too new for the toolkit.
+
+The third input is not one of the fixes. Stock
+`flashinfer/data/csrc/nv_internal/cpp/common/memoryUtils.cu` asks for
+`<sanitizer/asan_interface.h>` unconditionally while using its macros only under
+the ASAN detection the file itself makes a few lines later, and compiler packages
+do not universally install that header: Fedora 44's gcc-15.3.1 package, which is
+the same package set the image installs, does not, and the SM120 compile stops at
+`common_memoryUtils.cuda.o`. The guard asks for the header under the condition the
+macros are used under, so a non-ASAN build needs nothing new while an ASAN build
+still requires, and still receives, the real header. It is carried as its own
+mailbox so the two accepted ones stay as reviewed, and it comes out when the pin
+ships the guard upstream or the build environment is defined to always install the
+sanitizer development headers.
+
 The MoE changes are the accepted fused-routing prologue and the two folded
 finalize/expansion passes, with `FLASHINFER_MOE_FUSED_PROLOGUE=0` as their
 kill switch. The GDN change is opt-in: the FP16-accumulate MMA mode of the
@@ -346,9 +384,10 @@ not change FlashInfer's own default, the online-FP8 choice or the 27B profile.
 
 ### Source and earlier wheels
 
-The exact v2.5.3 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
-This release uses updated Python/JIT sources on the existing dependency stack;
-no new prebuilt wheel is distributed. The optional NVMe reader is a separate
+The exact executable source of each release is recorded in
+[PROVENANCE.md](PROVENANCE.md). Releases that carry the FlashInfer SM120
+integration above use the pinned 0.7.0.post1 dependency set; no new prebuilt
+wheel is distributed. The optional NVMe reader is a separate
 isolated install and is not included in the main SGLang wheel.
 
 The earlier v2.1.2/v2.3 wheel from source `836206a0ad` has SHA-256

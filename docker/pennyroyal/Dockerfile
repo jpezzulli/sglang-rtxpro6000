@@ -61,11 +61,16 @@ RUN uv pip install --python .venv/bin/python --no-deps \
       'flashinfer-jit-cache-sm120f==0.7.0.post1+cu130'
 # Package the accepted FlashInfer SM120 source into the image's own FlashInfer
 # package and compile the fused-MoE module from those patched headers, exactly
-# as the native sequences do. The stock provider wheels stay for the other
+# as the native sequences do. The step hands nvcc the CUDAHOSTCXX above (g++-15)
+# as FlashInfer's -ccbin, which reads that setting from CC and would otherwise
+# override NVCC_CCBIN with the C driver; the image now builds the C++ and the CUDA
+# host side with the same GCC 15. The stock provider wheels stay for the other
 # kernels; FlashInfer prefers the package-local module below. Building here is
 # what lets a downloaded image run the Next profiles with no rebuild, no
 # configurator and no first-launch compilation; the JIT objects stay in the
-# build stage.
+# build stage. The step also guards one stock include of <sanitizer/...> that the
+# gcc15 package above does not ship, which is why the compile needs no sanitizer
+# development headers here either.
 RUN FLASHINFER_WORKSPACE_BASE=/tmp/penny-fi-sm120 \
     .venv/bin/python scripts/pennyroyal/flashinfer/install.py \
     && .venv/bin/python scripts/pennyroyal/flashinfer/install.py --check >/dev/null \

@@ -50,6 +50,7 @@ CONTROLLED = (
     "MAX_TOTAL_TOKENS",
     "SGLANG_MM_PREPROCESS_DEVICE",
     "SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR",
+    "FLASHINFER_GDN_FP16_ACCUM_MMA",
     "CUDA_VISIBLE_DEVICES",
     "FAKE_CUDA_DEVICES",
 )
@@ -188,6 +189,67 @@ def test_launcher_mounts_directories_and_runs_the_mounted_script(tmp_path):
     assert argv[argv.index("pennyroyal:test") + 1] == "exec"
     # A config outside the script's directory arrives as a container path.
     assert values_after(argv, "-e") == ["NIXL_CONFIG=/nixl-config/nixl conf.toml"]
+
+
+def test_next_profiles_default_the_accepted_gdn_mode(tmp_path):
+    # The accepted FlashInfer GDN fix is opted in per Next profile, in the
+    # launched process's own environment: the image recipe and the operator's
+    # mounted startup file both default it, an explicit opt-out survives, and
+    # the 27B profile never sees the variable at all. The mode also separates the
+    # persisted NIXL identity, because the two kernels write different numbers.
+    mounted = prepared_config(tmp_path, "start-flash-next.sh") / "start-flash-next.sh"
+    plain = prepared_config(tmp_path, "start-27b-dflash2.sh") / "start-27b-dflash2.sh"
+    for startup, via_entrypoint in (
+        (mounted, True),
+        (RECIPES / "serve-flash-next.sh", False),
+    ):
+        result, _, server_env, _ = launch(
+            tmp_path, startup, through_entrypoint=via_entrypoint
+        )
+        assert result.returncode == 0, (startup, result.stderr)
+        assert server_env["gdn_fp16_accum_mma"] == "1", startup
+        assert server_env["namespace"] != "unset", startup
+        modes = {"default": server_env["namespace"]}
+        for label, value in (("explicit on", "1"), ("off", "0"), ("unenabled", "true")):
+            result, _, env, _ = launch(
+                tmp_path,
+                startup,
+                through_entrypoint=via_entrypoint,
+                env={"FLASHINFER_GDN_FP16_ACCUM_MMA": value},
+            )
+            assert result.returncode == 0, (startup, result.stderr)
+            assert env["gdn_fp16_accum_mma"] == value, env
+            modes[label] = env["namespace"]
+        # Only the literal 1 enables the kernels, and only the resolved mode is
+        # cache identity: a value that does not enable must not fork the root.
+        assert modes["explicit on"] == modes["default"] != modes["off"], modes
+        assert modes["unenabled"] == modes["off"], modes
+        result, _, opted_out, _ = launch(
+            tmp_path,
+            startup,
+            through_entrypoint=via_entrypoint,
+            env={"FLASHINFER_GDN_FP16_ACCUM_MMA": "0"},
+        )
+        assert result.returncode == 0, (startup, result.stderr)
+        assert opted_out["gdn_fp16_accum_mma"] == "0", startup
+    for startup, via_entrypoint in (
+        (plain, True),
+        (RECIPES / "serve-qwen38-27b-dflash2.sh", False),
+    ):
+        result, _, server_env, _ = launch(
+            tmp_path, startup, through_entrypoint=via_entrypoint
+        )
+        assert result.returncode == 0, (startup, result.stderr)
+        assert server_env["gdn_fp16_accum_mma"] == "unset", startup
+        # The 27B namespace is untouched by the Next-only knob.
+        result, _, opted_out, _ = launch(
+            tmp_path,
+            startup,
+            through_entrypoint=via_entrypoint,
+            env={"FLASHINFER_GDN_FP16_ACCUM_MMA": "0"},
+        )
+        assert result.returncode == 0, (startup, result.stderr)
+        assert opted_out["namespace"] == server_env["namespace"], startup
 
 
 def test_launcher_default_startup_keeps_the_script_own_nixl_config(tmp_path):
@@ -402,6 +464,7 @@ def image_root(tmp_path: Path) -> tuple[Path, Path, Path]:
         'printf "max_running_requests=%s\\n" "${MAX_RUNNING_REQUESTS:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
         'printf "ple_backend=%s\\n" "${PENNY_PLE_BACKEND:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
         'printf "nccl_p2p_disable=%s\\n" "${NCCL_P2P_DISABLE:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
+        'printf "gdn_fp16_accum_mma=%s\\n" "${FLASHINFER_GDN_FP16_ACCUM_MMA:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
     )
     sglang.chmod(0o755)
     (root / "configs").symlink_to(REPO / "configs")
@@ -841,9 +904,10 @@ def test_a_generated_launch_forwards_the_saved_value_end_to_end(tmp_path):
         "LAUNCH_DIR": str(tmp_path / "generated"),
         "SGLANG_FORWARD_UNKNOWN_TOOLS": "false",
         # Saved but not one of the wizard's own keys: docker compose forwards
-        # these two today, so the generated launch must not lose them either.
+        # these today, so the generated launch must not lose them either.
         "PENNY_REASONING_EFFORT": "high",
         "NCCL_P2P_DISABLE": "1",
+        "FLASHINFER_GDN_FP16_ACCUM_MMA": "0",
         "TARGET_MODEL": "/models/penny-model",
     }
     env_file = tmp_path / "container.env"
@@ -903,8 +967,28 @@ def test_a_generated_launch_forwards_the_saved_value_end_to_end(tmp_path):
         server_argv, "--default-chat-template-kwargs"
     ), server_argv
     assert server_env["nccl_p2p_disable"] == "1", server_env
+    # The saved GDN opt-out survives the generated startup file's own default,
+    # which is the only reason to forward it.
+    assert server_env["gdn_fp16_accum_mma"] == "0", server_env
     # The profile's qualified flags are untouched by any of this.
     assert argv_after(server_argv, "--speculative-algorithm") == "NEXTN"
+
+    # Nothing forwarded either: the same generated file keeps its qualified
+    # default of 1 rather than honouring an absent setting.
+    unforwarded = {
+        k: v for k, v in passed_through.items() if k != "FLASHINFER_GDN_FP16_ACCUM_MMA"
+    }
+    assert "FLASHINFER_GDN_FP16_ACCUM_MMA" not in unforwarded
+    result, _, default_env, _ = launch(tmp_path, startup, env=unforwarded)
+    assert result.returncode == 0, result.stderr
+    assert default_env["gdn_fp16_accum_mma"] == "1", default_env
+    # Saved 0 and nothing saved are different representations of the recurrent
+    # prefill computation, so they must not land on one persisted NIXL root.
+    assert server_env["namespace"] != "unset", server_env
+    assert default_env["namespace"] != server_env["namespace"], (
+        default_env,
+        server_env,
+    )
 
 
 def test_native_recipes_take_the_same_disk_tier_switch(tmp_path):

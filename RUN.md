@@ -296,6 +296,19 @@ after relevant configuration or source changes.
 
 ## Optional Flash-Next precision and PLE placement
 
+Both Flash-Next recipes export `FLASHINFER_GDN_FP16_ACCUM_MMA=1`, which selects
+the FP16-accumulate MMA mode of the patched FlashInfer SM12x delta-rule prefill
+kernels (see
+[FlashInfer SM120 source integration](BUILD.md#flashinfer-sm120-source-integration)).
+The mode is part of the qualified Next profile: export
+`FLASHINFER_GDN_FP16_ACCUM_MMA=0` before launch, or change the line in the
+recipe or the mounted startup script, to run the kernels exactly as released.
+FlashInfer's own default stays off, the 27B/DFlash2 recipe never sets the
+variable, and its Triton GDN path and numerics are unchanged. The resolved mode is
+one of the NIXL namespace fields, so the two modes use separate persistent roots:
+nothing is deleted, and the root you leave behind stays as ordinary user-owned
+cache.
+
 The two v2.5.0 options are independent. The default recipe uses the original
 checkpoint precision and RAM-backed PLE:
 
@@ -404,7 +417,7 @@ export TARGET_MODEL=/path/to/RadixArk-Qwen3.8-Flash-Next-NVFP4
 | Target/native-MTP KV | FP8 E4M3 |
 | Speculation and context | Native NEXTN; 524,288-token YaRN context |
 | State and host cache | 24 Mamba slots; RecoverSSM `none`; 32 GiB HiCache; NIXL POSIX |
-| Linear attention | Explicit FlashInfer GDN decode/prefill |
+| Linear attention | Explicit FlashInfer GDN decode/prefill, FP16-accumulate MMA mode |
 
 The online-FP8 and PLE-placement options also apply to this recipe.
 
@@ -482,6 +495,16 @@ cache contents are untouched. Set `NUMPY_MADVISE_HUGEPAGE=1` before startup to
 restore NumPy's huge-page requests. NumPy reads the setting at import, so a
 change requires a server restart. A host-wide `always` policy can still supply
 huge pages.
+
+Both Flash-Next recipes export `FLASHINFER_GDN_FP16_ACCUM_MMA=1`, the accepted
+FP16-accumulate MMA mode of the patched FlashInfer SM12x delta-rule prefill
+kernels ([BUILD.md](BUILD.md#flashinfer-sm120-source-integration)). Export
+`FLASHINFER_GDN_FP16_ACCUM_MMA=0` before startup to opt out; in a container
+setup, saving or exporting that value reaches the generated launch the same way
+the other forwarded knobs do. FlashInfer's own default is off, the 27B/DFlash2
+recipe never sets it, and no other profile's numerics change. The recipes export
+it before the server starts, so changing it requires a restart, and the resolved
+mode is part of the NIXL cache identity.
 
 For Pennyroyal's thinking-enabled agentic use, the launcher defaults to medium
 reasoning effort. Chat Completions `reasoning_effort` takes precedence over
