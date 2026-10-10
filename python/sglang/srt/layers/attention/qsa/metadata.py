@@ -239,6 +239,86 @@ class QSAIndexerMetadata(msgspec.Struct, frozen=True):
         )
 
 
+# ---- The pending index-K ring's geometry, in one place.
+#
+# Ported from sgl-project/sglang PR 40143, "[Spec] QSA: let the pending
+# index-K ring hold more than one compression group" (aiueo52, 2026), plus
+# https://github.com/aiueo52/sglang-rtxpro6000 branch flash-next-fast (whose
+# ``get_qsa_pending_ring_size`` / ``req * ring + pos % ring`` generalization
+# was inspected while adopting the group shape; its page-parallel metadata
+# flags, RS/draft packages and prefill-pack divergence were not imported).
+#
+# A request's ring spans ``compress_ratio * num_groups`` slots. ``num_groups``
+# is the pool's launch capacity (QSATokenToKVPool derives it from the
+# resolved maximum draft-token window, once, at construction, because CUDA
+# graphs bind the ring buffers' owners for the graph's lifetime), so every
+# producer of slot indices -- the two eager builders below, the sparse
+# backend's call sites, the indexer's fallbacks and the in-graph row-metadata
+# kernel -- must read the count off the pool through ``pending_ring_groups``
+# and must size a run against ``pending_ring_groups_required``. A producer
+# that invents its own width silently reads another group's keys.
+
+
+def pending_ring_groups(pool) -> int:
+    """Ring groups the pool's pending index-K ring holds (1 without a ring).
+
+    Pools that carry no pre-compression ring (tokenwise QSA) and pools that
+    are not resolved yet keep the historical single-group layout.
+    """
+
+    return int(getattr(pool, "qsa_num_groups", 1))
+
+
+def pending_ring_groups_required(*, draft_tokens: int, compress_ratio: int) -> int:
+    """Groups a ring must hold to carry a ``draft_tokens``-wide verify window.
+
+    A speculative-paged forward publishes EVERY new position into the ring
+    before compressing any group it completes (the paged rows carry no
+    ``compress_member_rows``, so the extend path's consume-before-publish
+    protection does not run), and the first completed group may still read up
+    to ``compress_ratio - 1`` members retained from the private prefix. Those
+    live positions span the retained partial group plus the whole window; at
+    an unaligned start that covers ``(draft - 1) // ratio + 2`` distinct ring
+    groups -- one more than a bare window round-up gives. A window no wider
+    than one group (the shipped W4, and any non-speculative run) needs the
+    single-group layout: it is the layout the whole tree is qualified at, and
+    its inherited prefix-tail alias is preserved unchanged rather than
+    silently re-sized.
+    """
+
+    if compress_ratio < 1:
+        raise ValueError(
+            f"QSA pending ring needs a positive compress ratio, got {compress_ratio}"
+        )
+    if draft_tokens is None or draft_tokens <= 0:
+        return 1
+    if draft_tokens <= compress_ratio:
+        return 1
+    return (draft_tokens - 1) // compress_ratio + 2
+
+
+def pending_ring_slot(
+    requests: torch.Tensor,
+    positions: torch.Tensor,
+    *,
+    compress_ratio: int,
+    num_groups: int = 1,
+) -> torch.Tensor:
+    """Slot of ``positions`` in each request's pending index-K ring.
+
+    The ring holds ``num_groups`` groups of ``compress_ratio`` slots, so a
+    request owns ``compress_ratio * num_groups`` slots and position ``p``
+    lands in group ``(p // compress_ratio) % num_groups`` at offset
+    ``p % compress_ratio``. At ``num_groups == 1`` the group term vanishes
+    and this is the historical ``req * ratio + p % ratio``.
+    """
+    return (
+        requests * (compress_ratio * num_groups)
+        + ((positions // compress_ratio) % num_groups) * compress_ratio
+        + positions % compress_ratio
+    )
+
+
 def build_pending_ring_slots(
     *,
     token_to_batch_idx: torch.Tensor,
@@ -247,20 +327,24 @@ def build_pending_ring_slots(
     logical_positions: torch.Tensor,
     compress_ratio: int,
     is_extend: bool,
+    num_groups: int = 1,
 ) -> torch.Tensor:
-    """Per-token slots in the per-request pending ring.
+    """Per-token slots in the per-request pending ring (``num_groups`` groups).
 
-    ``req_pool_idx * ratio + position % ratio``: four consecutive positions
-    occupy four distinct slots, which is exactly the pending group. On extend
-    forwards only that pending tail must survive the forward (compression
-    sources members from the chunk itself), so older tokens dump into ring
-    rows [0, ratio) -- request slot 0 is never allocated. Pure tensor
-    arithmetic, CUDA-graph safe.
+    See ``pending_ring_slot`` for the addressing. On extend forwards only
+    the pending tail must survive the forward (compression sources members
+    from the chunk itself), so older tokens dump into ring rows [0, ratio):
+    request slot 0 is never allocated, so its whole
+    ``ratio * num_groups`` range is free and the dump stays disjoint from
+    every allocated request at any ``num_groups``. Pure tensor arithmetic,
+    CUDA-graph safe.
     """
     rows = token_to_batch_idx.long()[: logical_positions.numel()]
     requests = req_pool_indices.long()[rows]
     positions = logical_positions.long()
-    slots = requests * compress_ratio + positions % compress_ratio
+    slots = pending_ring_slot(
+        requests, positions, compress_ratio=compress_ratio, num_groups=num_groups
+    )
     if is_extend:
         lengths = sequence_lengths.long()[rows]
         pending = positions >= (lengths // compress_ratio) * compress_ratio
@@ -274,8 +358,15 @@ def build_group_ring_slots(
     group_end_positions: torch.Tensor,
     sequence_ids: torch.Tensor,
     compress_ratio: int,
+    num_groups: int = 1,
 ) -> torch.Tensor:
-    """Ring slots of a planned group's members, oldest first."""
+    """Ring slots of a planned group's members, oldest first.
+
+    The group index comes from ``group_end_positions``, not from each
+    member's own position, so a group stays in one ring group even when its
+    end is not ``ratio``-aligned (the graph producer feeds ``lengths - 1``,
+    which is aligned only on boundary rows).
+    """
     requests = req_pool_indices.long()[sequence_ids]
     offsets = torch.arange(
         compress_ratio - 1,
@@ -285,7 +376,12 @@ def build_group_ring_slots(
         dtype=torch.long,
     )
     positions = (group_end_positions[:, None] - offsets[None, :]).clamp_min(0)
-    return requests[:, None] * compress_ratio + positions % compress_ratio
+    group = (group_end_positions.long() // compress_ratio) % num_groups
+    return (
+        requests[:, None] * (compress_ratio * num_groups)
+        + group[:, None] * compress_ratio
+        + positions % compress_ratio
+    )
 
 
 def build_rope_position_matrix(
@@ -332,6 +428,9 @@ def compressed_decode_view(
 __all__ = [
     "QSAIndexerMetadata",
     "build_qsa_row_ranges",
+    "pending_ring_groups",
+    "pending_ring_groups_required",
+    "pending_ring_slot",
     "build_pending_ring_slots",
     "build_group_ring_slots",
     "build_rope_position_matrix",

@@ -34,6 +34,8 @@ from sglang.srt.layers.attention.qsa.metadata import (
     build_qsa_row_ranges,
     build_rope_position_matrix,
     compressed_decode_view,
+    pending_ring_groups,
+    pending_ring_groups_required,
 )
 from sglang.srt.layers.attention.qsa.sparse_attn import (
     qwen_sparse_fa2_cu_seqlens_triton,
@@ -277,6 +279,17 @@ class QwenSparseAttnBackend(AttentionBackend):
             return False
         return forward_mode.is_target_verify() or forward_mode.is_draft_extend_v2()
 
+    @property
+    def _pending_ring_groups(self) -> int:
+        """Groups the pending index-K ring holds; the pool fixes this at construction.
+
+        Read defensively: a backend built before its pool resolves (the capture
+        path, and every ``__new__``-style harness) has no pool to ask, and the
+        single-group layout is the right answer for it -- the guard then refuses
+        any window wider than one group rather than raising AttributeError.
+        """
+        return pending_ring_groups(getattr(self, "token_to_kv_pool", None))
+
     @staticmethod
     def _can_use_qsa_prefill_all_visible(
         max_length: int,
@@ -296,13 +309,27 @@ class QwenSparseAttnBackend(AttentionBackend):
                 "Qwen QSA target verification supports only " "speculative_eagle_topk=1"
             )
         draft_tokens = int(getattr(spec_info, "draft_token_num", 0) or 0)
-        if draft_tokens > self.compress_ratio:
-            # The pending-group ring keys state by position % ratio; a verify
-            # window wider than the ratio would collide within one forward.
+        # One span model for both sides of the ring: the pool sized its group
+        # count off the resolved LAUNCH-MAXIMUM draft-token window (with
+        # headroom for the retained prefix a partial group may still read), so
+        # a verify window is legal exactly when the groups it needs are among
+        # the groups the allocation holds. W4 -> 1 group (the shipped layout,
+        # bit-for-bit), W8 -> 3, W16 -> 5 at ratio 4. Asking for a window wider
+        # than the launch capacity -- an active width the ring was never sized
+        # for, which would alias two live positions onto one slot -- is the
+        # only thing that raises here.
+        required = pending_ring_groups_required(
+            draft_tokens=draft_tokens, compress_ratio=self.compress_ratio
+        )
+        groups = self._pending_ring_groups
+        if required > groups:
             raise NotImplementedError(
-                "Qwen QSA requires speculative_num_draft_tokens <= the QSA "
-                f"compress ratio ({self.compress_ratio}): the pending "
-                f"index-key ring holds one group; got {draft_tokens}"
+                "Qwen QSA requires a verify window the pending index-key ring "
+                f"can hold: {draft_tokens} draft tokens need {required} ring "
+                f"groups at compress ratio {self.compress_ratio}, the QSA pool "
+                f"holds {groups}; raise the launch maximum draft-token count "
+                "(speculative_num_draft_tokens / the adaptive candidate table) "
+                "so the ring is sized for every width the run can select"
             )
 
     @staticmethod
@@ -848,6 +875,7 @@ class QwenSparseAttnBackend(AttentionBackend):
                     logical_positions=ring_logical_positions,
                     compress_ratio=self.compress_ratio,
                     is_extend=group_member_rows is not None,
+                    num_groups=self._pending_ring_groups,
                 )
                 if write_locs.numel():
                     if group_member_rows is not None:
@@ -857,6 +885,7 @@ class QwenSparseAttnBackend(AttentionBackend):
                                 group_end_positions=group_positions.long(),
                                 sequence_ids=group_sequence_ids.long(),
                                 compress_ratio=self.compress_ratio,
+                                num_groups=self._pending_ring_groups,
                             )
                             # RoPE coordinates are shared across QSA layers,
                             # while pending keys are per layer. Snapshot the
@@ -879,6 +908,7 @@ class QwenSparseAttnBackend(AttentionBackend):
                             group_end_positions=group_positions.long(),
                             sequence_ids=group_sequence_ids.long(),
                             compress_ratio=self.compress_ratio,
+                            num_groups=self._pending_ring_groups,
                         )
         prefill_compressed_cu_seqlens = None
         prefill_row_starts = None
@@ -1103,9 +1133,11 @@ class QwenSparseAttnBackend(AttentionBackend):
         spec_info,
     ) -> None:
         self._require_compressed_cuda_graph_support()
-        self._require_chain_speculation(forward_mode, spec_info)
+        # The chain-speculation guard reads the ring's group count off the
+        # pool, so resolve the pool before the guard runs.
         if self.token_to_kv_pool is None:
             self.token_to_kv_pool = getattr(self.runner, "token_to_kv_pool", None)
+        self._require_chain_speculation(forward_mode, spec_info)
         if self.req_to_token is None:
             req_pool = getattr(self.runner, "req_to_token_pool", None)
             self.req_to_token = getattr(req_pool, "req_to_token", None)
@@ -1373,6 +1405,7 @@ class QwenSparseAttnBackend(AttentionBackend):
                 logical_positions=current_positions,
                 compress_ratio=ratio,
                 is_extend=False,
+                num_groups=pending_ring_groups(pool),
             )
         )
         metadata.graph_ring_group_locs.copy_(
@@ -1381,6 +1414,7 @@ class QwenSparseAttnBackend(AttentionBackend):
                 group_end_positions=current_positions,
                 sequence_ids=metadata.token_to_batch_idx.long(),
                 compress_ratio=ratio,
+                num_groups=pending_ring_groups(pool),
             ).to(torch.int32)
         )
 
