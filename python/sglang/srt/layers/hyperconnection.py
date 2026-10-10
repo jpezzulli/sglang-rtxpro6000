@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from sglang.srt.layers.hc_mix2_triton import hc_norm_mix2, hc_norm_mix2_supported
 from sglang.srt.layers.hc_mix_triton import fused_hc_mix, fused_hc_mix_supported
 
 
@@ -249,6 +250,33 @@ class GatedResidual(HyperConnectionBase):
                 (*hyper_input.shape[:-1], self.hidden_size), dtype=self.params_dtype
             )
             return mixed_input, (hyper_input, hyper_input)
+
+        # Donor HC MIX2: one launch each for the per-branch norm, the split-K
+        # down projection and the up projection, reading the resident rowwise
+        # FP8 mix weights and their row scales as they stand. Resolved per call
+        # (a weight update replaces Parameter and scales together) and checked
+        # before the separate normalization below, because K0 *is* that
+        # normalization; it hands back the same (hyper_input, normed) residuals
+        # the combine path consumes.
+        w_down = self.input_mix_weight_down.weight
+        w_up = self.input_mix_weight_up.weight
+        norm_w = self.hc_norm.weight
+        if hc_norm_mix2_supported(
+            hyper_input, norm_w, w_down, w_up, self.hc_count, self.hidden_size
+        ):
+            mixed_input, hyper_input_normed = hc_norm_mix2(
+                hyper_input,
+                norm_w,
+                self.hc_norm.variance_epsilon,
+                w_down,
+                w_up,
+                self.hc_count,
+                self.hidden_size,
+            )
+            return mixed_input.to(self.params_dtype), (
+                hyper_input,
+                hyper_input_normed,
+            )
 
         if self.config.hc_per_branch_norm:
             hyper_input_normed = self.hc_norm(hyper_input)

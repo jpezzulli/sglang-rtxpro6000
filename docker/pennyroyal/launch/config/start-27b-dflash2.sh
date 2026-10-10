@@ -37,7 +37,9 @@ NIXL=on
 # ----------------------------------------------------------------------------
 
 export NUMPY_MADVISE_HUGEPAGE=0
-export SGLANG_FORWARD_UNKNOWN_TOOLS=true
+# The launcher may forward the operator's saved choice; unset keeps the
+# qualified default, exactly like configs/pennyroyal/serve-flash-next.sh.
+export SGLANG_FORWARD_UNKNOWN_TOOLS="${SGLANG_FORWARD_UNKNOWN_TOOLS:-true}"
 case "$SGLANG_MM_PREPROCESS_DEVICE" in
   cpu) IMAGE_PROCESSOR_BACKEND=pil ;;
   cuda:*) IMAGE_PROCESSOR_BACKEND=torchvision ;;

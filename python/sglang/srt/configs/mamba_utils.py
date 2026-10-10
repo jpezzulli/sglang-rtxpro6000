@@ -150,6 +150,65 @@ class BaseLinearStateParams(ABC):
             )
         return per_layer * len(self.layers)
 
+    def intermediate_ssm_bytes_per_slot(self, draft_tokens: int) -> int:
+        """Bytes of the per-draft-token SSM snapshot scratch per *spec-decode slot*
+        (all layers). Mirrors the ``MambaPool`` allocation
+        ``[num_layers, spec_slots, draft_tokens, *temporal]`` in the SSM dtype, so
+        ``spec_slots * this`` is the buffer's footprint. Not part of
+        ``mamba_cache_per_req`` (which counts the committed state once per request
+        slot), and only allocated by the modes that keep the snapshots -- see
+        ``MambaPool.__init__`` (dropped under ReplaySSM / gdn_mtp_cache_mode=none).
+        """
+        if draft_tokens <= 0:
+            return 0
+        return (
+            int(np.prod(self.shape.temporal))
+            * self.dtype.temporal.itemsize
+            * len(self.layers)
+            * draft_tokens
+        )
+
+    def intermediate_conv_window_bytes_per_slot(
+        self, draft_tokens: int, *, dedup: bool
+    ) -> int:
+        """Bytes of the per-draft-token conv windows per *spec-decode slot* (all
+        layers), the accepted conv-state rollback buffers that STAY allocated in
+        every spec mode (including the two that drop the SSM snapshots above).
+
+        MUST mirror the ``MambaPool`` allocation: ``dedup`` selects the overlapping
+        ``as_strided`` layout -- one physical ``[dim, draft + K - 2]`` buffer per
+        (layer, slot) instead of ``draft`` separate ``[dim, K - 1]`` windows --
+        which the CUDA linear-chain path uses; the dense layout is what NPU / CPU,
+        tree verify, KDA and the unified pool allocate.
+        """
+        if draft_tokens <= 0:
+            return 0
+        conv_numel = 0
+        for conv_shape in self.shape.conv:
+            if not dedup:
+                conv_numel += int(np.prod(conv_shape)) * draft_tokens
+                continue
+            axis = self._conv_window_axis(conv_shape)
+            other_dims = int(
+                np.prod([d for i, d in enumerate(conv_shape) if i != axis])
+            )
+            conv_numel += other_dims * (conv_shape[axis] + draft_tokens - 1)
+        return conv_numel * self.dtype.conv.itemsize * len(self.layers)
+
+    def _conv_window_axis(self, conv_shape: tuple) -> int:
+        """Sliding-window axis of a conv state (the trailing one for the standard
+        ``(dim, K-1)`` layout). Mirrors ``MambaPool._detect_conv_window_axis``."""
+        window_len = self.shape.conv_kernel - 1
+        if conv_shape[-1] == window_len:
+            return len(conv_shape) - 1
+        if conv_shape[0] == window_len:
+            return 0
+        raise ValueError(
+            f"conv_state shape {conv_shape} has no axis of length "
+            f"conv_kernel-1={window_len}; the deduplicated conv-window layout "
+            "cannot be sized for it."
+        )
+
     @property
     def is_kda(self) -> bool:
         """KDA per-K-channel gate vs GDN/Mamba2 per-head scalar gate. Selects

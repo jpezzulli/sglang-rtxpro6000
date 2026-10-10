@@ -81,6 +81,12 @@ class MambaComponent(TreeComponent):
         self.mamba_max_states_per_path = get_exec().mamba.mamba_max_states_per_path
         # HiCache state
         self._mamba_pool_host = None  # set to host mamba pool when HiCache enabled
+        self._resume_leases: dict[str, dict[int, bool]] = {}
+        self._resume_pins: dict[str, dict[str, int]] = {}
+        # node id -> {session id: session generation} waiting for a durable
+        # host backup. Several sessions can share one device-only checkpoint,
+        # so keep every eligible owner and cancel them independently.
+        self._pending_resume_backup: dict[int, dict[str, int]] = {}
 
     def needs_incremental_backup(self, node: UnifiedTreeNode) -> bool:
         data = node.component_data[self.component_type]
@@ -119,6 +125,488 @@ class MambaComponent(TreeComponent):
         if fallback is not None:
             self._inc_session_coverage(session_id, fallback)
 
+    def register_session_leaf(
+        self, session_id: str, leaf: Optional[UnifiedTreeNode]
+    ) -> None:
+        """Drop a branch this session left behind when the new leaf diverges.
+
+        A continuing turn keeps the previous leaf as an ancestor, and that
+        checkpoint stays. A fork leaves the previous leaf as a sibling. Its
+        host Mamba, and the ancestors strictly below the shared node, will
+        not be resumed.
+        """
+        if (
+            self.tree_core is not None
+            and self.tree_core.enable_session_radix_cache
+            and leaf is not None
+            and leaf is not self.tree_core.root_node
+        ):
+            for old in tuple(self._session_leaves.get(session_id, ())):
+                if old is leaf or self._node_is_ancestor(old, leaf):
+                    continue
+                self._drop_abandoned_tail(
+                    session_id,
+                    old,
+                    self._lowest_common_ancestor(old, leaf),
+                    "fork",
+                )
+            # A fork drops the deeper abandoned pin, and cache_finished_req notes
+            # the insert before registering the leaf, so the forward-depth guard
+            # had not let this shallower durable checkpoint take the pin yet.
+            if leaf.component_data[self.component_type].host_value is not None:
+                self._pin_resume(session_id, leaf, "commit")
+        super().register_session_leaf(session_id, leaf)
+
+    def release_session(self, session_id: str) -> int:
+        if self.tree_core is not None and self.tree_core.enable_session_radix_cache:
+            for leaf in tuple(self._session_leaves.get(session_id, ())):
+                stop = self._shared_prefix_stop(leaf, session_id)
+                if stop is None:
+                    continue
+                self._drop_abandoned_tail(session_id, leaf, stop, "close")
+        indexed = super().release_session(session_id)
+        self._release_resume_leases(session_id)
+        return indexed
+
+    def _resume_tracker(self):
+        return getattr(self.cache, "session_refs", None)
+
+    def _pin_session_id(self, req: Optional[Req]) -> Optional[str]:
+        tracker = self._resume_tracker()
+        if tracker is None or req is None:
+            return None
+        return tracker.current_pin_session_id(req)
+
+    def _try_node(self, node_id: int) -> Optional[UnifiedTreeNode]:
+        try:
+            return self.tree_core.node_by_id(node_id)
+        except (KeyError, IndexError):
+            return None
+
+    def _lease_log(
+        self, op: str, pin: str, session_id: str, node: UnifiedTreeNode
+    ) -> None:
+        held = sum(
+            1 for locked in self._resume_leases.get(session_id, {}).values() if locked
+        )
+        logger.info(
+            "mamba host lease op=%s pin=%s session=%s node=%s depth=%s held=%s",
+            op,
+            pin,
+            session_id,
+            node.id,
+            self._token_depth(node),
+            held,
+        )
+
+    def _pin_label(self, session_id: str, node_id: int) -> str:
+        pins = self._resume_pins.get(session_id, {})
+        names = [name for name, pinned in pins.items() if pinned == node_id]
+        return "+".join(names) if names else "released"
+
+    def _needed_resume_nodes(self, session_id: str) -> set[int]:
+        return set(self._resume_pins.get(session_id, {}).values())
+
+    def _resume_sessions_for(self, node: UnifiedTreeNode) -> list[str]:
+        return [
+            session_id
+            for session_id, pins in self._resume_pins.items()
+            if node.id in pins.values()
+        ]
+
+    def _host_lock_resume(
+        self,
+        session_id: str,
+        node: UnifiedTreeNode,
+        pin: str,
+    ) -> bool:
+        """Hold this session's Mamba host lock on one resume snapshot.
+
+        Match scans repeat every scheduler tick, so a session locks a node once.
+        The lock is this component's host_lock_ref only. acquire removes a
+        host-only node from the host LRU, but the tree sanity check requires
+        every host-only Mamba node to stay in that list. Eviction skips
+        host_lock_ref, so put the node back after the lock is held.
+        """
+        if node is self.tree_core.root_node:
+            return False
+        cd = node.component_data[self.component_type]
+        if cd.host_value is None:
+            return False
+        leases = self._resume_leases.setdefault(session_id, {})
+        if not leases.get(node.id):
+            self.acquire_component_lock(node, IncLockRefResult(), lock_host=True)
+            if cd.host_lock_ref <= 0:
+                return False
+            leases[node.id] = True
+        if cd.value is None:
+            host_lru = self.tree_core.host_lru_lists[self.component_type]
+            if host_lru.in_list(node):
+                host_lru.reset_node_mru(node)
+            else:
+                host_lru.insert_mru(node)
+        # A host lock makes the node not an H-leaf. Demote updates the leaf
+        # set while the lock is held, so release has to put the node back.
+        self.tree_core._update_evictable_leaf_sets(node)
+        return True
+
+    def _host_unlock_resume(
+        self,
+        session_id: str,
+        node: UnifiedTreeNode,
+        pin: str,
+    ) -> None:
+        leases = self._resume_leases.get(session_id)
+        if not leases or node.id not in leases:
+            return
+        held = leases.pop(node.id)
+        if not leases:
+            self._resume_leases.pop(session_id, None)
+        cd = node.component_data[self.component_type]
+        if held and cd.host_lock_ref > 0:
+            self.release_component_lock(node, None, lock_host=True)
+            self.tree_core._update_evictable_leaf_sets(node)
+        self._lease_log("release", pin, session_id, node)
+
+    def _gc_resume(self, session_id: str) -> None:
+        needed = self._needed_resume_nodes(session_id)
+        leases = self._resume_leases.get(session_id)
+        if not leases:
+            return
+        for node_id in list(leases):
+            if node_id in needed:
+                continue
+            node = self._try_node(node_id)
+            if node is None:
+                leases.pop(node_id, None)
+                continue
+            self._host_unlock_resume(session_id, node, "released")
+
+    def _pin_resume(self, session_id: str, node: UnifiedTreeNode, pin: str) -> None:
+        """Lock node as this session's match or commit pin.
+
+        The pin moves only forward in token depth, and only after the host
+        lock is held. A shallower match tick, or an insert whose host backup
+        is not durable yet, leaves the previous checkpoint locked.
+        """
+        if node is None or node is self.tree_core.root_node:
+            return
+        pins = self._resume_pins.setdefault(session_id, {})
+        leases = self._resume_leases.get(session_id, {})
+        already = pins.get(pin) == node.id and bool(leases.get(node.id))
+        current_id = pins.get(pin)
+        current = self._try_node(current_id) if current_id is not None else None
+        dropped_dead = False
+        if current_id is not None and current is None:
+            pins.pop(pin, None)
+            dropped_dead = True
+        elif current is not None and self._token_depth(node) < self._token_depth(
+            current
+        ):
+            return
+        if not self._host_lock_resume(session_id, node, pin):
+            if dropped_dead:
+                self._gc_resume(session_id)
+            return
+        pins[pin] = node.id
+        self._gc_resume(session_id)
+        if not already:
+            self._lease_log("acquire", pin, session_id, node)
+
+    def _promote_pending_backup(self, node: UnifiedTreeNode, *, durable: bool) -> None:
+        """Settle every owner waiting on this node's host backup.
+
+        Pending ownership is per session, so a backup settles them all and one
+        session's re-insert must not silently drop the others' promise.
+        """
+        owners = self._pending_resume_backup.pop(node.id, None) or {}
+        tracker = self._resume_tracker()
+        if not durable or tracker is None:
+            return
+        for session_id, generation in owners.items():
+            if tracker.pin_still_current(session_id, generation):
+                self._pin_resume(session_id, node, "commit")
+
+    def _note_inserted_resume(
+        self,
+        req: Optional[Req],
+        insert_result: Optional[InsertResult],
+    ) -> None:
+        """Pin the newest durable host checkpoint. Do not move the match pin."""
+        session_id = self._pin_session_id(req)
+        if session_id is None or insert_result is None:
+            return
+        node_ref = insert_result.last_device_node
+        node_id = getattr(node_ref, "id", node_ref)
+        try:
+            node_id = int(node_id)
+        except (TypeError, ValueError):
+            return
+        node = self._try_node(node_id)
+        if node is None or node is self.tree_core.root_node:
+            return
+        cd = node.component_data[self.component_type]
+        if cd.host_value is None and cd.value is None:
+            return
+        if cd.host_value is not None:
+            self._promote_pending_backup(node, durable=True)
+            self._pin_resume(session_id, node, "commit")
+            return
+        self._pending_resume_backup.setdefault(node.id, {})[
+            session_id
+        ] = req.session_generation
+
+    def _release_resume_leases(self, session_id: str) -> None:
+        self._resume_pins.pop(session_id, None)
+        for node_id in list(self._resume_leases.get(session_id, {})):
+            node = self._try_node(node_id)
+            if node is None:
+                leases = self._resume_leases.get(session_id)
+                if leases is not None:
+                    leases.pop(node_id, None)
+                continue
+            self._host_unlock_resume(session_id, node, "released")
+        self._resume_leases.pop(session_id, None)
+        for node_id, owners in list(self._pending_resume_backup.items()):
+            owners.pop(session_id, None)
+            if not owners:
+                self._pending_resume_backup.pop(node_id, None)
+
+    def _node_is_ancestor(
+        self, ancestor: UnifiedTreeNode, node: UnifiedTreeNode
+    ) -> bool:
+        root = self.tree_core.root_node
+        cur = node
+        while cur is not None and cur is not root:
+            if cur is ancestor:
+                return True
+            cur = cur.parent
+        return False
+
+    def _lowest_common_ancestor(
+        self, left: UnifiedTreeNode, right: UnifiedTreeNode
+    ) -> UnifiedTreeNode:
+        seen: set[int] = set()
+        cur: Optional[UnifiedTreeNode] = left
+        while cur is not None:
+            seen.add(id(cur))
+            cur = cur.parent
+        cur = right
+        while cur is not None:
+            if id(cur) in seen:
+                return cur
+            cur = cur.parent
+        return self.tree_core.root_node
+
+    def _shared_prefix_stop(
+        self, leaf: UnifiedTreeNode, session_id: str
+    ) -> Optional[UnifiedTreeNode]:
+        """Nearest ancestor another branch or session still uses.
+
+        None means this chain never forked. The whole chain may still be a
+        shared prompt prefix, so host Mamba stays for ordinary eviction.
+        """
+        cur: Optional[UnifiedTreeNode] = leaf
+        root = self.tree_core.root_node
+        while cur is not None and cur is not root:
+            parent = cur.parent
+            if parent is None:
+                return None
+            if len(parent.children) > 1:
+                return parent
+            if parent is not root:
+                cd = parent.component_data[self.component_type]
+                session_ids = cd.session_ids or ()
+                if any(other != session_id for other in session_ids):
+                    return parent
+                if any(
+                    other != session_id for other in self._resume_sessions_for(parent)
+                ):
+                    return parent
+            cur = parent
+        return None
+
+    def _drop_blocked(
+        self,
+        node: UnifiedTreeNode,
+        session_id: str,
+        origin: UnifiedTreeNode,
+    ) -> bool:
+        """A lock, or another session's pin or marker, ends the drop walk."""
+        cd = node.component_data[self.component_type]
+        if cd.lock_ref > 0:
+            return True
+        if any(other != session_id for other in self._resume_sessions_for(node)):
+            return True
+        session_ids = cd.session_ids or ()
+        if any(other != session_id for other in session_ids):
+            return True
+        if node is not origin and session_id in session_ids:
+            return True
+        own_lock = bool(self._resume_leases.get(session_id, {}).get(node.id))
+        return cd.host_lock_ref > int(own_lock)
+
+    def _tail_below(
+        self,
+        leaf: UnifiedTreeNode,
+        stop: UnifiedTreeNode,
+        session_id: str,
+    ) -> list[UnifiedTreeNode]:
+        path: list[UnifiedTreeNode] = []
+        cur: Optional[UnifiedTreeNode] = leaf
+        root = self.tree_core.root_node
+        while cur is not None and cur is not stop and cur is not root:
+            if self._drop_blocked(cur, session_id, leaf):
+                break
+            path.append(cur)
+            cur = cur.parent
+        return path
+
+    def _descendants_until_block(
+        self, leaf: UnifiedTreeNode, session_id: str
+    ) -> list[UnifiedTreeNode]:
+        found: list[UnifiedTreeNode] = []
+        pending = list(leaf.children.values())
+        while pending:
+            node = pending.pop()
+            if self._drop_blocked(node, session_id, leaf):
+                continue
+            found.append(node)
+            pending.extend(node.children.values())
+        return found
+
+    def _clear_session_leaf(self, session_id: str, leaf: UnifiedTreeNode) -> None:
+        leaves = self._session_leaves.get(session_id)
+        if not leaves or leaf not in leaves:
+            return
+        cd = leaf.component_data[self.component_type]
+        if cd.session_ids is None or session_id not in cd.session_ids:
+            return
+        if cd.session_ref > 0:
+            self._dec_session_coverage(session_id, leaf)
+        self._unmark_session_leaf(session_id, leaf)
+
+    def _release_own_pin(self, session_id: str, node: UnifiedTreeNode) -> None:
+        pins = self._resume_pins.get(session_id)
+        if pins:
+            for name, node_id in list(pins.items()):
+                if node_id == node.id:
+                    pins.pop(name, None)
+            if not pins:
+                self._resume_pins.pop(session_id, None)
+        pending = self._pending_resume_backup.get(node.id)
+        if pending is not None:
+            pending.pop(session_id, None)
+            if not pending:
+                self._pending_resume_backup.pop(node.id, None)
+        self._host_unlock_resume(session_id, node, "released")
+
+    def _tombstone_mamba_host(
+        self, session_id: str, nodes: list[UnifiedTreeNode]
+    ) -> list[int]:
+        device_frees: dict[ComponentType, list] = defaultdict(list)
+        host_frees: dict[ComponentType, list] = defaultdict(list)
+        tracker: dict[ComponentType, int] = defaultdict(int)
+        dropped: list[int] = []
+        try:
+            for node in nodes:
+                # This session no longer resumes from these nodes, so drop its
+                # own pins and pending backup ownership first. A device-only
+                # node has no host copy to tombstone, but a backup that lands
+                # later would otherwise repin the abandoned branch.
+                self._release_own_pin(session_id, node)
+                cd = node.component_data[self.component_type]
+                if cd.host_value is None:
+                    continue
+                if self._drop_blocked(node, session_id, nodes[0]):
+                    continue
+                if cd.host_value is None or cd.host_lock_ref > 0 or cd.lock_ref > 0:
+                    continue
+                self.tree_core._evict_component_and_detach_lru(
+                    node,
+                    self,
+                    target=EvictLayer.HOST,
+                    tracker=tracker,
+                    device_frees=device_frees,
+                    host_frees=host_frees,
+                )
+                # Leaf cascade flattens every component to the same priority
+                # and would free KV host. Interior Mamba eviction does not.
+                if node not in self.tree_core.evictable_host_leaves:
+                    self.tree_core._cascade_evict(
+                        node,
+                        self,
+                        tracker,
+                        device_frees=device_frees,
+                        host_frees=host_frees,
+                        target=EvictLayer.HOST,
+                    )
+                self.tree_core._update_evictable_leaf_sets(node)
+                dropped.append(node.id)
+        finally:
+            self.cache._free_values(device_frees, host_frees)
+        return dropped
+
+    def _abandoned_chain(
+        self, leaf: UnifiedTreeNode, stop: UnifiedTreeNode
+    ) -> list[UnifiedTreeNode]:
+        """Every node below the fork point this session no longer resumes from.
+
+        Deliberately blind to locks and other owners: whether a host copy is
+        reclaimable right now is its own bounded eviction decision, and an
+        ordinary lock must not decide who still owns a resume checkpoint.
+        """
+        chain: list[UnifiedTreeNode] = []
+        cur: Optional[UnifiedTreeNode] = leaf
+        root = self.tree_core.root_node
+        while cur is not None and cur is not stop and cur is not root:
+            chain.append(cur)
+            cur = cur.parent
+        pending = list(leaf.children.values())
+        while pending:
+            node = pending.pop()
+            chain.append(node)
+            pending.extend(node.children.values())
+        return chain
+
+    def _drop_abandoned_tail(
+        self,
+        session_id: str,
+        leaf: UnifiedTreeNode,
+        stop: Optional[UnifiedTreeNode],
+        reason: str,
+    ) -> None:
+        if stop is None or leaf is stop:
+            return
+        # Retire this session's pins, host leases, pending backup ownership and
+        # leaf registration across the whole abandoned branch first, whatever
+        # the host drop can reach. Another owner's pin or an ordinary lock keeps
+        # the shared host data alive; it does not keep this session's obsolete
+        # pin, its late backup callback or its marker in the session partition.
+        for node in self._abandoned_chain(leaf, stop):
+            self._release_own_pin(session_id, node)
+        self._clear_session_leaf(session_id, leaf)
+        path = self._tail_below(leaf, stop, session_id)
+        if not path:
+            return
+        nodes = list(path)
+        if path[0] is leaf:
+            nodes.extend(self._descendants_until_block(leaf, session_id))
+        dropped = self._tombstone_mamba_host(session_id, nodes)
+        if not dropped:
+            return
+        used, total = self._mamba_host_slot_counts()
+        logger.info(
+            "mamba host drop reason=%s session=%s nodes=%s depth=%s used=%s total=%s stop=%s",
+            reason,
+            session_id,
+            len(dropped),
+            self._token_depth(leaf),
+            used,
+            total,
+            stop.id,
+        )
+
     def refresh_lru(
         self,
         phase: LRURefreshPhase,
@@ -138,6 +626,11 @@ class MambaComponent(TreeComponent):
             case LRURefreshPhase.MATCH_END:
                 if node.component_data[ct].value is not None:
                     self.tree_core.lru_lists[ct].reset_node_mru(node)
+                host_lru = self.tree_core.host_lru_lists[ct]
+                if node.component_data[ct].host_value is not None and host_lru.in_list(
+                    node
+                ):
+                    host_lru.reset_node_mru(node)
             case LRURefreshPhase.INSERT_END:
                 return
             case _:
@@ -185,6 +678,10 @@ class MambaComponent(TreeComponent):
             result = result._replace(
                 mamba_host_hit_length=max(result.mamba_host_hit_length, 1)
             )
+
+        session_id = self._pin_session_id(params.req)
+        if session_id is not None and last_node is not None:
+            self._pin_resume(session_id, last_node, "match")
 
         return result._replace(mamba_branching_seqlen=branching_seqlen)
 
@@ -356,7 +853,13 @@ class MambaComponent(TreeComponent):
             and cd.value is None
             and cd.host_value is not None
         ):
-            if not host_lru.in_list(node):
+            sessions = self._resume_sessions_for(node)
+            if sessions:
+                for session_id in sessions:
+                    self._host_lock_resume(
+                        session_id, node, self._pin_label(session_id, node.id)
+                    )
+            elif not host_lru.in_list(node):
                 host_lru.insert_mru(node)
 
         return freed, host_freed
@@ -649,6 +1152,7 @@ class MambaComponent(TreeComponent):
         insert_result: Optional[InsertResult] = None,
         insert_params: Optional[InsertParams] = None,
     ) -> None:
+        self._note_inserted_resume(req, insert_result)
         if is_finished:
             mamba_value_inserted = (
                 insert_result is not None and not insert_result.mamba_exist
@@ -830,6 +1334,7 @@ class MambaComponent(TreeComponent):
                 cd = node.component_data[ct]
                 if cd.host_value is None:
                     cd.host_value = transfers[0].host_indices.clone()
+                self._promote_pending_backup(node, durable=cd.host_value is not None)
 
         elif phase == CacheTransferPhase.LOAD_BACK:
             if not transfers:
@@ -884,6 +1389,27 @@ class MambaComponent(TreeComponent):
             if insert_result is not None:
                 insert_result.mamba_exist = False
 
+    def _token_depth(self, node: UnifiedTreeNode) -> int:
+        depth = 0
+        root = self.tree_core.root_node
+        cur = node
+        while cur is not None and cur is not root:
+            if cur.key is not None:
+                depth += len(cur.key)
+            cur = cur.parent
+        return depth
+
+    def _path_tail_depth(self, node: UnifiedTreeNode) -> int:
+        cur = node
+        while len(cur.children) == 1:
+            cur = next(iter(cur.children.values()))
+        return self._token_depth(cur)
+
+    def _mamba_host_slot_counts(self) -> tuple[int, int]:
+        pool = self.cache.host_pool_group.get_pool(PoolName.MAMBA)
+        total = int(pool.size)
+        return total - int(pool.available_size()), total
+
     def drive_host_eviction(
         self,
         num_tokens: int,
@@ -897,9 +1423,24 @@ class MambaComponent(TreeComponent):
         ct = self.component_type
         host_lru = self.tree_core.host_lru_lists[ct]
         while tracker[ct] < num_tokens:
-            x = self._select_host_eviction_candidate(host_lru)
+            x, kind = self._select_host_eviction_candidate(host_lru)
             if x is None:
                 break
+            used, total = self._mamba_host_slot_counts()
+            logger.info(
+                "mamba host reclaim kind=%s depth=%s tail=%s children=%s "
+                "session_ref=%s host_lock=%s lock=%s node=%s used=%s total=%s",
+                kind,
+                self._token_depth(x),
+                self._path_tail_depth(x),
+                len(x.children),
+                self.session_ref(x),
+                x.component_data[ct].host_lock_ref,
+                x.component_data[ct].lock_ref,
+                x.id,
+                used,
+                total,
+            )
             cd = x.component_data[ct]
             if x in self.tree_core.evictable_host_leaves and (
                 not self.tree_core.enable_session_radix_cache
@@ -970,7 +1511,21 @@ class MambaComponent(TreeComponent):
         finally:
             if cursor_started:
                 host_lru.cursor_end()
-        return selected if selected is not None else fallback
+        chosen = selected if selected is not None else fallback
+        if chosen is None:
+            return None, None
+        if selected is not None:
+            return chosen, "interior"
+        cd = chosen.component_data[self.component_type]
+        if chosen in self.tree_core.evictable_host_leaves:
+            kind = "leaf"
+        elif cd.host_lock_ref > 0 or cd.lock_ref > 0:
+            kind = "locked"
+        elif len(chosen.children) != 1:
+            kind = "fork"
+        else:
+            kind = "fallback"
+        return chosen, kind
 
     def _has_later_complete_boundary(self, node: UnifiedTreeNode) -> bool:
         """Whether a single-child continuation has a later reusable boundary."""

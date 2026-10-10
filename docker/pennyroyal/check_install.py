@@ -33,6 +33,29 @@ def check_source(root: Path, expected_revision: str = "") -> str:
     return source
 
 
+def check_flashinfer_sm120(root: Path, stock_kernels: list[Path]) -> dict:
+    """Require the accepted FlashInfer source and the package-local SM120 module.
+
+    Stock flashinfer-python plus the stock provider wheels fail here: the
+    packaging step must have patched the installed sources and installed the
+    module it compiled from them. No GPU, no model and no FlashInfer import are
+    involved.
+    """
+    spec = importlib.util.find_spec("flashinfer")
+    locations = list(spec.submodule_search_locations or ()) if spec else []
+    if not locations:
+        raise RuntimeError("flashinfer is not importable from the image environment")
+    packaging = importlib.util.spec_from_file_location(
+        "penny_flashinfer_sm120",
+        root / "scripts" / "pennyroyal" / "flashinfer" / "install.py",
+    )
+    installer = importlib.util.module_from_spec(packaging)
+    packaging.loader.exec_module(installer)
+    return installer.check_installed(
+        Path(locations[0]).resolve(), installer.accepted_sources(), stock_kernels
+    )
+
+
 def main():
     import nixl
     import torch
@@ -76,6 +99,10 @@ def main():
     )
     if moe_kernel is None or moe_kernel.stat().st_size == 0:
         raise RuntimeError("Prebuilt SM120 fused-MoE kernel is missing")
+    # The image must carry the packaging step's own module, not the stock
+    # provider one: the accepted sources and the package-local AOT file are
+    # what the Next profiles actually load.
+    sm120 = check_flashinfer_sm120(root, [moe_kernel])
     sys.path.insert(0, str(root / ".ple-nvme"))
     import sglang_ssd_stream._io  # noqa: F401
 
@@ -100,6 +127,7 @@ def main():
             {
                 "source": source,
                 "packages": installed,
+                "flashinfer_sm120": sm120,
                 "posix_plugin": "available",
                 "gpu_tested": False,
             },

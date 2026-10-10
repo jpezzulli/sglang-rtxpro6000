@@ -41,12 +41,26 @@ MAX_MAMBA_CACHE_SIZE=24
 # ----------------------------------------------------------------------------
 
 export NUMPY_MADVISE_HUGEPAGE=0
-export SGLANG_FORWARD_UNKNOWN_TOOLS=true
+# The launcher may forward the operator's saved choice; unset keeps the
+# qualified default, exactly like configs/pennyroyal/serve-flash-next.sh.
+export SGLANG_FORWARD_UNKNOWN_TOOLS="${SGLANG_FORWARD_UNKNOWN_TOOLS:-true}"
 case "$SGLANG_MM_PREPROCESS_DEVICE" in
   cpu) IMAGE_PROCESSOR_BACKEND=pil ;;
   cuda:*) IMAGE_PROCESSOR_BACKEND=torchvision ;;
   *) echo "Choose SGLANG_MM_PREPROCESS_DEVICE=cpu or cuda:N" >&2; exit 1 ;;
 esac
+# Accepted FlashInfer GDN fix: the image's patched SM12x delta-rule prefill
+# kernels run in FP16-accumulate MMA mode, the qualified default of the
+# Flash-Next profiles. Exported before Python imports FlashInfer. Set it to 0
+# here, or pass -e FLASHINFER_GDN_FP16_ACCUM_MMA=0, to opt out; FlashInfer's own
+# default stays off and the 27B startup file never sets it.
+export FLASHINFER_GDN_FP16_ACCUM_MMA="${FLASHINFER_GDN_FP16_ACCUM_MMA:-1}"
+
+# The mode changes the GDN computation, so it is cache identity: the resolved
+# value (not the raw string) goes into the NIXL namespace fields below, and
+# anything but the literal 1 is the released FP32-accumulate representation.
+GDN_FP16_ACCUM_MMA=off
+if [[ "$FLASHINFER_GDN_FP16_ACCUM_MMA" == 1 ]]; then GDN_FP16_ACCUM_MMA=on; fi
 
 CONFIG_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-/opt/pennyroyal}"
@@ -162,7 +176,18 @@ configure_max_total_tokens
 
 TARGET_OVERRIDES='{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":2.0,"original_max_position_embeddings":262144}}}'
 SGLANG_REV="$(git -C "$REPO_ROOT" rev-parse --short=10 HEAD)"
-TORCH_VERSION="$("$PYTHON" -c 'import torch; from sglang.srt.utils import resolve_mm_preprocess_device; resolve_mm_preprocess_device(); print(torch.__version__)')"
+PENNY_IDENTITY_PROBE="$("$PYTHON" -c 'import sys; import torch; from sglang.srt.utils import resolve_mm_preprocess_device; resolve_mm_preprocess_device(); from sglang.kernels.ops.gemm.sm120_online_fp8 import launch_precision; print(torch.__version__); print(launch_precision(sys.argv[1]))' "$TARGET_MODEL")"
+TORCH_VERSION="$(printf '%s\n' "$PENNY_IDENTITY_PROBE" | sed -n 1p)"
+# The namespace must name the EFFECTIVE precision, resolved before derivation
+# through the same eligibility logic the runtime applies: automatic and
+# explicit-on share the rowwise_fp8 identity (the legacy "true" named the old
+# mixed-MXFP8 caches), while off and auto-off keep the untouched-weight
+# identity. A probe that cannot answer falls back to the saved explicit choice.
+ONLINE_FP8_PRECISION="$(printf '%s\n' "$PENNY_IDENTITY_PROBE" | sed -n 2p)"
+case "$ONLINE_FP8_PRECISION" in
+  rowwise_fp8|false) ;;
+  *) if [[ "${SGLANG_SM120_ONLINE_MXFP8:-}" == true ]]; then ONLINE_FP8_PRECISION=rowwise_fp8; else ONLINE_FP8_PRECISION=false; fi ;;
+esac
 echo "Media preprocessing: $SGLANG_MM_PREPROCESS_DEVICE ($IMAGE_PROCESSOR_BACKEND); model GPU: cuda:0"
 printf 'Pennyroyal profile: Flash-Next (native NEXTN, no FR-Spec)\n  runtime: %s\n  target: %s\n  cache root: %s\n  NIXL root: %s\n' \
   "$SGLANG_EXE" "$TARGET_MODEL" "$CACHE_BASE" "${NIXL_STORAGE_BASE:-off}"
@@ -174,7 +199,7 @@ if [[ "$NIXL" == on ]]; then
     --git-repo "$REPO_ROOT" \
     --model "target=$TARGET_MODEL" \
     --field "chat_template_sha256=$CHAT_TEMPLATE_SHA" \
-    --field "online_mxfp8=$SGLANG_SM120_ONLINE_MXFP8" \
+    --field "online_mxfp8=$ONLINE_FP8_PRECISION" \
     --field "image_processor_backend=$IMAGE_PROCESSOR_BACKEND" \
     --field "mm_preprocess_device=$SGLANG_MM_PREPROCESS_DEVICE" \
     --field "context_length=$CONTEXT_LENGTH" \
@@ -188,6 +213,7 @@ if [[ "$NIXL" == on ]]; then
     --field "speculative_num_draft_tokens=4" \
     --field "speculative_draft_quantization=unquant" \
     --field "gdn_mtp_cache_mode=none" \
+    --field "gdn_fp16_accum_mma=$GDN_FP16_ACCUM_MMA" \
     --field "hicache_io_backend=kernel" \
     --field "hicache_mem_layout=page_first" \
     --field "mamba_ssm_dtype=$MAMBA_SSM_DTYPE" \

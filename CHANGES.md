@@ -20,6 +20,24 @@ automatic release-container builds on the same dependency stack.
 “Local” identifies changes maintained in this fork. Upstream status and PR
 heads are recorded with the release that used them.
 
+## Unreleased (source preparation) — accepted Flash-Next SM120 paths selected by default
+
+- **Automatic default (Local):** the accepted online rowwise-FP8 Flash-Next
+  dense format, HyperConnection mix and output-head conversion, and the
+  accepted low-row companion kernels (W8A16 GEMV, fused gated-RMSNorm GDN
+  out_proj, MTP entry GEMV, draft-MoE GEMV, packed-key softmax router) now
+  select themselves for eligible Flash-Next checkpoints on exact SM120 at
+  fresh or default launches, with no copied benchmark switch and no wizard
+  kernel question. Unset or blank means automatic; unsupported automatic
+  configurations keep their original paths; an explicit unsupported request
+  still fails boot. Saved explicit `true`/`false` values keep propagating
+  verbatim as private compatibility/debug escape hatches, now outside the
+  public setup surface. The NIXL namespace records the effective precision
+  (`rowwise_fp8` or `false`) resolved before startup instead of the requested
+  Boolean, so the accepted rowwise-FP8 caches cannot collide with the old
+  mixed-MXFP8 `online_mxfp8=true` namespaces and off runs keep their prior
+  identity. 27B/DFlash2 behavior is untouched; no kernel math changed.
+
 ## v2.5.3 — Agentic correctness and cache maintenance
 
 The main fixes in this release are the Flash-Next checkpoint error reported in
@@ -51,6 +69,42 @@ BF16 NVMe PLE staging fix previously supplied as an optional v2.5.2 patch.
   cache cleanup remains under the user's control.
 - **27B/DFlash2:** avoid blocking copies of small prefill metadata arrays,
   adapted from [#40091](https://github.com/sgl-project/sglang/pull/40091).
+- **FlashInfer SM120 kernels:** the accepted fused-MoE and GDN sources are now
+  packaged into every installation instead of living in a private overlay. Both
+  suspected Xid109 candidates are in the shipped source: the three fused-MoE
+  commits (`5e86c489f575`, `b9fa8893102d`, `2a4d8d3a9501`) by Penny
+  `<Pennyroyal@agentmail.to>`, ported from the `aiueo52/flash-next-rtxpro6000`
+  donor patches, and aa24aa's GDN FP16-accumulate MMA commit `0b0ba4c2b18173`
+  (upstream FlashInfer #6227). See
+  [FlashInfer SM120 source integration](BUILD.md#flashinfer-sm120-source-integration)
+  for the pin, the build path and the profile default, and
+  [PROVENANCE.md](PROVENANCE.md#flashinfer-sm120-accepted-source) for the
+  attribution. Upgrading from a 0.6.17 environment needs the matching
+  `flashinfer-jit-cache` family, which BUILD.md now installs in the primary
+  update block before the packaging step, so an ordinary upgrade works on its
+  first pass instead of failing and being repaired; the step still names a stale
+  wheel rather than dying inside the compile. The step now also honours
+  `CUDAHOSTCXX` for nvcc's host compiler: FlashInfer builds `-ccbin` from `CC` and
+  ignores `CUDAHOSTCXX`, so the value is mapped onto `CC` in the build subprocess
+  environment alone, leaving the caller's `CC`, the C++/link `CXX`, the toolchain
+  versions, the job budget and the source patches as they were. A build failure
+  names the host compiler that was actually used and keeps a bounded tail of each
+  stream the build wrote to, because Ninja's final line is only `build stopped:
+  subcommand failed`, the fatal diagnostic sits above it, and with
+  `FLASHINFER_JIT_VERBOSE=1` inherited FlashInfer puts that output on stdout and
+  raises with nothing embedded, so reading stderr alone would hide it. The SM120 compile also carries one
+  build-only guard, `patches/asan-include-compat.patch`, because stock
+  `memoryUtils.cu` asked for `<sanitizer/asan_interface.h>` unconditionally and the
+  image's `gcc15` package does not install that header: a non-ASAN build now needs
+  nothing new, an ASAN build still requires the real header, and the two accepted
+  mailboxes stay byte-for-byte as reviewed. FlashInfer's own GDN default stays off;
+  only the Next recipes and Next startup files opt in, a saved or inherited
+  `FLASHINFER_GDN_FP16_ACCUM_MMA=0` reaches the container through the existing
+  settings propagation, and `FLASHINFER_MOE_FUSED_PROLOGUE=0` remains the MoE
+  kill switch. The resolved mode is now one more field of the existing NIXL
+  namespace in all four Next launch paths, so mode 0 and mode 1 cannot share one
+  persisted FILE root; no cache data is deleted and the 27B namespace fields are
+  untouched. Online FP8, routing, GEMV and normalization defaults are untouched.
 - **NIXL and host allocation:** correct hybrid storage-component counts and
   include opt-in pinned-host allocation/device-alias support adapted from
   [LandOfLemons' PR #24](https://github.com/jpezzulli/sglang-rtxpro6000/pull/24).
@@ -59,8 +113,11 @@ BF16 NVMe PLE staging fix previously supplied as an optional v2.5.2 patch.
 Both supported profiles completed full reasoning and tool runs, plus fresh
 64K disk-cache restoration and device-replay checks. The 27B tool rerun used
 the corrected uncapped validation runner. Existing long-context, media and
-performance evidence retains its original source and date. The dependency
-stack and model weights are unchanged.
+performance evidence retains its original source and date. The model weights,
+token map and sampler are unchanged; the FlashInfer package pin and its SM120
+module are not — see the packaging note above. The packaging integration itself
+is checked without a GPU; the compile, the rebuilt image and the two-profile
+GPU regression for these kernels are still owed by the release host.
 
 Literal model end-of-turn markers can still terminate a response; this release
 does not change that model/runtime behavior.
