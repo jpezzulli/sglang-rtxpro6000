@@ -11,10 +11,9 @@
     "is_draft": true,
     "published": false,
     "native_qualification_complete": true,
-    "note": "Publication draft. Qualification evidence is reused from the accepted native runtime. Final recipe/default propagation, architecture-build integration and the published image identity are pending.",
+    "note": "Publication draft. Accepted native runtime qualification is reused. Packaging and brand integration are complete; launch-default propagation and the published image identity are pending.",
     "pending_release_owner_work": [
       "propagate adaptive MTP default into public recipes/launchers (current public fixed-W4 recipe is a stale propagation snapshot, not an open product decision)",
-      "integrate and confirm the narrowed GPU build: RTX Blackwell inference; Ampere/Ada sidecar image processing",
       "final docs/version/settings propagation",
       "publication approval",
       "GitHub container build / image identity"
@@ -27,7 +26,13 @@
     "new_feature_git_range": "69583da7c71b87ac36371333a19f2749bab72773..b48b70f3f80494d78a778fd4d26958ede343075f",
     "novelty_note": "Novelty determined by the actual git range above; current CHANGES version headings are not relied on for novelty.",
     "local_runtime": "90b2b412e2bfd06f0ef3be1b41fbfbdee45bc14f",
-    "local_runtime_note": "adds LOCAL diagnostics only, not publication code"
+    "local_runtime_note": "adds LOCAL diagnostics only, not publication code",
+    "accepted_packaging_commits": [
+      "3653494841b39617920f96334d204903f946dbba",
+      "3e2a49cd4995ac71b647e1c6eb686ac77ed4d675",
+      "95c4bc83194fdaeecaa38e144b836b6bdfa2e0d1"
+    ],
+    "accepted_packaging_tree": "a13f8759ca4187bbfa9a0e5a849337d23c430473"
   },
   "hardware": {
     "native_gpu": "RTX PRO 6000 Blackwell",
@@ -274,7 +279,7 @@
       "id": "focused_gpu_build",
       "what": "Retain RTX Blackwell for RTX PRO 6000 inference and Ampere/Ada Lovelace for image-processing sidecars; trim other GPU build targets.",
       "why": "The release went on a diet: a slimmer package for easier downloads.",
-      "status": "pending integration of the parallel build-cleanup work"
+      "status": "accepted packaging integrated into the publication candidate; container build pending"
     }
   ],
   "supported_carryover_capabilities": [
@@ -677,7 +682,7 @@
     ],
     "inference_target": "RTX PRO 6000 Blackwell, TP1 or TP2",
     "ampere_ada_role": "optional sidecar image preprocessing",
-    "status": "planned for this release; parallel build-cleanup integration pending",
+    "status": "accepted and integrated into the publication candidate; container build pending",
     "why": "A slimmer release for easier downloads.",
     "release_summary": "The release went on a diet: RTX Blackwell for inference, Ampere/Ada Lovelace for image-processing sidecars, with other GPU build targets trimmed for easier downloads."
   },
