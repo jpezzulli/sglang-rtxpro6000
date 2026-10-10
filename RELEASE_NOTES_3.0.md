@@ -1,6 +1,6 @@
 # Penny Royal 3.0
 
-*Draft — launch-default integration and publication pending.*
+*Draft — ready for publication.*
 
 Penny Royal 3.0 brings adaptive speculative decoding, faster small-batch
 kernels, and more room for conversation state to Qwen3.8 Flash-Next. The target

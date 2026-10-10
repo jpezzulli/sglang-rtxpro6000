@@ -11,12 +11,12 @@
     "is_draft": true,
     "published": false,
     "native_qualification_complete": true,
-    "note": "Publication draft. Accepted native runtime qualification is reused. Packaging and brand integration are complete; launch-default propagation and the published image identity are pending.",
+    "note": "Publication draft ready. Accepted native runtime qualification is reused. Packaging, brand, documentation and launch-default integration are complete; publication and container build remain pending.",
     "pending_release_owner_work": [
-      "propagate adaptive MTP default into public recipes/launchers (current public fixed-W4 recipe is a stale propagation snapshot, not an open product decision)",
-      "final docs/version/settings propagation",
       "publication approval",
-      "GitHub container build / image identity"
+      "publish reviewed source and release tag",
+      "GitHub container build and published image identity",
+      "verify published links and record image size"
     ]
   },
   "provenance": {
@@ -32,7 +32,8 @@
       "3e2a49cd4995ac71b647e1c6eb686ac77ed4d675",
       "95c4bc83194fdaeecaa38e144b836b6bdfa2e0d1"
     ],
-    "accepted_packaging_tree": "a13f8759ca4187bbfa9a0e5a849337d23c430473"
+    "accepted_packaging_tree": "a13f8759ca4187bbfa9a0e5a849337d23c430473",
+    "launch_defaults_commit": "db4b0080f7c29cac3612d52a9edbcf622d06398a"
   },
   "hardware": {
     "native_gpu": "RTX PRO 6000 Blackwell",
@@ -94,15 +95,16 @@
       "fr_spec_scope": "Enabled alongside adaptive MTP at C1 and fixed W4 at C2+; reduces draft vocabulary, not the target vocabulary."
     },
     "current_public_recipe_snapshot": {
-      "public_launchers": "fixed W4",
+      "public_launchers": "adaptive MTP using configs/pennyroyal/adaptive-next.json",
       "method": "NEXTN",
-      "steps": 3,
+      "steps": 7,
       "topk": 1,
-      "draft_tokens": 4,
-      "label": "STALE release propagation; main release owner must update before publication",
-      "fr_spec_enabled": true
+      "draft_tokens": 8,
+      "label": "Integrated 3.0 default; launch captures the maximum width, with C1 W4/W8 and C2+ W4",
+      "fr_spec_enabled": true,
+      "policy_sha256": "64070286310a0d3eeeb3ff3ae074d1ca0fed2937d2274a0adfcb8ace84bc01ee"
     },
-    "propagation_required_before_publication": true,
+    "propagation_required_before_publication": false,
     "configurator_exposes_adaptive": false,
     "no_new_public_switch_or_toggle": true,
     "verified_launch_interface": {
@@ -121,7 +123,8 @@
         "native wrapper scripts do not forward arbitrary args"
       ]
     },
-    "disambiguation": "W8 (weight precision) is NOT the same as W8 (speculative window)"
+    "disambiguation": "W8 (weight precision) is NOT the same as W8 (speculative window)",
+    "generated_configuration_selects_adaptive": true
   },
   "features_new_in_3_0": [
     {
@@ -707,5 +710,19 @@
     "contribution": "Penny Royal did almost all the coding for this release, including ports and integration work.",
     "engineering_collaboration": "John, Penny Royal and Codex worked through architecture, implementation, tuning and debugging together, including fused kernels, memory layouts and milliseconds per decode cycle.",
     "investigation_and_review": "John and Codex with Penny; contributor work remains credited"
+  },
+  "version": "3.0.0",
+  "planned_publication": {
+    "source_tag": "pennyroyal-v3.0.0",
+    "container_image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.0.0",
+    "published": false,
+    "container_build": "pending"
+  },
+  "launch_default_acceptance": {
+    "commit": "db4b0080f7c29cac3612d52a9edbcf622d06398a",
+    "checks": "167 focused CPU configuration/recipe tests, 2 skipped; changed shell syntax and diff checks passed",
+    "independent_review": "no actionable findings",
+    "model_suites": "accepted qualification reused; no new model runs or service restart",
+    "nvme_ple": "Existing NVMe PLE implementation is width-aware and preserved. Prior NVMe qualification used fixed W4; no new W8-over-NVMe runtime test was performed."
   }
 }

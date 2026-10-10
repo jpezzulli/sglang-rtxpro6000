@@ -49,7 +49,7 @@ Use matching source and image tags from the release notes. Download only the
 small launch-file set; a full source checkout is optional.
 
 ```bash
-RELEASE_REF='<release-tag>'
+RELEASE_REF='pennyroyal-v3.0.0'
 BASE="https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/$RELEASE_REF/docker/pennyroyal/launch"
 mkdir -p pennyroyal/config
 cd pennyroyal
@@ -100,7 +100,7 @@ FR-Spec with fixed four-token drafts.
 Run from your launch-file folder, using the image tag from the release:
 
 ```bash
-IMAGE='ghcr.io/jpezzulli/sglang-rtxpro6000:<image-tag>'
+IMAGE='ghcr.io/jpezzulli/sglang-rtxpro6000:v3.0.0'
 ./run.sh --image "$IMAGE" --startup config/start-flash-next-frspec.sh
 ```
 
