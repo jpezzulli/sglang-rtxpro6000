@@ -52,6 +52,107 @@ logger = logging.getLogger(__name__)
 
 _TRTLLM_SPARSE_PAGE_SIZE = 64
 
+# FlashInfer's trtllm-gen / XQA paged decode takes one workspace per call whose
+# first 8 MiB are the split-K semaphores and the rest is the reduction scratch
+# (flashinfer 0.7.0.post1 decode.py -> xqa_wrapper.cu / mha.cu). The API only
+# requires the buffer to be zeroed before its FIRST use: a completed launch
+# returns the counters to zero and every launch overwrites the scratch rows it
+# addresses. So the buffer is exclusive per *launch*, not per backend object --
+# and every consumer of a width can share one allocation instead of reserving
+# one 128 MiB workspace each. At the shipped recipe the consumers are the
+# target-verify backend, the draft-extend backend and the draft-step children,
+# one per draft step after the first (QwenSparseMultiStepDraftBackend builds
+# speculative_num_steps - 1 of them, and a width's draft-token count is its
+# steps + 1): W4 = 3 steps -> 2 children, so 4 workspaces; the adaptive W4+W8
+# pair doubles the target/draft-extend pair and adds W8's 6 children, so 12.
+# That is a structural 384 MiB (fixed) / 1408 MiB (adaptive) per rank.
+_TRTLLM_WORKSPACE_BYTES = 128 * 1024 * 1024
+
+# Process-scoped owners of the shareable workspaces, keyed by the device they
+# serve (see _trtllm_scratch_is_shareable for the eligibility proof). The
+# registry -- not the backend that happened to allocate first -- owns the
+# storage, so a width transition can free the retired state's backends without
+# freeing what that state's captured graphs still address.
+_TRTLLM_SHARED_WORKSPACES: Dict[Tuple[str, int], torch.Tensor] = {}
+
+
+def _trtllm_workspace_slot(device) -> Tuple[str, int]:
+    """Registry key for ``device``; an index-less CUDA device resolves to the
+    process's current device so the graph-state hook and the forward path --
+    which sees ``q.device`` -- cannot land on two different slots."""
+    device = torch.device(device)
+    index = device.index
+    if index is None and device.type == "cuda":
+        index = torch.cuda.current_device()
+    return (device.type, -1 if index is None else int(index))
+
+
+def _trtllm_scratch_is_shareable(runner) -> bool:
+    """Whether every QSA trtllm launch behind ``runner`` is stream-ordered.
+
+    The proof is the compute stream, not the process and not the CPU graph pool:
+    instances may share a workspace exactly when no two launches that address it
+    can be in flight at once. Spec-v2 gives that ordering for free -- the whole
+    draft -> target-verify -> draft-extend round is enqueued on the one compute
+    stream, the plan stream only prepares metadata and is joined with an
+    explicit ``wait_stream`` before any forward, and CUDA-graph capture records
+    an address without executing while every replay rides that same compute
+    stream. A shared graph memory pool / shared graph registry proves nothing
+    about GPU ordering, so it is not what is keyed here.
+
+    Two launch modes instead put attention work on real concurrent streams and
+    keep the pre-sharing private workspace per backend: PD-multiplexing (prefill
+    and decode on separate green-context streams, one backend per stream group)
+    and two-batch overlap (TboAttnBackend children on sub-batch streams). A
+    record that cannot answer -- no runner, no launch record, or a mode field
+    this tree does not carry -- is not a proof either, which keeps such a backend
+    on the pre-change behaviour.
+    """
+    server_args = getattr(runner, "server_args", None)
+    if server_args is None:
+        return False
+    pdmux = getattr(server_args, "enable_pdmux", None)
+    tbo = getattr(server_args, "enable_two_batch_overlap", None)
+    if pdmux is None or tbo is None:
+        return False
+    # ponytail: the domain is the launch mode plus the device, not an observed
+    # stream identity. A future mode that runs two QSA consumers concurrently on
+    # one device without one of these flags has to join this gate (or the stream
+    # becomes part of the key); until then pdmux/TBO are the only launches this
+    # repo splits attention across streams.
+    return not (pdmux or tbo)
+
+
+def _trtllm_scratch_is_capturing(device) -> bool:
+    """True when a CUDA-graph capture is running on this thread's stream.
+
+    An allocation made inside a capture comes from the capture's memory pool, so
+    the pool -- not this process-scoped registry -- would decide how long the
+    shared scratch lives and which other capture is handed the same bytes.
+    """
+    return torch.device(device).type == "cuda" and bool(
+        torch.cuda.is_current_stream_capturing()
+    )
+
+
+def _new_trtllm_workspace(device) -> torch.Tensor:
+    # Zeroed here and once: the trtllm/XQA contract is zeroed semaphores before
+    # the first launch on a buffer, and a completed launch returns them to zero.
+    return torch.zeros(_TRTLLM_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
+
+
+def _acquire_trtllm_workspace(shareable: bool, device) -> torch.Tensor:
+    """The workspace one launch may use: the device's shared scratch when its
+    execution domain is provably serialized, else a private zeroed buffer."""
+    if not shareable or _trtllm_scratch_is_capturing(device):
+        return _new_trtllm_workspace(device)
+    slot = _trtllm_workspace_slot(device)
+    workspace = _TRTLLM_SHARED_WORKSPACES.get(slot)
+    if workspace is None:
+        workspace = _new_trtllm_workspace(device)
+        _TRTLLM_SHARED_WORKSPACES[slot] = workspace
+    return workspace
+
 
 @lru_cache(maxsize=1)
 def _resolve_trtllm_sparse_decode():
@@ -301,7 +402,13 @@ class QwenSparseAttnBackend(AttentionBackend):
         self._graph_row_req_pool_indices = None
         self._trtllm_sparse_tables = {}
         self._mtp_shared_sparse_indices = None
+        # This backend's view of the trtllm-gen/XQA scratch: the process-owned
+        # workspace shared by its execution domain, or a private one when the
+        # launch is not provably stream-serialised. Only ever assigned through
+        # _ensure_trtllm_workspace, which materialises it once so the address
+        # every CUDA graph bakes lives as long as the graphs that reference it.
         self._trtllm_workspace = None
+        self._trtllm_scratch_shareable = _trtllm_scratch_is_shareable(runner)
         self._graph_extend_lens = None
         self._graph_extend_lens_pin = None
         self.qsa_stall_diagnostics = (
@@ -1147,6 +1254,37 @@ class QwenSparseAttnBackend(AttentionBackend):
             torch.zeros(max_bs, dtype=torch.int32, pin_memory=True) for _ in range(2)
         ]
         self._extend_lens_pin_idx = 0
+        # Provision the sparse-decode scratch now rather than on the first
+        # forward: init_cuda_graph_state runs outside CUDA-graph capture, so the
+        # workspace is an ordinary eager allocation whose address every width's
+        # graphs can bake, and no capture's private memory pool decides how long
+        # the shared scratch lives. Only the shared allocation is taken early (it
+        # replaces one the first forward would have made anyway); the private
+        # fallback keeps today's lazy timing, and so does a platform whose
+        # sparse-decode dispatch is not trtllm -- that launch never needs one.
+        if (
+            self.device is not None
+            and getattr(self, "_trtllm_scratch_shareable", False)
+            and _resolve_trtllm_sparse_decode() is not None
+        ):
+            self._ensure_trtllm_workspace(self.device)
+
+    def _ensure_trtllm_workspace(self, device: torch.device) -> torch.Tensor:
+        """The zeroed trtllm-gen/XQA scratch this backend hands to a launch.
+
+        Materialised once per backend and, for a stream-ordered execution
+        domain, once per device for the whole process (every width's
+        target-verify, draft-extend and draft-step backends address the same
+        storage). Read defensively: a ``__new__``-style harness backend has no
+        eligibility flag and keeps the pre-sharing private workspace.
+        """
+        workspace = getattr(self, "_trtllm_workspace", None)
+        if workspace is None:
+            workspace = _acquire_trtllm_workspace(
+                getattr(self, "_trtllm_scratch_shareable", False), device
+            )
+            self._trtllm_workspace = workspace
+        return workspace
 
     def _require_compressed_cuda_graph_support(self) -> None:
         if (
@@ -1901,14 +2039,10 @@ class QwenSparseAttnBackend(AttentionBackend):
             .view(-1, page, num_kv_heads, head_dim)
             .permute(0, 2, 1, 3)
         )
-        if self._trtllm_workspace is None:
-            self._trtllm_workspace = torch.zeros(
-                128 * 1024 * 1024, dtype=torch.uint8, device=device
-            )
         output = trtllm_decode(
             query=q.contiguous(),
             kv_cache=(kc, vc),
-            workspace_buffer=self._trtllm_workspace,
+            workspace_buffer=self._ensure_trtllm_workspace(device),
             block_tables=block_tables,
             seq_lens=valid_counts,
             max_seq_len=stride,
