@@ -713,7 +713,7 @@ def test_both_installation_paths_run_the_one_step():
     assert "flashinfer-python" in update  # the prerequisite is spelled out
     jit_cache = dockerfile.index("flashinfer-jit-cache-sm120f")
     packaging = dockerfile.index("scripts/pennyroyal/flashinfer/install.py")
-    freeze = dockerfile.index("pip check")
+    freeze = dockerfile.index("python /tmp/penny-check-dependencies.py")
     assert jit_cache < packaging < freeze
     assert "PENNY_BUILD_JOBS=4" in dockerfile and "MAX_JOBS=4" in dockerfile
     assert "check_flashinfer_sm120" in CHECK.read_text()

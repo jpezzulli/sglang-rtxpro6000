@@ -86,16 +86,23 @@ RUN uv pip install --python .venv/bin/python --no-deps \
 # runners dispatch only on SM100/103/107: no RTX GPU can load them, and pruning
 # at this layer, before the COPY below, is what keeps their bytes out of the
 # published image instead of merely deleting them in a later one.
-RUN FLASHINFER_WORKSPACE_BASE=/tmp/penny-fi-sm120 \
+# The hosted build action exited 137 during this compile with four jobs.
+# Serialize this memory-heavy extension on the small runner. Local builders
+# can raise the build-only argument; the serving/JIT defaults stay unchanged.
+ARG FLASHINFER_BUILD_JOBS=1
+RUN MAX_JOBS="$FLASHINFER_BUILD_JOBS" FLASHINFER_NINJA_JOBS="$FLASHINFER_BUILD_JOBS" \
+    FLASHINFER_WORKSPACE_BASE=/tmp/penny-fi-sm120 \
     .venv/bin/python scripts/pennyroyal/flashinfer/install.py \
     && .venv/bin/python scripts/pennyroyal/flashinfer/install.py --check >/dev/null \
     && rm -rf /tmp/penny-fi-sm120
 # NIXL POSIX and optional NVMe PLE reader are built from pinned/vendored source.
+COPY scripts/pennyroyal/flashinfer/check_dependencies.py /tmp/penny-check-dependencies.py
 RUN bash docker/pennyroyal/build-nixl.sh \
     && CARGO_TARGET_DIR=/tmp/penny-ple-cargo PYTHON=/opt/pennyroyal/.venv/bin/python \
       bash tools/ple_nvme/install.sh \
     && rm -rf /tmp/penny-ple-cargo \
-    && .venv/bin/python -m pip check \
+    && .venv/bin/python /tmp/penny-check-dependencies.py \
+    && rm /tmp/penny-check-dependencies.py \
     && .venv/bin/python -m pip freeze > /opt/pennyroyal-container-packages.txt
 
 FROM base AS runtime
