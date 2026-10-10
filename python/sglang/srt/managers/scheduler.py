@@ -148,6 +148,7 @@ from sglang.srt.managers.io_struct import (
     LoadLoRAAdapterFromTensorsReqOutput,
     LoadLoRAAdapterReqInput,
     LoadLoRAAdapterReqOutput,
+    MMInputsProcessError,
     OpenSessionReqInput,
     PauseGenerationReqInput,
     ProfileReq,
@@ -345,6 +346,10 @@ else:
 
 
 logger = logging.getLogger(__name__)
+
+
+class _MultimodalInputProcessingError(RuntimeError):
+    """A rank could not build MultimodalInputs for a request (features lost in transport)."""
 
 
 def _prewarm_hccl_group(device, group, device_module):
@@ -1975,7 +1980,7 @@ class Scheduler(
 
         for tokenized_req in tokenized_reqs:
             if tokenized_req.mm_inputs is not None and not isinstance(
-                tokenized_req.mm_inputs, MultimodalInputs
+                tokenized_req.mm_inputs, (MultimodalInputs, MMInputsProcessError)
             ):
                 tokenized_req.mm_inputs = MultimodalInputs.from_processor_output(
                     tokenized_req.mm_inputs
@@ -2346,6 +2351,8 @@ class Scheduler(
         return image_inputs
 
     def _get_multimodal_inputs(self, mm_inputs):
+        if isinstance(mm_inputs, MMInputsProcessError):
+            raise _MultimodalInputProcessingError(mm_inputs.message)
         if isinstance(mm_inputs, MultimodalInputs):
             return mm_inputs
 
@@ -2431,10 +2438,63 @@ class Scheduler(
             mm_inputs.release_features()
             req.multimodal_inputs = None
 
+    def _reject_mm_transport_failure(self, recv_req, *, generate: bool = True) -> bool:
+        """Abort a request whose multimodal features were lost in transport.
+
+        The request receiver replaces ``mm_inputs`` with an MMInputsProcessError
+        marker on every rank when a shared-memory feature segment could not be
+        materialized. Such a request must never reach session handling (which
+        dereferences mm_items while stripping a BOS and mutates session state)
+        nor the model; it is answered with a retryable 500 here, first thing.
+        """
+        marker = recv_req.mm_inputs
+        if not isinstance(marker, MMInputsProcessError):
+            return False
+        # Keep the bootstrap coordinates and the disaggregation mode: the Req's
+        # time stats and any later bookkeeping are shaped by them, and dropping
+        # them is what made the decode prealloc queue dereference None.
+        req = Req(
+            recv_req.rid,
+            recv_req.input_text,
+            recv_req.input_ids,
+            recv_req.sampling_params,
+            vocab_size=self.model_config.vocab_size,
+            http_worker_ipc=recv_req.http_worker_ipc,
+            bootstrap_host=getattr(recv_req, "bootstrap_host", None),
+            bootstrap_port=getattr(recv_req, "bootstrap_port", None),
+            bootstrap_room=getattr(recv_req, "bootstrap_room", None),
+            disagg_mode=self.disaggregation_mode,
+        )
+        req.tokenizer = self.tokenizer
+        if self.disaggregation_mode == DisaggregationMode.NULL:
+            # Unified serving: the waiting queue finishes an aborted request on
+            # the next scheduler step, like every other early rejection here.
+            req.set_finish_with_abort(
+                marker.message,
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                err_type="InternalServerError",
+            )
+            if generate:
+                self.init_req_max_new_tokens(req)
+            self._add_request_to_queue(req)
+            return True
+        # Disaggregated prefill/decode worker: the bootstrap and prealloc queues
+        # would start a KV transfer for a request that has no features and no
+        # future, so answer directly instead (the same direct path the session
+        # validation errors above use). One error response, no queue entry.
+        prepare_abort(req, marker.message, status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+        req.finished_reason.err_type = "InternalServerError"
+        self.output_streamer.stream_output([req], req.return_logprob)
+        return True
+
     def handle_generate_request(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
+        # Features lost in transport: reject before any session/state handling.
+        if self._reject_mm_transport_failure(recv_req):
+            return
+
         # Route: normal request / session request / session-not-found
         session_id = (
             recv_req.session_params.id if recv_req.session_params is not None else None
@@ -2632,7 +2692,18 @@ class Scheduler(
 
         # Handle multimodal inputs
         if recv_req.mm_inputs is not None:
-            image_inputs = self._get_multimodal_inputs(recv_req.mm_inputs)
+            try:
+                image_inputs = self._get_multimodal_inputs(recv_req.mm_inputs)
+            except _MultimodalInputProcessingError as error:
+                # A transport fault, not a bad request: 500 so clients may retry.
+                req.set_finish_with_abort(
+                    str(error),
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    err_type="InternalServerError",
+                )
+                self.init_req_max_new_tokens(req)
+                self._add_request_to_queue(req)
+                return
 
             SessionController.adjust_mm_offsets(recv_req, req, image_inputs)
 
@@ -2930,6 +3001,8 @@ class Scheduler(
         self,
         recv_req: TokenizedEmbeddingReqInput,
     ):
+        if self._reject_mm_transport_failure(recv_req, generate=False):
+            return
         req = Req(
             recv_req.rid,
             recv_req.input_text,
@@ -2951,7 +3024,17 @@ class Scheduler(
 
         # Handle multimodal inputs
         if recv_req.mm_inputs is not None:
-            image_inputs = self._get_multimodal_inputs(recv_req.mm_inputs)
+            try:
+                image_inputs = self._get_multimodal_inputs(recv_req.mm_inputs)
+            except _MultimodalInputProcessingError as error:
+                # A transport fault, not a bad request: 500 so clients may retry.
+                req.set_finish_with_abort(
+                    str(error),
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    err_type="InternalServerError",
+                )
+                self._add_request_to_queue(req)
+                return
             # Expand a single image token into multiple dummy tokens for receiving image embeddings
             # The `pad_input_ids_func` is model-specific and may be None for
             # embedding models or models not requiring special padding.

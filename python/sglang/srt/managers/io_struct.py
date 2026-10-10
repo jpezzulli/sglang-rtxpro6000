@@ -79,6 +79,17 @@ else:
 logger = logging.getLogger(__name__)
 
 
+class MMInputsProcessError(msgspec.Struct, frozen=True):
+    """Request-local multimodal input failure produced after tokenizer fanout.
+
+    Placed in ``mm_inputs`` by the scheduler's request receiver when a rank could
+    not materialize the request's shared-memory features; handle_generate_request
+    turns it into an aborted request instead of a crashed scheduler.
+    """
+
+    message: str
+
+
 class BaseReq(msgspec.Struct, tag=True, kw_only=True, array_like=True):
     """Base for single-request IPC payloads."""
 
