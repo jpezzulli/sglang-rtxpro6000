@@ -1434,6 +1434,50 @@ class Req(ReqDllmMixin):
                 match_result.mamba_host_hit_length,
                 match_result.mamba_branching_seqlen,
             )
+            sig = (
+                match_result.full_kv_hit_length,
+                len(self.prefix_indices),
+                self.host_hit_length,
+                self.mamba_host_hit_length,
+                self.mamba_branching_seqlen,
+                self.best_match_node,
+            )
+            if sig != getattr(self, "_mamba_match_sig", None):
+                self._mamba_match_sig = sig
+                mamba_used = mamba_total = -1
+                group = getattr(tree_cache, "host_pool_group", None)
+                if group is not None:
+                    entry = next(
+                        (
+                            candidate
+                            for name, candidate in group.entry_map.items()
+                            if str(name) == "mamba"
+                        ),
+                        None,
+                    )
+                    if entry is not None:
+                        mamba_total = int(entry.host_pool.size)
+                        mamba_used = mamba_total - int(entry.host_pool.available_size())
+                prefix = ""
+                if self.extra_key:
+                    prefix = format(abs(hash(str(self.extra_key))) % 10**12, "012d")
+                logger.info(
+                    "mamba match rid=%s session=%s prefix=%s input=%s "
+                    "full_kv=%s device=%s host_hit=%s mamba_host=%s "
+                    "branching=%s node=%s mamba_used=%s mamba_total=%s",
+                    self.rid,
+                    self.session_id,
+                    prefix,
+                    input_len,
+                    match_result.full_kv_hit_length,
+                    len(self.prefix_indices),
+                    self.host_hit_length,
+                    self.mamba_host_hit_length,
+                    self.mamba_branching_seqlen,
+                    self.best_match_node,
+                    mamba_used,
+                    mamba_total,
+                )
             if match_result.cache_protected_len is not None:
                 self.cache_protected_len = match_result.cache_protected_len
             else:
