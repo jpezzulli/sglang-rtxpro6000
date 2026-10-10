@@ -127,8 +127,8 @@ also passed. [Detailed results](RESULTS.md#penny-royal-30) and the
 Use the [native installation guide](BUILD.md) or the
 [prebuilt container guide](docker/pennyroyal/README.md). Source tag:
 `pennyroyal-v3.0.0`; container image:
-`ghcr.io/jpezzulli/sglang-rtxpro6000:v3.0.0`. The image becomes available when
-the [container build](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml) finishes.
+`ghcr.io/jpezzulli/sglang-rtxpro6000:v3.0.0`. The prebuilt image is available now
+(about **7.65 GB** to download).
 
 ## Thanks
 

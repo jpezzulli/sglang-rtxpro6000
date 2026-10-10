@@ -10,11 +10,8 @@
     "is_draft": false,
     "published": true,
     "native_qualification_complete": true,
-    "note": "Source release published with accepted native qualification, packaging, brand, documentation and launch defaults. Container build and image verification remain pending.",
-    "pending_release_owner_work": [
-      "GitHub container build and published image identity",
-      "verify image size and container installation links"
-    ]
+    "note": "Source release and versioned container published. Native qualification is reused; local container generation and tool checks passed, and the GitHub-built image identity and public installation links are verified.",
+    "pending_release_owner_work": []
   },
   "provenance": {
     "selected_public_core": "b48b70f3f80494d78a778fd4d26958ede343075f",
@@ -39,7 +36,7 @@
     "image_preprocess_device": "A4000 (cuda:1)",
     "image_preprocess_note": "CPU or another GPU also valid",
     "tp2_hardware": "unavailable",
-    "containers_used_locally": false,
+    "containers_used_locally": true,
     "inference_target": {
       "gpu": "NVIDIA RTX PRO 6000 Blackwell",
       "tensor_parallel_sizes": [
@@ -54,7 +51,8 @@
       ],
       "cpu_supported": true,
       "role": "image preprocessing only; these retained build families do not expand the inference target"
-    }
+    },
+    "container_validation_scope": "Local external-config boot, generation, tool call and continuation smoke checks; the full accepted runtime qualification remains native."
   },
   "runtime_health": {
     "status": "healthy",
@@ -279,7 +277,7 @@
       "id": "focused_gpu_build",
       "what": "Retain RTX Blackwell for RTX PRO 6000 inference and Ampere/Ada Lovelace for image-processing sidecars; trim other GPU build targets.",
       "why": "The release went on a diet: a slimmer package for easier downloads.",
-      "status": "accepted packaging integrated into the publication candidate; container build pending"
+      "status": "published in the verified v3.0.0 container"
     }
   ],
   "supported_carryover_capabilities": [
@@ -682,7 +680,7 @@
     ],
     "inference_target": "RTX PRO 6000 Blackwell, TP1 or TP2",
     "ampere_ada_role": "optional sidecar image preprocessing",
-    "status": "accepted and integrated into the publication candidate; container build pending",
+    "status": "published; versioned image and measured download size verified",
     "why": "A slimmer release for easier downloads.",
     "release_summary": "The release went on a diet: RTX Blackwell for inference, Ampere/Ada Lovelace for image-processing sidecars, with other GPU build targets trimmed for easier downloads."
   },
@@ -721,8 +719,17 @@
     "source_tag": "pennyroyal-v3.0.0",
     "container_image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.0.0",
     "published": true,
-    "container_build": "pending",
+    "container_build": "success",
     "release_url": "https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v3.0.0",
-    "container_workflow": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml"
+    "container_workflow": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml",
+    "container_published": true,
+    "container_source_revision": "5d33142c1f3fd3df1548b9682f728fcdd8c7a710",
+    "container_digest": "sha256:fd26ba8d3ce001bb6e4b865236e1b69f7f790b94fb7fe1c32aa81799f4fe338c",
+    "container_linux_amd64_digest": "sha256:26019833a2d4cc8409ddc5212ea9d60f37ac98db25ea1d6c38228ad7fcf47cc9",
+    "container_compressed_layer_bytes": 7654714681,
+    "container_build_url": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/38087724345",
+    "container_promotion_url": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/38093932947",
+    "container_verification": "Anonymous registry access, versioned digest, embedded source revision, healthcheck metadata and release installation links verified October 10, 2026.",
+    "container_source_note": "The immutable source tag remains 560edbdca18aedae13f71ae20b3984efa4d22633. The image source adds reviewed packaging repairs for the selected FlashInfer cache providers, CI compile memory and HiCache compiler headers; runtime qualification is unchanged."
   }
 }
