@@ -10,7 +10,7 @@
     "is_draft": false,
     "published": true,
     "native_qualification_complete": true,
-    "note": "Source release and versioned container published. Native qualification is reused; local container generation and tool checks passed, and the GitHub-built image identity and public installation links are verified.",
+    "note": "Source release and versioned container published. Native qualification is reused; the exact downloaded public image passed external-config startup, generation, a real tool call and continuation. Published identity and installation links are verified.",
     "pending_release_owner_work": []
   },
   "provenance": {
@@ -52,7 +52,7 @@
       "cpu_supported": true,
       "role": "image preprocessing only; these retained build families do not expand the inference target"
     },
-    "container_validation_scope": "Local external-config boot, generation, tool call and continuation smoke checks; the full accepted runtime qualification remains native."
+    "container_validation_scope": "Exact public v3.0.0 image pulled from GHCR and GPU-smoke-tested: external-config startup, generation, tool call, tool-result continuation and post-test health. The full accepted runtime qualification remains native."
   },
   "runtime_health": {
     "status": "healthy",
@@ -730,6 +730,21 @@
     "container_build_url": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/38087724345",
     "container_promotion_url": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/38093932947",
     "container_verification": "Anonymous registry access, versioned digest, embedded source revision, healthcheck metadata and release installation links verified October 10, 2026.",
-    "container_source_note": "The immutable source tag remains 560edbdca18aedae13f71ae20b3984efa4d22633. The image source adds reviewed packaging repairs for the selected FlashInfer cache providers, CI compile memory and HiCache compiler headers; runtime qualification is unchanged."
+    "container_source_note": "The immutable source tag remains 560edbdca18aedae13f71ae20b3984efa4d22633. The image source adds reviewed packaging repairs for the selected FlashInfer cache providers, CI compile memory and HiCache compiler headers; runtime qualification is unchanged.",
+    "container_gpu_smoke": {
+      "date_utc": "2026-10-10",
+      "image_digest": "sha256:fd26ba8d3ce001bb6e4b865236e1b69f7f790b94fb7fe1c32aa81799f4fe338c",
+      "passed": true,
+      "profile": "Flash-Next NVFP4, TP1, FR-Spec, C1-only adaptive MTP, C4 capacity, 524288 context, 824384-token pool, HiCache and NIXL",
+      "configuration": "Published external startup files, changing only the local model path.",
+      "checks": [
+        "GPU startup and readiness",
+        "non-greedy generation",
+        "valid add tool call and execution",
+        "correct answer after tool result",
+        "post-test HTTP 200 health",
+        "no runtime errors or new GPU Xids"
+      ]
+    }
   }
 }
