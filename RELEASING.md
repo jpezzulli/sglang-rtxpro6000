@@ -56,6 +56,11 @@ qualification or reverse John's decision to reuse the 27B checks for 3.0.
 
 ## Publication
 
+When the container build or packaging changes, build the candidate image and
+boot it for a quick generation/tool check before publishing the release. Reuse
+the completed runtime qualification, and promote the checked image digest
+without rebuilding it.
+
 - [ ] README/documentation and configurator gates above are both complete for this candidate; a runtime test pass does not complete these gates.
 - [ ] John approves the final release notes and publication.
 - [ ] Publish the reviewed source and immutable release tag; never move an already published tag.
