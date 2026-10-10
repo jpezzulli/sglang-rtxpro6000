@@ -39,6 +39,7 @@ from sglang.srt.model_executor.cuda_graph_config import (
     Backend,
     Phase,
     check_cuda_graph_backend,
+    scoped_capture_cuda_graph_config,
 )
 from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardBatch
 from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
@@ -1264,11 +1265,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     )
                 )
                 self.adaptive_controller.init_states(
-                    cuda_graph_bs=(
-                        None
-                        if check_cuda_graph_backend(Phase.DECODE, Backend.DISABLED)
-                        else get_exec().graph.cuda_graph_bs_decode
-                    ),
+                    cuda_graph_bs=self._decode_graph_capture_bs(),
                 )
 
     def forward_batch_generation(
@@ -1466,6 +1463,25 @@ class EAGLEWorkerV2(BaseSpecWorker):
             self.adaptive_controller.activate_step_by_batch(batch_size)
 
     # -- Adaptive speculative decoding protocol --
+
+    def _decode_graph_capture_bs(self) -> list[int] | None:
+        """The decode buckets the adaptive states must be sized against.
+
+        Read from the canonical ``cuda_graph_config[decode].bs``, NOT from the
+        legacy ``cuda_graph_bs_decode`` leaf: the resolution pipeline folds the
+        legacy flags into the canonical config once at startup and
+        ``RuntimeContext.override`` does not synchronize the aliases back, so a
+        launch that set the canonical ``--cuda-graph-config`` (or only the
+        ``--cuda-graph-bs-decode`` default projection) would feed ``None`` here
+        and the C1 wide states would be built with no bucket prerequisite --
+        routing C1 onto a width whose BS1 graph nothing captured. ``None``
+        (no bucket list, decode graphs off) keeps the existing no-pruning
+        semantics.
+        """
+        cfg = get_exec().graph.cuda_graph_config
+        if cfg is None or check_cuda_graph_backend(Phase.DECODE, Backend.DISABLED):
+            return None
+        return list(cfg.decode.bs) if cfg.decode.bs is not None else None
 
     def _validate_adaptive_widths(self) -> None:
         """Refuse a selectable width the fixed launch allocation cannot serve.
@@ -1767,8 +1783,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
             dw.cuda_graph_runner_for_draft_extend,
             get_spec().speculative_num_steps,
             get_spec().speculative_num_draft_tokens,
-            get_exec().graph.cuda_graph_bs_decode,
-            get_exec().graph.disable_cuda_graph,
+            get_exec().graph.cuda_graph_config,
         )
 
         self.speculative_num_steps = speculative_num_steps
@@ -1784,11 +1799,15 @@ class EAGLEWorkerV2(BaseSpecWorker):
             # BS-aware adaptive spec may prune cuda_graph_bs to an empty list
             # for steps that no BS range uses (e.g. step=1). Disable graph
             # capture for those steps; restore in finally so subsequent steps
-            # are not affected.
+            # are not affected. Swap the canonical cuda_graph_config leaf --
+            # the capture-list consumers (get_batch_sizes_to_capture,
+            # check_cuda_graph_backend) read the config's decode phase, not the
+            # legacy aliases -- with fresh phase copies, so the published
+            # config is never mutated in place and the original object goes
+            # back whole on every exit path.
             get_context().override(
                 "adaptive_spec.capture_override",
-                cuda_graph_bs_decode=cuda_graph_bs,
-                **({"disable_cuda_graph": True} if not cuda_graph_bs else {}),
+                cuda_graph_config=scoped_capture_cuda_graph_config(cuda_graph_bs),
             )
         dw._rebuild_topk1_chain_buffers()
 
@@ -1811,8 +1830,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 "adaptive_spec.capture_restore",
                 speculative_num_steps=backup[10],
                 speculative_num_draft_tokens=backup[11],
-                cuda_graph_bs_decode=backup[12],
-                disable_cuda_graph=backup[13],
+                cuda_graph_config=backup[12],
             )
             dw._rebuild_topk1_chain_buffers()
 

@@ -21,6 +21,7 @@ inside the function body to preserve that invariant.
 """
 
 import argparse
+import copy
 import dataclasses
 import json
 from dataclasses import dataclass, field
@@ -204,6 +205,40 @@ def cuda_graph_fully_disabled() -> bool:
     return check_cuda_graph_backend(
         Phase.DECODE, Backend.DISABLED
     ) and check_cuda_graph_backend(Phase.PREFILL, Backend.DISABLED)
+
+
+def scoped_capture_cuda_graph_config(cuda_graph_bs: List[int]) -> CudaGraphConfig:
+    """The canonical graph config for one adaptive-capture window.
+
+    Adaptive speculative decoding builds one state per candidate width and
+    prunes the decode capture buckets to the batch sizes that width can reach
+    (possibly to the empty list = no graphs for that width). The capture-list
+    consumers -- ``get_batch_sizes_to_capture`` and ``check_cuda_graph_backend``
+    -- read ``cuda_graph_config[decode].bs`` / ``.backend``, so that is the leaf
+    the scoped override carries; the legacy ``cuda_graph_bs_decode`` /
+    ``disable_cuda_graph`` leaves are folded into this config once at startup
+    and ``RuntimeContext.override`` does not synchronize them, so writing those
+    renames the knob without moving the value.
+
+    Fresh copies at the top level and for the decode phase (never mutate the
+    published config in place -- it is the global resolved state every other
+    width and every later reader shares); ``prefill`` is carried by reference
+    and never touched here. An empty bucket list disables the decode phase the
+    way the runner asks about it -- ``backend=disabled`` -- because dropping
+    only ``bs`` would leave ``FULL`` advertised and a caller reading
+    ``check_cuda_graph_backend(Phase.DECODE, Backend.DISABLED)`` would still
+    build a graph runner against an empty capture list.
+    """
+    from sglang.srt.runtime_context import get_exec
+
+    base = get_exec().graph.cuda_graph_config or default_cuda_graph_config()
+    scoped = copy.copy(base)
+    decode = copy.copy(base.decode)
+    decode.bs = list(cuda_graph_bs)
+    if not cuda_graph_bs:
+        decode.backend = Backend.DISABLED
+    scoped.decode = decode
+    return scoped
 
 
 def parse_cuda_graph_config_arg(raw: str) -> Dict[str, Dict[str, Any]]:
