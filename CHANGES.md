@@ -1,4 +1,22 @@
-# Cumulative changes and upstream status
+# Penny Royal release history
+
+## 3.0 — Adaptive decoding and simpler setup (draft)
+
+- Adaptive NEXTN MTP, automatic rowwise-FP8 dense kernels, faster draft steps
+  and lower attention-memory overhead for Flash-Next on RTX PRO 6000.
+- Correct speculative state/context reservations, session-cache ownership,
+  Responses events, literal thinking tags and lost-image request handling.
+- Ordinary host configuration for the prebuilt container, optional NIXL,
+  timestamped beta-configurator output and FlashInfer 0.7.0 post1 packaging.
+- GPU build scope is being narrowed to RTX Blackwell inference, with Ampere
+  and Ada Lovelace retained for optional sidecar image processing.
+
+See the [3.0 release notes](RELEASE_NOTES_3.0.md) for technical details, direct
+contributor acknowledgements and results, or the [machine-readable record](release-3.0.json).
+
+The entries below are retained history. They keep their original labels and
+source references; use the 3.0 notes for the current release's change list.
+
 
 The exact v2.5.3 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
 Its lineage extends the v2.4.1 ordered range
@@ -20,7 +38,7 @@ automatic release-container builds on the same dependency stack.
 “Local” identifies changes maintained in this fork. Upstream status and PR
 heads are recorded with the release that used them.
 
-## Unreleased (source preparation) — accepted Flash-Next SM120 paths selected by default
+### Automatic runtime selection in 3.0
 
 - **Automatic default (Local):** the accepted online rowwise-FP8 Flash-Next
   dense format, HyperConnection mix and output-head conversion, and the
@@ -38,37 +56,8 @@ heads are recorded with the release that used them.
   mixed-MXFP8 `online_mxfp8=true` namespaces and off runs keep their prior
   identity. 27B/DFlash2 behavior is untouched; no kernel math changed.
 
-## v2.5.3 — Agentic correctness and cache maintenance
+### FlashInfer source packaging in 3.0
 
-The main fixes in this release are the Flash-Next checkpoint error reported in
-[issue #17](https://github.com/jpezzulli/sglang-rtxpro6000/issues/17) and the
-BF16 NVMe PLE staging fix previously supplied as an optional v2.5.2 patch.
-
-- **Flash-Next checkpoint selection:** select the recurrent state at the
-  correct accepted-token boundary during native MTP. This addresses the
-  phantom-token/file-writing problem reported in #17. Thanks to
-  [barnesea](https://github.com/jpezzulli/sglang-rtxpro6000/issues/17#issuecomment-5852373752)
-  for the boundary analysis and hey-heiko for reproducing and checking it.
-- **BF16 NVMe PLE:** size staging memory using the table's actual element
-  size. The fix for Swift's `PLE lookup needs ... staging rows` error is now
-  included; the separate [v2.5.2 patch](tools/ple_nvme/BF16-STAGING-HOTFIX.md)
-  is no longer needed on v2.5.3.
-- **Streaming tool arguments:** send string arguments as they are generated,
-  so long file-writing calls can show progress before the argument closes.
-  Adapted from [SGLang #41313](https://github.com/sgl-project/sglang/pull/41313).
-- **Reasoning and client compatibility:** preserve quoted tool examples
-  across reasoning-stream chunks, and accept either `thinking` or
-  `enable_thinking` for a lone boolean template setting. Native unknown-tool
-  calls still reach the client for normal error recovery.
-- **Long prompts:** encode eligible prompts in parallel while preserving
-  token IDs, with the existing serial path for other inputs. Adapted from
-  [#41259](https://github.com/sgl-project/sglang/pull/41259).
-- **Cache persistence:** back up fresh write-through chunks and retain their
-  host buffers until in-flight storage writes finish, including when a cached
-  prefix is split. Startup warns about cache filesystem pressure; retired
-  cache cleanup remains under the user's control.
-- **27B/DFlash2:** avoid blocking copies of small prefill metadata arrays,
-  adapted from [#40091](https://github.com/sgl-project/sglang/pull/40091).
 - **FlashInfer SM120 kernels:** the accepted fused-MoE and GDN sources are now
   packaged into every installation instead of living in a private overlay. Both
   suspected Xid109 candidates are in the shipped source: the three fused-MoE
@@ -105,6 +94,38 @@ BF16 NVMe PLE staging fix previously supplied as an optional v2.5.2 patch.
   namespace in all four Next launch paths, so mode 0 and mode 1 cannot share one
   persisted FILE root; no cache data is deleted and the 27B namespace fields are
   untouched. Online FP8, routing, GEMV and normalization defaults are untouched.
+
+## v2.5.3 — Agentic correctness and cache maintenance
+
+The main fixes in this release are the Flash-Next checkpoint error reported in
+[issue #17](https://github.com/jpezzulli/sglang-rtxpro6000/issues/17) and the
+BF16 NVMe PLE staging fix previously supplied as an optional v2.5.2 patch.
+
+- **Flash-Next checkpoint selection:** select the recurrent state at the
+  correct accepted-token boundary during native MTP. This addresses the
+  phantom-token/file-writing problem reported in #17. Thanks to
+  [barnesea](https://github.com/jpezzulli/sglang-rtxpro6000/issues/17#issuecomment-5852373752)
+  for the boundary analysis and hey-heiko for reproducing and checking it.
+- **BF16 NVMe PLE:** size staging memory using the table's actual element
+  size. The fix for Swift's `PLE lookup needs ... staging rows` error is now
+  included; the separate [v2.5.2 patch](tools/ple_nvme/BF16-STAGING-HOTFIX.md)
+  is no longer needed on v2.5.3.
+- **Streaming tool arguments:** send string arguments as they are generated,
+  so long file-writing calls can show progress before the argument closes.
+  Adapted from [SGLang #41313](https://github.com/sgl-project/sglang/pull/41313).
+- **Reasoning and client compatibility:** preserve quoted tool examples
+  across reasoning-stream chunks, and accept either `thinking` or
+  `enable_thinking` for a lone boolean template setting. Native unknown-tool
+  calls still reach the client for normal error recovery.
+- **Long prompts:** encode eligible prompts in parallel while preserving
+  token IDs, with the existing serial path for other inputs. Adapted from
+  [#41259](https://github.com/sgl-project/sglang/pull/41259).
+- **Cache persistence:** back up fresh write-through chunks and retain their
+  host buffers until in-flight storage writes finish, including when a cached
+  prefix is split. Startup warns about cache filesystem pressure; retired
+  cache cleanup remains under the user's control.
+- **27B/DFlash2:** avoid blocking copies of small prefill metadata arrays,
+  adapted from [#40091](https://github.com/sgl-project/sglang/pull/40091).
 - **NIXL and host allocation:** correct hybrid storage-component counts and
   include opt-in pinned-host allocation/device-alias support adapted from
   [LandOfLemons' PR #24](https://github.com/jpezzulli/sglang-rtxpro6000/pull/24).
@@ -114,10 +135,7 @@ Both supported profiles completed full reasoning and tool runs, plus fresh
 64K disk-cache restoration and device-replay checks. The 27B tool rerun used
 the corrected uncapped validation runner. Existing long-context, media and
 performance evidence retains its original source and date. The model weights,
-token map and sampler are unchanged; the FlashInfer package pin and its SM120
-module are not — see the packaging note above. The packaging integration itself
-is checked without a GPU; the compile, the rebuilt image and the two-profile
-GPU regression for these kernels are still owed by the release host.
+token map and sampler were unchanged by v2.5.3.
 
 Literal model end-of-turn markers can still terminate a response; this release
 does not change that model/runtime behavior.

@@ -1,45 +1,32 @@
-# Run Qwen3.8 with SGLang on one RTX PRO 6000 Blackwell
+# Run Penny Royal on RTX PRO 6000 Blackwell
 
-This is the native launch guide for Pennyroyal. The same source runs
+This is the native launch guide for Penny Royal. The same source runs
 Qwen3.8-27B FP8 with DFlash2 or Qwen3.8 Flash-Next NVFP4 with native NEXTN and
-FR-Spec on one NVIDIA RTX PRO 6000 Blackwell 96 GB GPU (SM120). Both profiles
+FR-Spec on NVIDIA RTX PRO 6000 Blackwell (SM120), TP1 or TP2. Both profiles
 serve an OpenAI-compatible model named `pennyroyal`.
 
 Build the release with [BUILD.md](BUILD.md) first. Container users should
-follow the separate [Docker and Compose guide](docker/pennyroyal/README.md).
+follow the separate [container guide](docker/pennyroyal/README.md).
 Pennyroyal does not include a native systemd service file.
 
 ## Configure and run
 
-The optional setup assistant is **beta**; [CONFIGURE.md](CONFIGURE.md) walks
-through setup, the main choices, and saved settings. The existing direct
-launchers remain available below if you prefer manual configuration.
+Use the ordinary startup scripts below: set your model, GPU and cache paths,
+then run the recipe. Settings can live in your own shell startup file or the
+provided environment-file format. The same runtime supports RTX PRO 6000
+Blackwell at TP1 or TP2; optional Ampere/Ada sidecar image processing is separate
+from the inference cards.
 
-After building Pennyroyal and downloading your model, run this from the checkout:
+Start with [Common setup](#common-setup), then choose
+[Flash-Next with FR-Spec](#launch-flash-next-with-fr-spec), the
+[optional non-FR alternative](#launch-flash-next-without-fr-spec-alternative), or
+[27B with DFlash2](#launch-27b-with-dflash2). Stop and restart the server after
+changing configuration.
 
-```bash
-./configure-penny --native
-./run-penny --check
-./run-penny
-```
-
-Setup asks for the model, cache locations, and GPU, then shows your choices
-before saving. Next needs one target checkpoint; 27B also needs its DFlash2
-draft. Leave advanced settings alone to use the normal recipe defaults.
-Create any missing cache directories shown by the check before starting.
-
-Settings are saved in `~/.config/pennyroyal/pennyroyal.env`. Rerun setup to
-change them, or edit the file directly. `./run-penny --show-config` shows the
-selected configuration without loading a model. For separate saved profiles,
-pass `--config /absolute/path/to/next.env` to both setup and launch.
-
-The setup utility needs Python 3 but no model packages or GPU to validate
-configuration. It does not install dependencies, download models, start the
-server, or delete caches. The normal launcher still checks the runtime and
-checkpoint when starting. Stop and restart the server to apply changes.
-
-Prefer shell exports or an existing service? The direct launchers below still
-work; the setup utility is optional.
+The optional [beta configurator](CONFIGURE.md) can write the settings for you.
+It creates a new timestamped file and prints the exact check and launch
+commands for that file. Use those commands rather than assuming it overwrote
+`~/.config/pennyroyal/pennyroyal.env`.
 
 ## Common setup
 
@@ -524,3 +511,6 @@ than TP (plus a dedicated `SGLANG_MM_PREPROCESS_DEVICE=cuda:N`) requires.
 In Docker/Compose the same `TP_SIZE=2` also needs the existing
 `deploy.resources.reservations.devices` entry edited to name both GPU ids,
 for example `device_ids: ["0", "1"]`; see docker/pennyroyal/README.md.
+
+<!-- Compatibility anchors for earlier versions of this guide. -->
+<a id="run-qwen38-with-sglang-on-one-rtx-pro-6000-blackwell"></a>

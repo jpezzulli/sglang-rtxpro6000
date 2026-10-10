@@ -1,0 +1,706 @@
+{
+  "schema": "release-notes/3.0-draft",
+  "artifact": "release-3.0.json",
+  "version_label": "3.0",
+  "draft_date": "2026-10-10",
+  "revises": {
+    "prior_task": "115a2399-5e31-49c5-b38f-85523fdb64bd",
+    "reason": "writing-brief rewrite: human release notes; facts and measurement conditions carried forward"
+  },
+  "status": {
+    "is_draft": true,
+    "published": false,
+    "native_qualification_complete": true,
+    "note": "Publication draft. Qualification evidence is reused from the accepted native runtime. Final recipe/default propagation, architecture-build integration and the published image identity are pending.",
+    "pending_release_owner_work": [
+      "propagate adaptive MTP default into public recipes/launchers (current public fixed-W4 recipe is a stale propagation snapshot, not an open product decision)",
+      "integrate and confirm the narrowed GPU build: RTX Blackwell inference; Ampere/Ada sidecar image processing",
+      "final docs/version/settings propagation",
+      "publication approval",
+      "GitHub container build / image identity"
+    ]
+  },
+  "provenance": {
+    "selected_public_core": "b48b70f3f80494d78a778fd4d26958ede343075f",
+    "selected_public_core_scope": "entire integrated baseline (accepted API/Responses, cache/session, runtime correctness, packaging/configurator, donor optimizations, adaptive MTP default)",
+    "public_integration_base": "6df7c9820fa53daa450d31eea63a474709849071",
+    "new_feature_git_range": "69583da7c71b87ac36371333a19f2749bab72773..b48b70f3f80494d78a778fd4d26958ede343075f",
+    "novelty_note": "Novelty determined by the actual git range above; current CHANGES version headings are not relied on for novelty.",
+    "local_runtime": "90b2b412e2bfd06f0ef3be1b41fbfbdee45bc14f",
+    "local_runtime_note": "adds LOCAL diagnostics only, not publication code"
+  },
+  "hardware": {
+    "native_gpu": "RTX PRO 6000 Blackwell",
+    "arch": "SM120",
+    "vram_gb": 96,
+    "image_preprocess_device": "A4000 (cuda:1)",
+    "image_preprocess_note": "CPU or another GPU also valid",
+    "tp2_hardware": "unavailable",
+    "containers_used_locally": false,
+    "inference_target": {
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell",
+      "tensor_parallel_sizes": [
+        1,
+        2
+      ]
+    },
+    "sidecar_image_preprocessing": {
+      "retained_gpu_families": [
+        "Ampere",
+        "Ada Lovelace"
+      ],
+      "cpu_supported": true,
+      "role": "image preprocessing only; these retained build families do not expand the inference target"
+    }
+  },
+  "runtime_health": {
+    "status": "healthy",
+    "runtime_errors_observed": false,
+    "new_xids_observed": false,
+    "diagnostic_monitors_loaded_enabled": 12,
+    "boot": "same unchanged boot",
+    "limitation": "does not establish root cause of historical stalls; two existing suspected NVIDIA Xid 109 mitigations remain in place"
+  },
+  "units": {
+    "throughput": "tokens/s",
+    "memory": "GiB / MiB (binary)",
+    "latency": "seconds",
+    "counts": "tokens / states / turns are absolute integers"
+  },
+  "speculative_default": {
+    "intended_release_default": {
+      "mode": "adaptive MTP",
+      "status": "DECIDED: adaptive is the intended 3.0 default for Flash-Next (John's product decision); not an open question",
+      "tested_live_runtime_used_it": true,
+      "policy": {
+        "draft_models": 1,
+        "note": "one draft model producing more tokens, NOT two draft models",
+        "single_request_C1": "window W4/W8 switched by acceptance EMA",
+        "batch_C2_plus": "W4 selected using padded CUDA-graph batch size"
+      },
+      "width_switch_safety_prerequisites": [
+        "sufficient-capacity QSA pending keyring",
+        "per-width CUDA-graph state and selection",
+        "target-side autotuning"
+      ],
+      "c1_only_adaptation": true,
+      "concurrency_note": "C means active request concurrency, not GPU count or configured maximum capacity. C2+ retains fixed-W4 speculative decoding; only width adaptation is C1-only.",
+      "fr_spec_enabled": true,
+      "fr_spec_scope": "Enabled alongside adaptive MTP at C1 and fixed W4 at C2+; reduces draft vocabulary, not the target vocabulary."
+    },
+    "current_public_recipe_snapshot": {
+      "public_launchers": "fixed W4",
+      "method": "NEXTN",
+      "steps": 3,
+      "topk": 1,
+      "draft_tokens": 4,
+      "label": "STALE release propagation; main release owner must update before publication",
+      "fr_spec_enabled": true
+    },
+    "propagation_required_before_publication": true,
+    "configurator_exposes_adaptive": false,
+    "no_new_public_switch_or_toggle": true,
+    "verified_launch_interface": {
+      "flags": [
+        "--speculative-adaptive",
+        "--speculative-adaptive-config configs/pennyroyal/adaptive-next.json",
+        "--speculative-num-steps 7",
+        "--speculative-eagle-topk 1",
+        "--speculative-token-map configs/pennyroyal/frspec/flash-next-64k.pt"
+      ],
+      "resolver_sets_draft_tokens": 8,
+      "must_preserve": "all other baseline settings; include BS1 CUDA graph bucket",
+      "caveats": [
+        "adaptive flags alone on a steps-3 launcher are rejected by width validation",
+        "omitting the supplied JSON selects a different upstream candidate table",
+        "native wrapper scripts do not forward arbitrary args"
+      ]
+    },
+    "disambiguation": "W8 (weight precision) is NOT the same as W8 (speculative window)"
+  },
+  "features_new_in_3_0": [
+    {
+      "id": "rowwise_fp8_dense_auto",
+      "what": "Automatic Flash-Next rowwise-FP8 dense format on SM120 plus matching small-batch kernels",
+      "why": "reduces weight traffic per token; removes copied benchmark flags from ordinary startup",
+      "scope_note": "online FP8 itself predates 3.0; the representation, default selection, and companion kernels are new",
+      "credits": {
+        "original": "aiueo52",
+        "adaptation_and_integration": "Penny"
+      }
+    },
+    {
+      "id": "small_batch_fp8_kernels",
+      "what": "Dense projections and target/draft output heads use specialized small-batch GPU kernels reading resident FP8 weights directly",
+      "why": "avoids repeated conversion/materialization of weights on hot small ops; larger/unsupported shapes retain established paths",
+      "credits": {
+        "original": "aiueo52",
+        "adaptation_and_integration": "Penny"
+      }
+    },
+    {
+      "id": "hc_mix2_dedicated_kernels",
+      "what": "HyperConnection HCMIX2 branch normalization/mixing uses dedicated kernels",
+      "why": "removes serialization in the previous persistent mix",
+      "credits": {
+        "original": "aiueo52",
+        "adaptation_and_integration": "Penny"
+      }
+    },
+    {
+      "id": "gdn_gating_fusion",
+      "what": "GDN gated normalization fused with output projection",
+      "why": "removes an intermediate operation and memory pass",
+      "credits": {
+        "original": "aiueo52",
+        "adaptation_and_integration": "Penny"
+      },
+      "disambiguation": "distinct from the packaged FlashInfer GDN FP16-accumulate MMA (flashinfer-ai/flashinfer#6227); different changes"
+    },
+    {
+      "id": "mtp_draft_kernels",
+      "what": "Native MTP BF16 entry projection and single-token NVFP4 draft MoE kernels",
+      "why": "speeds the small operations repeated for each draft token",
+      "credits": {
+        "original": "aiueo52",
+        "adaptation_and_integration": "Penny"
+      }
+    },
+    {
+      "id": "packed_key_router",
+      "pr": 56,
+      "what": "Packed-key softmax expert router combines scoring/selection",
+      "why": "faster routing without changing experts or weights"
+    },
+    {
+      "id": "adaptive_mtp_default",
+      "prereqs": [
+        41,
+        45,
+        52,
+        53,
+        54
+      ],
+      "what": "Adaptive width at C1 only: W4/W8 by acceptance; C2+ fixed W4 using padded graph batch size. FR-Spec remains enabled at all concurrency levels; one draft model.",
+      "why": "wider speculation where acceptance makes it worthwhile; safer width switching via QSA pending keyring, per-width graph state/selection, target autotuning"
+    },
+    {
+      "id": "attention_vram",
+      "what": "Avoid constructing the discarded FlashInfer backend when QSA immediately replaces it; share QSA decode scratch where execution lifetime permits",
+      "why": "frees VRAM so the adaptive default is affordable and the token pool can grow; see vram_measured_stages",
+      "evidence_reused": {
+        "focused_checks": 66,
+        "subtests": 6,
+        "clean_focused_reviews": 2
+      }
+    },
+    {
+      "id": "spec_mamba_state_correctness",
+      "pr": 51,
+      "what": "Actual speculative Mamba state buffer reservation, context headroom (PR 27), and committed-token checkpoint boundaries (upstream 43029)",
+      "why": "speculative proposals cannot determine retained state"
+    },
+    {
+      "id": "session_cache",
+      "pr": 49,
+      "what": "Retain resumable checkpoints, evict redundant interior states preferentially, release abandoned branch ownership, protect shared backups per owner",
+      "why": "resumable sessions; benefit requires client session IDs and closure",
+      "credits": {
+        "original": "LandOfLemons/Tyler Landis",
+        "integration_followups": "Penny"
+      }
+    },
+    {
+      "id": "fp32_gdn_beta",
+      "pr": 58,
+      "what": "FP32 GDN gating beta during extend/prefill",
+      "why": "avoids avoidable BF16 rounding in recurrent updates"
+    },
+    {
+      "id": "thinking_tags_and_responses",
+      "pr": [
+        28,
+        29,
+        30
+      ],
+      "what": "Literal thinking tags after reasoning remain answer text; Responses emits required reasoning-part lifecycle and correct capped/failed terminal status",
+      "why": "agent clients handle completions properly"
+    },
+    {
+      "id": "tool_parser_metrics",
+      "pr": 26,
+      "what": "Prometheus aggregate tool-parser outcomes",
+      "why": "exposes parse failures without logging private prompts/arguments"
+    },
+    {
+      "id": "lost_image_shm",
+      "pr": 61,
+      "what": "Lost image SHM rejects the affected request and releases GPU feature buffers",
+      "why": "keeps scheduler and other requests running; underlying early-unlink cause still investigated",
+      "credits": {
+        "original": "cube4elements/Martin Kazimir Kaplan"
+      }
+    },
+    {
+      "id": "host_launch_config_files",
+      "pr": 32,
+      "what": "Operator-owned run/startup/config files outside the container; read-only /config mount; model/cache mounts separate; edit and restart or update image without rebuilding",
+      "why": "simpler setup; NIXL optional and on by default, independent of GPU/RAM cache and PLE"
+    },
+    {
+      "id": "beta_configurator",
+      "pr": 39,
+      "what": "Optional beta configurator creates timestamped ordinary launch files, preserves earlier files, resolves settings consistently, stages saves",
+      "why": "avoids partial writes and clobbered launch files; carried forward without the old perf stack",
+      "beta": true
+    },
+    {
+      "id": "flashinfer_packaging",
+      "pr": 48,
+      "what": "FlashInfer 0.7.0 post1 split CUDA 13 providers; accepted SM120 MoE/GDN sources packaged into installs; ordinary upgrades install matching providers",
+      "why": "reliable installs/upgrades; interrupted extension builds recover (PR 31); build failures retain useful compiler diagnostics"
+    },
+    {
+      "id": "cache_identity",
+      "pr": 24,
+      "what": "Persistent cache identity distinguishes effective FP8 representation/GDN mode; WSL2 host-memory aliases and hybrid NIXL component keys corrected",
+      "why": "prevents incompatible cache reuse",
+      "credits": {
+        "original": "LandOfLemons/Tyler Landis",
+        "integration_followups": "Penny"
+      }
+    },
+    {
+      "id": "focused_gpu_build",
+      "what": "Retain RTX Blackwell for RTX PRO 6000 inference and Ampere/Ada Lovelace for image-processing sidecars; trim other GPU build targets.",
+      "why": "The release went on a diet: a slimmer package for easier downloads.",
+      "status": "pending integration of the parallel build-cleanup work"
+    }
+  ],
+  "supported_carryover_capabilities": [
+    "OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4 with native NEXTN MTP",
+    "Qwen3.8-27B FP8 with DFlash2",
+    "524288 context",
+    "HiCache + optional NIXL",
+    "PLE",
+    "native MTP",
+    "FRSpec"
+  ],
+  "not_new_in_3_0": [
+    "online FP8 mechanism itself (predates 3.0)",
+    "2.5.3 streaming string arguments",
+    "parallel prompt encoding",
+    "BF16 NVMe PLE staging",
+    "fresh chunk persistence"
+  ],
+  "experimentation_bookkeeping": {
+    "excluded": [
+      {
+        "name": "MoE tuning cleanup",
+        "reason": "real warm-cache startup released 0 bytes on all 4 calls; 4.448 GiB free at original 1,048,576-token pool matched baseline"
+      },
+      {
+        "name": "active expert packing / stride fusion",
+        "reason": "rejected"
+      },
+      {
+        "name": "earlier split-KV / fused prefill gather experiments",
+        "reason": "not accepted"
+      },
+      {
+        "name": "random requantization",
+        "reason": "not performed"
+      }
+    ],
+    "internal_default_off": [
+      "page-parallel QSA metadata exists internally, default off; not advertised as automatic acceleration"
+    ],
+    "no_reconciled_total_vram_saved": true
+  },
+  "vram_measured_stages": {
+    "note": "Measured capacity/headroom stages with labels; no exact total-reclaimed GiB claim.",
+    "stage_adaptive_before_attention_savings": {
+      "gpu_token_pool": 938496,
+      "startup_free_gib": 3.434,
+      "label": "earlier adaptive build before attention allocation savings"
+    },
+    "stage_attention_build_restores_pool": {
+      "gpu_token_pool": 1048576,
+      "startup_free_gib": 4.448,
+      "label": "accepted attention build restored the old fixed-default pool size"
+    },
+    "stage_final": {
+      "gpu_token_pool": 1067072,
+      "startup_free_gib": 4.194,
+      "label": "final verified config, above the old fixed-default 4.094 GiB free floor"
+    },
+    "pool_delta_final_vs_1048576": 18496,
+    "pool_increase_mib_approx": 249.49
+  },
+  "tested_config": {
+    "speculative_mode": "adaptive (the tested live runtime used the intended default)",
+    "context_length": 524288,
+    "max_concurrency": 6,
+    "mamba_states": 36,
+    "mem_fraction_static": 0.981,
+    "fr_spec_enabled": true,
+    "draft_token_map": "configs/pennyroyal/frspec/flash-next-64k.pt",
+    "draft_token_map_sha256": "becfa41d394b86c26c632bea8f3c6ea64bbb76d7b238d8673c06afae21269f25",
+    "fr_spec_and_adaptive_confirmation": "Qualified launcher passes both flags; live get_server_info on 2026-10-10 reports speculative_adaptive=true and the pinned flash-next-64k.pt token map."
+  },
+  "metrics": {
+    "methodology": {
+      "source": "native SGLang elapsed-weighted complete active log intervals",
+      "peak": "sampled from same window",
+      "includes_reasoning": true,
+      "excludes": [
+        "first idle/prefill-crossing interval",
+        "partial tail"
+      ],
+      "sampling": "normal non-greedy",
+      "excluded_from_rate": [
+        "tool execution",
+        "user waits",
+        "prefill"
+      ],
+      "interpretation_limit": "model-generation rate, NOT wall-clock task-completion rate"
+    },
+    "regular_benchmark": {
+      "repeats": 3,
+      "input_tokens": 128,
+      "output_tokens": 1024,
+      "sampling": {
+        "temperature": 0.8,
+        "top_p": 0.95,
+        "top_k": 40,
+        "min_p": 0.05,
+        "reasoning": "xhigh"
+      },
+      "C1": {
+        "mean_tps": 218.6311118,
+        "peak_tps": 326.56,
+        "aggregate": false
+      },
+      "C4": {
+        "mean_tps": 489.3527737,
+        "peak_tps": 636.71,
+        "aggregate": true
+      },
+      "C6": {
+        "mean_tps": 433.5387404,
+        "peak_tps": 606.48,
+        "aggregate": true
+      },
+      "aggregate_note": "C4/C6 are aggregate, never per-request",
+      "vs_earlier_attention_fullpool_screen_mean_pct": {
+        "C1": 3.19,
+        "C4": 0.51,
+        "C6": -1.98
+      },
+      "claim_note": "screen deltas are context only; no universal speedup claim and no matched 2.5.3 comparison"
+    },
+    "pi_coding_workflow": {
+      "mean_tps": 262.315683,
+      "peak_tps": 518.18,
+      "model_turns": 21,
+      "output_tokens": 21193,
+      "reasoning_verified": "medium",
+      "artifact": "stdlib log-triage CLI with tests and HTML report; 10 tests + fixture CLI passed",
+      "measurement_scope": "original completed pass; one cancelled correction invocation excluded"
+    },
+    "presentation_workflow": {
+      "mean_tps": 239.52606843036187,
+      "peak_tps": 543.72,
+      "model_turns": 113,
+      "output_tokens": 164934,
+      "output": "10 editable slides + notes via normal PPTMaster/GeneratePPTX route; ZIP/native-text/notes/preview verified",
+      "client_settings": "unchanged",
+      "client_override_evidence": "retained evidence did not capture exact client reasoning/sampling overrides; server medium verified, not proof of client override",
+      "matched_reasoning_settings_across_workflows_and_synthetic": null,
+      "matched_reasoning_settings_note": "not established: missing proof of a match is not proof of a mismatch"
+    },
+    "cold_prompt": {
+      "64K": {
+        "prompt_tokens": 63921,
+        "input_mean_tps": 17235.9049,
+        "chunk_peak_tps": 141712.63,
+        "ttft_s": 4.713431,
+        "cache": "100% uncached",
+        "response": "correct"
+      },
+      "490K": {
+        "prompt_tokens": 489915,
+        "input_mean_tps": 8839.7535,
+        "chunk_peak_tps": 46567.89,
+        "ttft_s": 60.373579,
+        "cache": "100% uncached",
+        "recall": "all 3 keys recalled"
+      },
+      "peak_semantics": "chunk_peak_tps are individual native chunk samples, NOT whole-prompt rates; human notes report means + TTFT only"
+    },
+    "reasoning_eval": {
+      "score": 95.69,
+      "max": 100,
+      "method": "independent blind final-answer grading using the suite rubric",
+      "natural_completions": "9/9",
+      "errors": 0,
+      "fatal_findings": 0,
+      "loop_penalty_rule": "long private reasoning is NOT a loop penalty; only actual failure to finish matters",
+      "note": "9 completed does not mean 9 perfect"
+    },
+    "tool_eval": {
+      "automatic_passes": 28,
+      "parseable": 30,
+      "runtime_errors": 0,
+      "c13_false_failures_confirmed": 2,
+      "false_failure_detail": "classifier/mock saw excluded 'budget' wording in schedule-only task; Penny noticed duplicate budget tool result and did not invent missing schedule",
+      "claim_note": "never describe as 30 automatic passes; intended schedule fixture not tested",
+      "suite": "unchanged; separately-owned validation issue recorded"
+    },
+    "image_check": {
+      "scope": "single-image spatial OCR / claim-separation",
+      "result": "passed",
+      "device": "A4000 preprocess"
+    },
+    "ram_cache_restore": {
+      "kv_tokens_restored": 63744,
+      "mamba_states_restored": 2,
+      "churn": "7x210K",
+      "facts_correct": 3,
+      "subsequent": "device cache hit",
+      "storage_prefetch_hits": 0,
+      "classification": "RAM restore, NOT fresh NIXL restore"
+    },
+    "code_edit_screen": {
+      "mean_tps": 491.88451093817866,
+      "sampled_peak_tps": 574.16,
+      "sampling": {
+        "temperature": 0.8,
+        "top_p": 0.95,
+        "top_k": 40,
+        "min_p": 0.05
+      },
+      "reasoning_effort": "medium inherited",
+      "concurrency": 1,
+      "measured_requests": 1,
+      "output_cap": 2400,
+      "input_tokens": 6076,
+      "prompt_sha256": "3599ff10297e679d6409e686220814bcdbd3f4cf2226fda740f6f56856a38907",
+      "mean_logged_accept_length": 6.55625,
+      "active_reporting_seconds": 4.264961999986554,
+      "valid_intervals": 8,
+      "core": "706378c1c13bc9b921a68870fb3d3f66879b2687",
+      "runtime_source": "5874a958019467c44a53f4b0c194d9f137629f0a",
+      "invocation_id": "46cf642613b74039b6dc605b42990b32",
+      "gpu_token_pool": 1048576,
+      "source_evidence": "candidates/rc3-vram-attention-20261010/benchmark-summary.json:code_edit",
+      "reuse_note": "accepted production-equivalent attention/adaptive code before final token-pool increase; not rerun at 1067072 tokens",
+      "workload_description": "public mechanical rewrite of supplied code; generation-speed screen distinct from the completed coding tool workflow"
+    },
+    "recorded_comparison_v253": {
+      "description": "saved release configurations, not an isolated code-change comparison",
+      "baseline_date": "2026-10-06",
+      "current_date": "2026-10-10",
+      "baseline_source": "69583da7c71b87ac36371333a19f2749bab72773",
+      "regular_c1": {
+        "baseline_mean_tps": 186.79,
+        "baseline_sampled_peak_tps": 265.71,
+        "current_mean_tps": 218.6311118106234,
+        "current_sampled_peak_tps": 326.56,
+        "recorded_mean_change_percent": 17.046475620013602,
+        "baseline_reasoning": "medium",
+        "baseline_sampling": {
+          "temperature": 1.0,
+          "top_p": 0.95
+        },
+        "current_reasoning": "xhigh",
+        "current_sampling": {
+          "temperature": 0.8,
+          "top_p": 0.95,
+          "top_k": 40,
+          "min_p": 0.05
+        },
+        "baseline_evidence": "candidates/fresh-rc-20261005/v253-lact-profile-20261006/c1-repeats; recorded native summary in PROJECT.md"
+      },
+      "gpu_pool": {
+        "baseline_tokens": 1039040,
+        "current_tokens": 1067072,
+        "context_limit": 524288,
+        "max_running_requests": 6,
+        "change_percent": 2.697874961502933
+      },
+      "code_edit_context": {
+        "baseline_mean_native_tps": 336.57,
+        "baseline_sampled_peak_tps": null,
+        "baseline_sampling": "greedy",
+        "baseline_scope": "eight-prompt held-out public code-edit set",
+        "current_mean_native_tps": 491.88451093817866,
+        "current_sampled_peak_tps": 574.16,
+        "current_scope": "one public code-edit prompt, normal non-greedy sampling",
+        "baseline_evidence": "candidates/v253-20260927/donor-harness-20261006/heldout-greedy.jsonl",
+        "matched_percent_improvement_claim": null
+      },
+      "scope_note": "Regular C1 improvement does not imply all workloads or concurrency levels improved by the same percentage; code-edit rows have different prompt coverage and sampling."
+    }
+  },
+  "profiles_supported": [
+    {
+      "name": "OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4",
+      "spec": "native NEXTN MTP with FR-Spec and C1-only adaptive width"
+    },
+    {
+      "name": "Qwen3.8-27B FP8",
+      "spec": "DFlash2"
+    }
+  ],
+  "flashinfer_version": "0.7.0.post1",
+  "flashnext_precision": {
+    "backbone": "rowwise FP8 dense",
+    "experts": "NVFP4",
+    "kv": "FP8, page 64",
+    "recurrent_state": "BF16",
+    "unchanged": [
+      "no expert pruning",
+      "no sampler changes",
+      "no token-map changes"
+    ]
+  },
+  "cache_config_tested_next": {
+    "ple": "RAM",
+    "nixl": "optional",
+    "hicache_gb": 32,
+    "hicache_unit": "decimal GB, the --hicache-size input unit"
+  },
+  "qwen_27b": {
+    "sanity": "reused dated RC3 basic generation/tool/image sanity per John",
+    "changed_qsa_paths_selected": false,
+    "new_full_campaign": false,
+    "new_cache_test": false,
+    "new_speed_claim": false,
+    "tp2_hardware": "unavailable"
+  },
+  "known_issues": [
+    {
+      "issue": 50,
+      "item": "HiCache write-through/forward stream race",
+      "state": "not established as fixed"
+    },
+    {
+      "issue": 60,
+      "item": "underlying SHM early-unlink cause",
+      "state": "still investigated; PR 61 contains the symptom"
+    },
+    {
+      "issue_ids": [
+        59,
+        62,
+        63
+      ],
+      "item": "optional items",
+      "state": "optional"
+    }
+  ],
+  "link_templates": {
+    "local_pr": "https://github.com/jpezzulli/sglang-rtxpro6000/pull/{N}",
+    "upstream_pr": "https://github.com/sgl-project/sglang/pull/{N}",
+    "issues": "https://github.com/jpezzulli/sglang-rtxpro6000/issues/{N}"
+  },
+  "attribution": {
+    "email_for_author_metadata": "Pennyroyal@agentmail.to",
+    "people": [
+      {
+        "name": "aiueo52",
+        "work": "Flash-Next optimization work and direct discussion",
+        "link": "https://github.com/aiueo52/flash-next-rtxpro6000",
+        "profile_url": "https://github.com/aiueo52"
+      },
+      {
+        "name": "Tyler Landis",
+        "github": "LandOfLemons",
+        "work": "session/host cache and WSL2 contributions, integration feedback",
+        "prs": [
+          24,
+          49
+        ],
+        "profile_url": "https://github.com/LandOfLemons"
+      },
+      {
+        "name": "Martin Kazimir Kaplan",
+        "github": "cube4elements",
+        "work": "lost-image shared-memory crash report and containment fix",
+        "pr": 61,
+        "profile_url": "https://github.com/cube4elements"
+      },
+      {
+        "name": "untcoder2",
+        "work": "TP2 field testing and configuration feedback",
+        "issues": [
+          9,
+          50
+        ],
+        "pr_feedback": [
+          51
+        ],
+        "profile_url": "https://github.com/untcoder2"
+      },
+      {
+        "name": "StockSpecialist1707",
+        "work": "TP2 field testing and practical configuration feedback",
+        "profile_url": "https://www.reddit.com/user/StockSpecialist1707/"
+      },
+      {
+        "name": "palves",
+        "work": "external container configuration feedback and shared launch customizations",
+        "issue": 22,
+        "profile_url": "https://github.com/palves"
+      },
+      {
+        "name": "John",
+        "role": "product and system architecture, hands-on tuning and debugging, integration and release",
+        "profile_url": "https://github.com/jpezzulli"
+      },
+      {
+        "name": "Penny Royal",
+        "role": "almost all release coding, including implementation, ports and integration",
+        "email": "Pennyroyal@agentmail.to",
+        "contact_url": "mailto:Pennyroyal@agentmail.to"
+      }
+    ],
+    "note": "Release acknowledgements cover direct Penny Royal contributors and community interaction. Original source attribution, licenses and Git authorship remain in their existing files and history."
+  },
+  "display_name": "Penny Royal",
+  "build_scope": {
+    "retained_gpu_families": [
+      "Ampere",
+      "Ada Lovelace",
+      "RTX Blackwell"
+    ],
+    "inference_target": "RTX PRO 6000 Blackwell, TP1 or TP2",
+    "ampere_ada_role": "optional sidecar image preprocessing",
+    "status": "planned for this release; parallel build-cleanup integration pending",
+    "why": "A slimmer release for easier downloads.",
+    "release_summary": "The release went on a diet: RTX Blackwell for inference, Ampere/Ada Lovelace for image-processing sidecars, with other GPU build targets trimmed for easier downloads."
+  },
+  "container_configuration": {
+    "source_of_truth": "operator-owned files on the host",
+    "host_run_file": "run.sh: image, GPUs, ports, UID/GID and mounts",
+    "host_startup_file": "config/start-flash-next-frspec.sh (recommended): model and SGLang settings; config/start-flash-next.sh is the optional non-FR alternative",
+    "mount": "selected configuration directory is bind-mounted read-only at /config",
+    "startup": "container executes the startup file from /config",
+    "separate_mounts": [
+      "model files (read-only)",
+      "runtime/compiler cache (writable)",
+      "optional NIXL cache (writable)"
+    ],
+    "apply_changes": "edit host files and restart the container",
+    "image_upgrade": "retain host configuration and select the new image",
+    "rebuild_required": false,
+    "compose_required": false
+  },
+  "implementation": {
+    "primary_coding_agent": "Penny Royal",
+    "contribution": "Penny Royal did almost all the coding for this release, including ports and integration work.",
+    "engineering_collaboration": "John, Penny Royal and Codex worked through architecture, implementation, tuning and debugging together, including fused kernels, memory layouts and milliseconds per decode cycle.",
+    "investigation_and_review": "John and Codex with Penny; contributor work remains credited"
+  }
+}

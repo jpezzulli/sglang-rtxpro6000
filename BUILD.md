@@ -1,16 +1,19 @@
 # Build SGLang for NVIDIA RTX PRO 6000 Blackwell (SM120)
 
-These instructions build and install the Pennyroyal SGLang source used by the
-Qwen3.8-27B/DFlash2 and Qwen3.8 Flash-Next recipes on one 96 GB RTX
-PRO 6000. Choose [Fresh install](#fresh-install) for a new environment or
+These instructions build and install Penny Royal for Qwen3.8-27B/DFlash2
+and Qwen3.8 Flash-Next on RTX PRO 6000 Blackwell, TP1 or TP2. Choose [Fresh install](#fresh-install) for a new environment or
 [Update an existing install](#update-an-existing-install) for a working setup.
 Both install the same source for the two profiles.
 
 For a prebuilt environment, use the
-[Pennyroyal container guide](docker/pennyroyal/README.md). Its GitHub
+[Penny Royal container guide](docker/pennyroyal/README.md). Its GitHub
 Actions-built image includes the toolchain and NIXL POSIX plugin; models and
 writable caches remain in host directories. The rest of this page covers the
 native installation.
+
+The GPU build scope is RTX Blackwell for inference, with Ampere and Ada
+Lovelace retained for optional sidecar image preprocessing. CPU preprocessing
+is also available.
 
 ## Prerequisites
 

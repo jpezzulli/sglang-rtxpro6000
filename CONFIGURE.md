@@ -1,150 +1,108 @@
-# Configure Pennyroyal with ./configure-penny
+# Penny Royal beta configurator
 
-`./configure-penny` is an optional terminal assistant, marked **beta**. It
-asks you a short series of questions about your model, GPU, and cache
-folders, explains each setting as it goes, and saves your answers in one
-plain text file that the launchers read. It writes that file and tells you
-what to run next; it does not install packages, download models, or start
-anything.
+`./configure-penny` helps prepare ordinary launch and configuration files.
+It is **optional and open for testing**. The manual
+[native instructions](RUN.md) and [container instructions](docker/pennyroyal/README.md)
+work without it. Please [report problems](https://github.com/jpezzulli/sglang-rtxpro6000/issues)
+if you try it.
 
-## Update the setup files
-
-The `pennyroyal-v2.5.3-setup1` tag adds the WSL2 option to the configurator and
-passes it through Docker Compose. It uses the same v2.5.3 runtime and image.
-
-If you already cloned v2.5.3, run these from your Pennyroyal folder. Save any
-changes to tracked files first; your saved settings stay in place.
-
-```bash
-git fetch origin tag pennyroyal-v2.5.3-setup1
-git switch --detach pennyroyal-v2.5.3-setup1
-```
-
-Then rerun the configurator if you want to enable the WSL2 option.
+The assistant asks about your model, GPU, paths and cache settings, shows your
+choices, then saves files and prints what to run. It does not download models,
+install packages or start a server.
 
 ## Before you start
 
-- Native: finish the install in [BUILD.md](BUILD.md) and download your model
-  first, so the Python environment with `bin/sglang` already exists.
-- Container: work through the prerequisites in the
-  [Docker guide](docker/pennyroyal/README.md) and have your model files on
-  the host.
-- Python 3 must be available as `python3`, or set `PENNY_PYTHON` to an
-  interpreter. Nothing else needs to be installed for the wizard itself.
-- A GPU is not required to configure or check a saved file.
+Have Python 3 and a Penny Royal checkout. For native use, finish the
+[installation](BUILD.md) and download your checkpoints. For container use,
+prepare Docker/NVIDIA support and model/cache directories as described in the
+[container guide](docker/pennyroyal/README.md).
 
-## Native: configure, check, then launch
+The inference target is RTX PRO 6000 Blackwell at TP1 or TP2. A sidecar GPU
+can be selected for image preprocessing when present; CPU preprocessing is
+also available.
 
-From your Pennyroyal folder:
+## Native setup
+
+From the checkout:
 
 ```bash
 ./configure-penny
-./run-penny --check
 ```
 
-`--check` reads the file you just wrote and checks the saved paths and
-settings for common problems, without touching a GPU or loading a model: a
-model folder that does not exist, a cache folder you cannot write into, a
-runtime that is missing.
-Fix what it names — create the folder, or rerun `./configure-penny` and give
-a different path — and check again. Once the check stops reporting errors,
-start the server:
+Review the choices and save. Each save creates a **new timestamped configuration**
+and prints its check and launch commands. Run those exact commands so the
+new file is selected. For example, using the path printed by setup:
 
 ```bash
-./run-penny
+./run-penny --config /path/to/the-new-file.env --check
+./run-penny --config /path/to/the-new-file.env
 ```
 
-That runs the launch recipe for the profile you picked with the settings you
-saved. [RUN.md](RUN.md) covers what the server prints while starting and how
-to confirm it is ready.
+The check validates settings and paths without loading a model. Create missing
+folders or correct the named setting, then run it again. You can inspect a
+saved configuration with `./run-penny --config /path/to/file.env --show-config`.
 
-## Container: configure, check, then run what setup printed
+## Container setup
 
 ```bash
 ./configure-penny --container
-./configure-penny --container --check
 ```
 
-Answer the questions, and once the check is clean, run the one long command
-setup printed for you. It lists your resolved settings and ends with
-`docker compose -f .../compose.yaml --env-file .../.env up -d`, so it works
-from any directory. Copy it exactly instead of typing a plain
-`docker compose up -d` — your file and env-file names live in that line.
+Saving creates a **new timestamped folder** containing the host `run.sh`,
+startup/configuration files, and the saved settings. Use the printed command
+to launch that folder. It uses ordinary Docker, not a generated Compose setup.
 
-Inside the container your models appear under `/models`, which is the host
-folder you gave as `HOST_MODELS_ROOT`. With `HOST_MODELS_ROOT=/srv/models`,
-a checkpoint at `/srv/models/RadixArk-Qwen3.8-Flash-Next-NVFP4` is entered as
-`/models/RadixArk-Qwen3.8-Flash-Next-NVFP4`.
+Host model paths and container model paths differ: if `/srv/models` is mounted
+at `/models`, `/srv/models/MyCheckpoint` is `/models/MyCheckpoint` inside the
+container. The configurator asks for the appropriate paths.
 
-## What it asks you
-
-- **Profile**, as a numbered menu: `next` (Flash-Next with FR-Spec),
-  `next-plain` (the same target without FR-Spec), or `27b` (Qwen3.8-27B with
-  the DFlash2 draft). Enter keeps the highlighted choice, and 27B also asks
-  for its draft folder.
-- **Paths**: your Pennyroyal folder and Python environment folder (native),
-  or the host folders for models, caches, and persistent NIXL storage
-  (container). The wizard suggests a value where it can work one out, so you
-  are usually confirming one path rather than inventing it.
-- **Model folder**: the checkpoint you downloaded for the chosen profile.
-- **GPU**: a numbered list of the cards `nvidia-smi` reports, or a typed
-  index or UUID when no list is available.
-- **API port** and the two cache sizes below.
-- **Advanced settings**: offered at the end, and skipped by saying no. It
-  covers capacity overrides, where the PLE table lives, and the
-  [WSL2 host-memory workaround](RUN.md#wsl2-host-memory-workaround).
-  [RUN.md](RUN.md), [FP8.md](FP8.md), and [NVME-PLE.md](NVME-PLE.md) explain
-  those; skipping them keeps the defaults.
-
-You then see every value in one review, with a `*` beside the ones you
-changed, and a final confirmation before anything is written. Typing `q` at
-any point abandons the session and leaves your file untouched.
-
-## Two cache sizes, two different units
-
-- **RAM (HiCache) size** — decimal **GB** (1 GB = 1e9 bytes, not GiB). Leave
-  it blank to keep the profile default: 32 GB for the Next profiles, 96 GB
-  for 27B. [Choose HiCache RAM size](RUN.md#choose-hicache-ram-size) has the
-  trade-offs.
-- **NIXL disk budget** — **GiB**, for the persistent NIXL cache folder on
-  disk. `0`, the default, means **no cap**: the cache stays enabled and keeps
-  growing, it does not switch anything off. It is a cleanup target rather
-  than a hard quota; see
-  [Limit NIXL disk use](RUN.md#limit-nixl-disk-use).
-
-Neither value limits the other, and neither disables HiCache or NIXL.
-
-## Saved settings, changes, and restarts
-
-| Use | Saved in |
-|---|---|
-| Native | `~/.config/pennyroyal/pennyroyal.env` |
-| Container | `docker/pennyroyal/.env` |
-
-Rerun `./configure-penny` whenever you want to change something — it starts
-from your saved answers — or edit those files in any text editor. For
-container settings rerun `./configure-penny --container`; the bare command
-selects the native file. The container file is the same `.env` that Compose
-reads.
-
-A running server keeps the settings it booted with, so restart to apply a
-change: stop and rerun `./run-penny`, or for the container rerun the command
-setup printed, with `--force-recreate` added to the end.
-
-## Separate saved configurations
-
-The default file holds one profile. To keep more than one, save each to its
-own file and pass that path to both sides:
+## Changing an existing configuration
 
 ```bash
-./configure-penny --config /absolute/path/to/27b.env
-./run-penny --config /absolute/path/to/27b.env
+./configure-penny --config /path/to/saved.env
 ```
 
-For the container, pass the same path to setup and its check, then use the
-launch command that setup prints, because `run-penny` is native-only:
+For a container configuration, include `--container`. The selected file supplies
+starting values. Saving writes a new timestamped output; it does not overwrite,
+rename or back up the old one. Choose the new printed launch command, or rename
+and manage the files yourself. Restart the server to apply changed settings.
 
-```bash
-./configure-penny --container --config /absolute/path/to/27b.env
-./configure-penny --container --check --config /absolute/path/to/27b.env
-```
+## What the settings mean
+
+- **Profile:** Flash-Next with native MTP and FR-Spec (`next`), the optional
+  non-FR alternative (`next-plain`), or 27B with its DFlash2 draft. FR-Spec and
+  adaptive MTP work together; they are not competing profile choices. The 27B
+  profile needs both model folders.
+- **GPUs:** choose the inference device(s), TP size and optional image-processing
+  device. TP2 needs two RTX PRO 6000 inference GPUs; a sidecar remains separate.
+- **HiCache:** RAM prefix-cache size in decimal GB. Profile defaults are 32 GB
+  for Flash-Next and 96 GB for 27B.
+- **NIXL:** optional disk-cache tier, on by default. Disabling it preserves GPU
+  and RAM caching.
+- **NIXL disk budget:** GiB. Zero means unlimited disk budget, **not disabled**.
+- **PLE:** Flash-Next table placement in RAM or a prepared NVMe snapshot,
+  independent of whether NIXL is on.
+- **Other settings:** model paths, ports, context/request capacity, reasoning,
+  and the existing WSL2 host-memory workaround.
+
+For the full explanations, use [RUN.md](RUN.md), [FP8.md](FP8.md) and
+[NVME-PLE.md](NVME-PLE.md). Accepted kernel selection is automatic; users do not
+need a menu of internal optimization flags.
+
+<a id="update-the-setup-files"></a>
+
+## Updating the setup files
+
+Use the setup files from the same release as your runtime or image. The old
+v2.5.3 `setup1` tag remains an update for v2.5.3; it is not the 3.0 setup.
+Keep the configuration you currently use, generate a new one with the new
+checkout, and use its printed command when you are ready to switch.
+
+<!-- Compatibility anchors for earlier versions of this guide. -->
+<a id="configure-pennyroyal-with-configure-penny"></a>
+<a id="container-configure-check-then-run-what-setup-printed"></a>
+<a id="native-configure-check-then-launch"></a>
+<a id="saved-settings-changes-and-restarts"></a>
+<a id="separate-saved-configurations"></a>
+<a id="two-cache-sizes-two-different-units"></a>
+<a id="what-it-asks-you"></a>

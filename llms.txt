@@ -1,48 +1,85 @@
-# Pennyroyal — SGLang for Qwen3.8 on RTX PRO 6000
+# Penny Royal — Qwen3.8 on RTX PRO 6000 Blackwell
 
-> Optimized SGLang runtime for Qwen3.8 Flash-Next NVFP4 with native NEXTN/FR-Spec and Qwen3.8-27B FP8 with DFlash2, HiCache and NIXL on NVIDIA RTX PRO 6000 Blackwell (SM120).
+> SGLang-derived runtime for long-context local agents on one or two NVIDIA RTX PRO 6000 Blackwell GPUs: Flash-Next NVFP4 with FR-Spec and adaptive native NEXTN MTP, or Qwen3.8-27B FP8 with DFlash2.
 
 Canonical repository: https://github.com/jpezzulli/sglang-rtxpro6000
+Display name: Penny Royal. CLI, API model name, paths and package identifiers
+keep the existing `pennyroyal` spelling.
 
-Version 2.5.3 includes the Flash-Next checkpoint correction and BF16 NVMe PLE
-staging hotfix. The separate v2.5.2 PLE patch is not needed on v2.5.3. See
-CHANGES.md for streaming-tool, prompt-encoding and cache improvements.
+This is the 3.0 documentation draft. Read release-3.0.json for draft status,
+implementation details, measured configuration, validation, and publication
+work still pending. Do not infer that a 3.0 image or tag exists from this draft.
 
-Both profiles use the same runtime source. The documented recipes use one GPU
-and thinking-enabled agentic inference. Start with the Docker guide for a
-prebuilt image or BUILD.md and RUN.md for native installation. Model weights
-are downloaded separately. Detailed settings and dated measurements live in
-the linked documents; this file is an index, not a second set of instructions.
+## Hardware and profiles
 
-The optional configurator is beta: `./configure-penny --native` or
-`./configure-penny --container`. Use the saved settings and the generated launch
-command; `--check` validates configuration without loading a model. See RUN.md
-for HiCache RAM sizing and the NIXL soft disk budget. Both cache tiers remain
-enabled. See COMMUNITY-RESULTS.md for other users' setups, including TP2.
+The inference target is RTX PRO 6000 Blackwell (SM120), TP1 or TP2. Ampere and
+Ada Lovelace are retained in the narrowed build for optional sidecar image
+preprocessing, not as alternative inference targets. CPU image processing is
+also available. Other GPU build targets are trimmed for a slimmer release and
+easier downloads. Local 3.0 performance measurements use TP1; community TP2
+measurements are attributed separately.
 
-## Start here
+Both profiles support 524288-token context, tools, reasoning, images, RAM
+HiCache and optional NIXL disk caching. NIXL is on by default; disabling it
+preserves GPU/RAM caching. NVMe PLE is an independent placement choice.
 
-- [Beta configurator](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/CONFIGURE.md): Guided native and container setup, saved settings, checks and launching.
-- [README](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/README.md): Model choices, release summary, performance tables and setup links.
-- [Docker and Compose](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/docker/pennyroyal/README.md): Prebuilt image, host mounts, profile selection and startup.
-- [Native build](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/BUILD.md): Fresh installation, updates, dependencies and checkpoints.
-- [Native launch](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RUN.md): Required paths, both launch profiles, API smoke checks and optional capacity/media settings.
+Flash-Next uses the checkpoint's own NEXTN MTP head. The selected 3.0 default
+adapts **only C1** between four- and eight-token draft windows. At C2 and
+above, speculative decoding continues at fixed W4. Configured capacity C6
+does not prevent adaptation when only one request is active. C is request
+concurrency, independently of the TP GPU count. Eligible Flash-Next SM120 launches automatically select
+the accepted rowwise-FP8 dense format and small-batch kernels. FR-Spec is
+part of the default and the qualified adaptive configuration, not an alternative
+to adaptation. It stays on at C1 and C2+; only draft-width adaptation is C1-only.
+FR-Spec reduces the draft vocabulary, while the target retains its full vocabulary. The measured checkpoint is jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4.
+The 27B profile requires its separate DFlash2 draft checkpoint.
 
-## Optional features
+## Installation
 
-- [Online FP8](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/FP8.md): Flash-Next precision changes, activation and measured speed/memory results.
-- [NVMe PLE](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/NVME-PLE.md): Move the PLE table from fixed host-RAM residency to an SSD-backed overlay.
+The baseline paths are native source installation or a prebuilt container
+with ordinary host run/configuration files. Configuration lives outside the
+image: run.sh selects the image/devices/mounts; the host startup directory is
+mounted read-only at /config and executed there. Models and writable caches
+have separate mounts. Edit host files and restart to change settings; keep
+them when upgrading the image. No image rebuild or Compose setup is required.
 
-## Results and source
+The beta configurator is optional. It writes new timestamped files and prints
+the exact launch/check commands. Existing saved files remain unchanged. Follow
+the generated paths rather than assuming the default file was overwritten.
 
-- [Results](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RESULTS.md): Dated benchmarks and measurement definitions.
-- [Community results](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/COMMUNITY-RESULTS.md): Attributed reports from other users and hardware.
-- [Changes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/CHANGES.md): Release fixes, affected profiles and upstream credit.
-- [Provenance](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/PROVENANCE.md): Source identity, lineage and checkpoint provenance.
-- [Validation suite](https://github.com/jpezzulli/pennyroyal-validation): Maintained reasoning, tool, vision and performance tests.
+- [README](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/README.md): Overview, model choices, current results and setup links.
+- [Container](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/docker/pennyroyal/README.md): Prebuilt image, external startup files, GPU visibility and mounts.
+- [Native build](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/BUILD.md): Install or upgrade the runtime and its dependencies.
+- [Native launch](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RUN.md): Model/cache paths, startup, TP selection and API checks.
+- [Beta configurator](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/CONFIGURE.md): Optional setup assistant and saved-file behavior.
 
-## Optional
+## Performance and release details
 
-- [Backends](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/BACKENDS.md): Kernel and execution-path details.
-- [Memory and persistence](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/MEMORY-AND-PERSISTENCE.md): Hybrid cache state, namespaces and restoration.
+Use SGLang's native reported generation throughput for headline tok/s. Mean is
+elapsed-time weighted over complete active decode intervals; peak is the
+highest native sample from the same window. Include reasoning. Exclude the
+first idle/prefill-crossing interval and partial boundaries consistently.
+Client wall time and kernel-only timing are separate metrics. C4/C6 figures
+are aggregate, not per-request rates. Use normal non-greedy sampling and record
+the actual reasoning settings. A synthetic agent transcript is not a real
+tool workflow.
+
+- [3.0 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.0.md): Human-readable changes and direct contributor acknowledgements.
+- [3.0 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.0.json): Features, source identity, measurements, validation scope and pending release work.
+- [Results](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RESULTS.md): Measurement rules, current results and dated benchmark history.
+- [Community results](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/COMMUNITY-RESULTS.md): Reports from other users, including TP2.
+- [Changes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/CHANGES.md): Release history and technical lineage.
+- [Provenance](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/PROVENANCE.md): Source/package/checkpoint identities.
+- [Validation suite](https://github.com/jpezzulli/pennyroyal-validation): Maintained reasoning, tool, image and performance tests.
+
+Penny Royal did almost all the coding for 3.0, including ports and integration;
+John, Penny and Codex collaborated on architecture, source investigation,
+tuning and debugging, including fused kernels and decode-cycle measurements.
+
+## Configuration reference
+
+- [Online FP8](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/FP8.md): Weight representation, automatic selection and historical measurements.
+- [NVMe PLE](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/NVME-PLE.md): SSD-backed PLE placement.
+- [Backends](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/BACKENDS.md): Attention, GDN, MoE and speculative execution paths.
+- [Memory and persistence](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/MEMORY-AND-PERSISTENCE.md): Allocation, complete hybrid state and cache namespaces.
 - [Limitations](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/LIMITATIONS.md): Known issues and hardware considerations.
