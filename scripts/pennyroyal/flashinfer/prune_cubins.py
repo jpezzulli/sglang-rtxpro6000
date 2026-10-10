@@ -19,17 +19,27 @@ three trtllm-gen payload trees (``fmha/trtllm-gen``, ``batched_gemm-*``,
 distribution RECORD so the installed distribution stays consistent. Every
 other recorded byte is retained: the deep-gemm kernels and ``checksums.txt``
 have no architecture token and no dispatch proof, and no filename is swept by
-arch name alone. On an unsupported GPU the runners refuse with their own clear
-error before touching a cubin, so a pruned package loses no behaviour.
+arch name alone. Those kernels belong to the trtllm-gen backends that SM100,
+SM103 and SM107 hosts do dispatch, so no download recovery is claimed to be
+impossible for a datacenter GPU; the proof behind this pruning is the other
+half -- no retained RTX target can reach them -- and it is scoped to the RTX
+packaging path, changing no dispatch behavior and no upstream header or
+checksum.
 
 The paths are taken from the official RECORD, deletion never follows a
-symlink, and every candidate's size is checked against its RECORD entry
-before the first unlink: an unexpected version, a tampered file, an unrecorded
-or non-regular candidate fails clearly with nothing removed. Repeat runs
-change nothing. ``--check`` is the read-only form and fails while the
-unsupported payload is still installed. ``install.py`` runs this step in both
-installation sequences and in the container build stage, so no artifact
-download can quietly restore the payload into a new install.
+symlink at any level of a candidate's directory chain, and every recorded
+candidate is checked -- chain, file type and size against its RECORD entry
+-- before the first unlink: an unexpected version, a tampered, symlinked or
+otherwise non-regular file, or an unrecorded candidate fails clearly with
+nothing removed. Repeat runs change nothing. ``--check`` is the read-only
+form and fails while the unsupported payload is still installed.
+``install.py`` runs this step in both installation sequences and in the
+container build stage, so a new install is pruned the moment its wheels land
+rather than after some first kernel request. SM100/103/107 hosts do dispatch
+these upstream kernels, and they install the same whole wheel this tool was
+written against; the pruning is scoped to the RTX packaging path, whose
+retained targets never reach those dispatchers. No dispatch behavior and no
+upstream header or checksum are changed.
 
 Usage:
 
@@ -87,7 +97,10 @@ def _dist_info(site: Path) -> Path | None:
             f"{infos[0]} is flashinfer-cubin {version}, not the pinned "
             f"{PINNED_VERSION}; prune or upgrade it first, then rerun this step"
         )
-    if not (infos[0] / "RECORD").is_file():
+    record = infos[0] / "RECORD"
+    if infos[0].is_symlink() or record.is_symlink():
+        raise fail(f"{infos[0]} distribution metadata is a symlink")
+    if not record.is_file():
         raise fail(f"{infos[0]} has no RECORD; cannot prune it consistently")
     return infos[0]
 
@@ -112,13 +125,37 @@ def _unsupported(rel: str) -> bool:
     )
 
 
-def _plan(site: Path, info: Path) -> tuple[list[str], int]:
-    """Validate every candidate; return (RECORD lines to drop, payload bytes).
+def _fail_guard(site: Path, rel: str) -> None:
+    """Refuse any symlinked, non-directory or non-regular step of one path.
 
-    A recorded candidate must be a regular non-symlink file of exactly the
-    recorded size, and every unsupported file on disk must be recorded. All
-    checks run before the first deletion, so any failure leaves the install
-    untouched.
+    Checked on every recorded candidate, whether or not the file itself is
+    present, so a symlinked payload directory (which ``os.walk`` skips but a
+    later unlink would follow out of the install) fails closed like a
+    symlinked leaf, and an interrupted run with the chain already gone does
+    not.
+    """
+    parts = rel.split("/")
+    cur = site
+    for i, part in enumerate(parts):
+        cur = cur / part
+        if cur.is_symlink():
+            raise fail(f"{cur} is a symlink; refusing to follow it")
+        if i != len(parts) - 1:
+            if cur.exists() and not cur.is_dir():
+                raise fail(f"{cur} is not a directory")
+    if cur.exists() and not cur.is_file():
+        raise fail(f"{cur} is not a regular file")
+
+
+def _plan(site: Path, info: Path) -> tuple[list[str], int, int]:
+    """Validate every recorded candidate; return (RECORD lines to drop,
+    installed candidates, payload bytes).
+
+    A recorded candidate's full path must be free of symlinks, its recorded
+    parent directories must be real directories, and an installed candidate
+    must be a regular file of exactly the recorded size; every unsupported
+    file found by walking the package must also be recorded. All checks run
+    before the first deletion, so any failure leaves the install untouched.
     """
     recorded = {}
     for line, rel, size in _record_entries(info / "RECORD"):
@@ -127,32 +164,34 @@ def _plan(site: Path, info: Path) -> tuple[list[str], int]:
                 raise fail(f"RECORD lists {rel!r}, which escapes {PACKAGE}/")
             recorded[rel] = (line, size)
     present = set()
+    for rel in sorted(recorded):
+        _fail_guard(site, rel)
+        target = site / rel
+        if target.exists():
+            status = target.lstat()
+            if not status.st_mode & 0o170000 == 0o100000:
+                raise fail(f"{target} is not a regular file")
+            line, size = recorded[rel]
+            if size < 0 or status.st_size != size:
+                raise fail(
+                    f"{target} size does not match its RECORD entry "
+                    f"({status.st_size} != {size}); the payload is not the "
+                    "pinned one"
+                )
+            present.add(rel)
     root = site / PACKAGE
     if root.is_dir():
         for dirpath, _, filenames in os.walk(root):
             for name in filenames:
                 rel = Path(dirpath, name).relative_to(site).as_posix()
-                if _unsupported(rel):
-                    if rel not in recorded:
-                        raise fail(
-                            f"{site / rel} is an unsupported cubin not recorded "
-                            "in RECORD; refusing to remove an unknown file"
-                        )
-                    present.add(rel)
-    for rel in sorted(present):
-        target = site / rel
-        status = target.lstat()
-        if not os.path.isfile(target) or os.path.islink(target):
-            raise fail(f"{target} is not a regular file; refusing to follow it")
-        line, size = recorded[rel]
-        if size < 0 or status.st_size != size:
-            raise fail(
-                f"{target} size does not match its RECORD entry "
-                f"({status.st_size} != {size}); the payload is not the pinned one"
-            )
+                if _unsupported(rel) and rel not in recorded:
+                    raise fail(
+                        f"{site / rel} is an unsupported cubin not recorded "
+                        "in RECORD; refusing to remove an unknown file"
+                    )
     dropped = [recorded[rel][0] for rel in sorted(recorded)]
     payload = sum(recorded[rel][1] for rel in present)
-    return dropped, payload
+    return dropped, len(present), payload
 
 
 def prune(site: Path) -> dict:
@@ -166,13 +205,8 @@ def prune(site: Path) -> dict:
             "removed_bytes": 0,
             "record_entries_removed": 0,
         }
-    dropped, payload = _plan(site, info)
+    dropped, removed, payload = _plan(site, info)
     record = info / "RECORD"
-    removed = sum(
-        1
-        for _, rel, _size in _record_entries(record)
-        if _unsupported(rel) and (site / rel).exists()
-    )
     for _, rel, _size in _record_entries(record):
         if _unsupported(rel):
             (site / rel).unlink(missing_ok=True)
@@ -200,7 +234,7 @@ def check(site: Path) -> dict:
     info = _dist_info(site)
     if info is None:
         return {"status": "absent"}
-    dropped, payload = _plan(site, info)
+    dropped, _removed, payload = _plan(site, info)
     if dropped:
         raise fail(
             f"unsupported trtllm-gen cubin payload is still present: "

@@ -2572,7 +2572,9 @@ class BuildEnvTests(unittest.TestCase):
         values = dict(line.split("=", 1) for line in run.stdout.splitlines())
         self.assertEqual(values["PENNY_BUILD_JOBS"], "4")
         self.assertEqual(values["MAX_JOBS"], "4")
-        self.assertEqual(values["TORCH_CUDA_ARCH_LIST"], "12.0")
+        # The generic default covers the three supported RTX families with
+        # PTX kept at 12.0 for JIT on newer chips; it is not SM120-only.
+        self.assertEqual(values["TORCH_CUDA_ARCH_LIST"], "8.6 8.9 12.0+PTX")
         self.assertEqual(values["FLASHINFER_NVCC_THREADS"], "1")
         run = subprocess.run(
             ["bash", "-c", script],
@@ -2583,6 +2585,18 @@ class BuildEnvTests(unittest.TestCase):
         )
         values = dict(line.split("=", 1) for line in run.stdout.splitlines())
         self.assertEqual(values["MAX_JOBS"], "8")
+        run = subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "TORCH_CUDA_ARCH_LIST": "12.0",
+            },
+        )
+        values = dict(line.split("=", 1) for line in run.stdout.splitlines())
+        self.assertEqual(values["TORCH_CUDA_ARCH_LIST"], "12.0")
 
 
 if __name__ == "__main__":

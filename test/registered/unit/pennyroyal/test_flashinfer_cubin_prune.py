@@ -216,8 +216,42 @@ def test_tampered_and_unexpected_layouts_fail_before_any_removal(tmp_path):
     payload.write_bytes(target.read_bytes())
     target.unlink()
     target.symlink_to(payload)
-    raises(lambda: module.prune(site), "not a regular file")
+    raises(lambda: module.prune(site), "is a symlink")
     assert target.is_symlink()
+
+
+def test_a_symlinked_payload_directory_cannot_lead_unlinkings_outside(tmp_path):
+    """os.walk skips symlinked directories but unlink follows them: the whole
+    directory chain of every recorded candidate is guarded, not just leaves."""
+    module = pruner()
+    site = tmp_path / "site"
+    installed_cubin(site)
+    before = record_lines(site)
+    cubins = site / "flashinfer_cubin" / "cubins"
+    external = tmp_path / "external"
+    cubins.rename(external)
+    cubins.symlink_to(external)
+    raises(lambda: module.prune(site), "is a symlink")
+    # The external payload and the RECORD are exactly as they were: nothing
+    # outside the install was deleted and nothing inconsistent was recorded.
+    assert (external / f"{HEX}/batched_gemm-09795a1-31ee4e5/"
+            "Bmm_a_swiGlu_dynB_sm100f.cubin").is_file()
+    assert record_lines(site) == before
+
+
+def test_a_recorded_candidate_that_is_not_a_file_fails_closed(tmp_path):
+    module = pruner()
+    site = tmp_path / "site"
+    installed_cubin(site)
+    before = record_lines(site)
+    target = site / f"{BMM}/Bmm_a_relu2_bN_sm107a.cubin"
+    target.unlink()
+    target.mkdir()
+    raises(lambda: module.prune(site), "not a regular file")
+    assert record_lines(site) == before
+    for rel in UNSUPPORTED:
+        if rel != f"{BMM}/Bmm_a_relu2_bN_sm107a.cubin":
+            assert (site / rel).exists(), rel
 
 
 def test_the_packaging_step_prunes_and_checks_the_payload():
