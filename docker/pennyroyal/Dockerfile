@@ -5,11 +5,11 @@ FROM registry.fedoraproject.org/fedora:44 AS base
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 COPY docker/pennyroyal/cuda-fedora44.repo /etc/yum.repos.d/cuda-fedora44.repo
 RUN dnf install -y --setopt=install_weak_deps=False --nodocs \
-      ca-certificates curl-minimal git gcc15 gcc15-c++ make cmake ninja-build \
-      meson pkgconf-pkg-config libaio-devel liburing-devel numactl libibverbs \
+      ca-certificates curl-minimal git gcc15 gcc15-c++ make ninja-build \
+      libaio-devel liburing-devel numactl libibverbs \
       libsndfile ffmpeg-free \
-      openssl-devel protobuf-compiler rust cargo uv findutils shadow-utils \
       cuda-nvcc-13-3 cuda-libraries-devel-13-3 cuda-driver-devel-13-3 \
+      shadow-utils \
     && dnf clean all \
     && useradd --uid 1000 --create-home penny \
     && git config --system --add safe.directory /opt/pennyroyal
@@ -17,7 +17,7 @@ ENV CUDA_HOME=/usr/local/cuda-13.3 \
     CUDACXX=/usr/local/cuda-13.3/bin/nvcc \
     CC=/usr/bin/gcc-15 CXX=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15 \
     NVCC_CCBIN=/usr/bin/g++-15 \
-    TORCH_CUDA_ARCH_LIST=12.0 \
+    TORCH_CUDA_ARCH_LIST="8.6 8.9 12.0+PTX" \
     PATH=/opt/pennyroyal/.venv/bin:/usr/local/cuda-13.3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     LD_LIBRARY_PATH=/usr/local/cuda-13.3/lib64 \
     UV_PYTHON_INSTALL_DIR=/opt/python UV_NO_CACHE=1 UV_LINK_MODE=copy \
@@ -27,15 +27,26 @@ ENV CUDA_HOME=/usr/local/cuda-13.3 \
     CARGO_BUILD_JOBS=4 FLASHINFER_NINJA_JOBS=4 FLASHINFER_NVCC_THREADS=1 \
     TORCHINDUCTOR_COMPILE_THREADS=4 \
     CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_INCREMENTAL=0
+
+FROM base AS build
+ARG SOURCE_REVISION
+ARG SOURCE_REPOSITORY=https://github.com/jpezzulli/sglang-rtxpro6000.git
+# The base above carries only what the serving image runs on: the compilers,
+# CUDA headers and Ninja that runtime JIT needs, and the NIXL/multimedia
+# runtime libraries. These build-only tools are installed after the stage
+# split, so they never propagate into the final image: CMake, Meson and
+# pkg-config for the NIXL/PLE source builds, Rust and Cargo for the Rust
+# wheels and reader, uv to create the venv below, the protobuf compiler,
+# openssl development headers and findutils.
+RUN dnf install -y --setopt=install_weak_deps=False --nodocs \
+      cmake meson pkgconf-pkg-config openssl-devel protobuf-compiler \
+      rust cargo uv findutils \
+    && dnf clean all
 RUN uv python install 3.12.13 \
     && uv venv --python 3.12.13 /opt/pennyroyal/.venv \
     && uv pip install --python /opt/pennyroyal/.venv/bin/python \
       pip 'setuptools>=80.9' setuptools-rust setuptools-scm wheel build \
       meson-python pybind11 patchelf tomlkit pyyaml types-PyYAML
-
-FROM base AS build
-ARG SOURCE_REVISION
-ARG SOURCE_REPOSITORY=https://github.com/jpezzulli/sglang-rtxpro6000.git
 # Clone exactly the reviewed commit. Keeping shallow Git metadata lets the
 # existing namespace helper identify the source without inventing an identity.
 RUN [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]] \
@@ -70,7 +81,11 @@ RUN uv pip install --python .venv/bin/python --no-deps \
 # configurator and no first-launch compilation; the JIT objects stay in the
 # build stage. The step also guards one stock include of <sanitizer/...> that the
 # gcc15 package above does not ship, which is why the compile needs no sanitizer
-# development headers here either.
+# development headers here either. When the optional flashinfer-cubin wheel is
+# installed here, the same step removes its trtllm-gen cubins that the pinned
+# runners dispatch only on SM100/103/107: no RTX GPU can load them, and pruning
+# at this layer, before the COPY below, is what keeps their bytes out of the
+# published image instead of merely deleting them in a later one.
 RUN FLASHINFER_WORKSPACE_BASE=/tmp/penny-fi-sm120 \
     .venv/bin/python scripts/pennyroyal/flashinfer/install.py \
     && .venv/bin/python scripts/pennyroyal/flashinfer/install.py --check >/dev/null \
@@ -90,6 +105,10 @@ LABEL org.opencontainers.image.title="Pennyroyal SGLang for RTX PRO 6000" \
       org.opencontainers.image.revision="${SOURCE_REVISION}" \
       org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /opt/pennyroyal /opt/pennyroyal
+# The venv is a symlink farm onto the uv-managed interpreter; it lives in the
+# build stage because only uv there writes it, so the interpreter itself is the
+# one runtime artifact copied out of that stage.
+COPY --from=build /opt/python /opt/python
 COPY --from=build /opt/pennyroyal-container-packages.txt /opt/pennyroyal-container-packages.txt
 RUN install -m 0755 /opt/pennyroyal/docker/pennyroyal/entrypoint.sh /usr/local/bin/pennyroyal \
     && mkdir -p /cache /nixl \

@@ -52,10 +52,21 @@ An environment that predates this pin keeps a stale flashinfer-jit-cache shim
 beside the new FlashInfer, and FlashInfer rejects that combination while
 importing its JIT environment; the step names those wheels before the build
 starts, with the aligned family recorded in accepted-sources.json.
+
+After the module is in place the step prunes the pinned flashinfer-cubin wheel's
+proven-unsupported payload through the sibling prune_cubins.py: the
+sm100a/sm100f/sm103a/sm107a trtllm-gen cubins the pinned runners dispatch only
+on datacenter SM100/103/107, which no RTX target (SM86/89/120) can ever load,
+with the distribution RECORD kept consistent for the deletion. A site without
+the optional wheel is reported and left alone; a wheel at another version or an
+unexpected layout fails before anything is removed. --check verifies the same
+invariant read-only, so an image that shipped the payload fails the check until
+it is pruned; --apply-only keeps its source-half meaning and does not prune.
 """
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -97,6 +108,20 @@ print(pathlib.Path(spec.jit_library_path))
 
 def fail(message: str) -> RuntimeError:
     return RuntimeError(f"{PREFIX}: {message}")
+
+
+def cubin_pruner():
+    """The cubin-payload helper that ships beside this step.
+
+    Loaded from this file's own directory so both installation paths and the
+    image check run the same pinned pruning, whatever sys.path says.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "penny_flashinfer_cubin_prune", HERE / "prune_cubins.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def sha256_file(path: Path) -> str:
@@ -383,6 +408,7 @@ def check_installed(
         "sm120_module": str(module),
         "sm120_module_bytes": module.stat().st_size,
         "sm120_module_sha256": installed,
+        "cubin_payload": cubin_pruner().check(package.parent),
     }
 
 
@@ -453,6 +479,18 @@ def main(argv: list[str] | None = None) -> int:
                     f"{state} {module} ({module.stat().st_size} bytes, "
                     f"sha256 {sha256_file(module)})"
                 )
+                payload = cubin_pruner().prune(package.parent)
+                if payload["status"] == "absent":
+                    print(
+                        "flashinfer-cubin is not installed; no prebuilt cubin "
+                        "payload to prune"
+                    )
+                else:
+                    print(
+                        f"pruned {payload['removed_files']} unsupported cubin "
+                        f"files ({payload['removed_bytes']} bytes) and dropped "
+                        f"{payload['record_entries_removed']} RECORD entries"
+                    )
     except subprocess.CalledProcessError as error:
         print(
             f"{PREFIX}: a build step failed (exit {error.returncode}, "

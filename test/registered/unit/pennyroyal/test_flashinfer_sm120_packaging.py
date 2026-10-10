@@ -450,6 +450,9 @@ def test_installed_check_needs_the_accepted_source_and_the_package_local_module(
         == hashlib.sha256(b"built from patched bytes").hexdigest()
     )
     assert info["flashinfer"] == "9.9.9"
+    # The cubin payload invariant is reported with the rest of the check; a
+    # site without the optional flashinfer-cubin wheel is an accepted state.
+    assert info["cubin_payload"] == {"status": "absent"}
     assert info["accepted_source"] == [
         {
             "patch": str(tmp_path / "generated-source.patch"),
@@ -677,6 +680,22 @@ def test_the_build_subprocess_gets_the_explicit_cuda_host_compiler(tmp_path):
     assert (
         "CUDAHOSTCXX=" not in text.split("def main")[1]
     ), "no ignored variable in the report"
+
+
+def test_the_launchers_default_the_generic_rtx_targets():
+    """No unset native environment may reintroduce an SM120-only generic JIT.
+
+    The six profile launchers carry the architecture-only compiler fallback; a
+    user-set TORCH_CUDA_ARCH_LIST must still win, and the dedicated SM120
+    fused-MoE target lives elsewhere (accepted-sources cuda_arch_list).
+    """
+    for script in (*NEXT_SCRIPTS, *OTHER_SCRIPTS):
+        text = script.read_text()
+        assert (
+            'TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6 8.9 12.0+PTX}"' in text
+        ), script
+        assert ':-12.0}"' not in text, script
+    assert source_manifest()["cuda_arch_list"] == "12.0f"
 
 
 def test_both_installation_paths_run_the_one_step():

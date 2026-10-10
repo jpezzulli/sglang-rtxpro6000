@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the POSIX wheel against the image's installed Torch, without a second
-# isolated Torch/CUDA download. No GPU is needed for this fixed-SM120 build.
+# isolated Torch/CUDA download. No GPU is needed; the fixed target list covers
+# the supported RTX SM86/89/120 family, matching scripts/pennyroyal/build-env.sh.
 set -euo pipefail
 build_root="$(mktemp -d /tmp/penny-nixl.XXXXXXXX)"
 cleanup() {
@@ -26,7 +27,7 @@ uv build --wheel --no-build-isolation --python /opt/pennyroyal/.venv/bin/python 
   -Csetup-args=-Dbuild_tests=false \
   -Csetup-args=-Dbuild_examples=false \
   -Csetup-args=-Dwith_trace=false \
-  -Csetup-args=-Dnixl_cuda_arch_list=120 \
+  -Csetup-args=-Dnixl_cuda_arch_list=86,89,120 \
   -Csetup-args=-Dinstall_headers=false
 uv pip install --python /opt/pennyroyal/.venv/bin/python --no-deps \
   "$build_root"/dist/nixl_cu13-1.4.0-*.whl \
