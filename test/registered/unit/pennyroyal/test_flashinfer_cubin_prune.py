@@ -65,7 +65,9 @@ RETAINED = set(FAMILIES) - UNSUPPORTED
 
 
 def pruner():
-    spec = importlib.util.spec_from_file_location("penny_flashinfer_cubin_prune", PRUNER)
+    spec = importlib.util.spec_from_file_location(
+        "penny_flashinfer_cubin_prune", PRUNER
+    )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -133,13 +135,19 @@ def test_prune_removes_only_the_proven_unsupported_families(tmp_path):
     # RECORD keeps every retained identity line byte-for-byte, including the
     # RETAINED cubin hashes and sizes, and lists only removed paths gone.
     after = record_lines(site)
-    kept = [line for line in before if not any(line.startswith(p + ",") for p in UNSUPPORTED)]
+    kept = [
+        line
+        for line in before
+        if not any(line.startswith(p + ",") for p in UNSUPPORTED)
+    ]
     assert sorted(after) == sorted(kept)
     for rel in RETAINED:
         if rel == "flashinfer_cubin/__init__.py":
             continue
         assert any(line.startswith(rel + ",sha256=dl") for line in after), rel
-    assert any(line.startswith("flashinfer_cubin/__init__.py,sha256=AAAA,") for line in after)
+    assert any(
+        line.startswith("flashinfer_cubin/__init__.py,sha256=AAAA,") for line in after
+    )
 
 
 def test_a_repeat_prune_changes_nothing(tmp_path):
@@ -234,8 +242,10 @@ def test_a_symlinked_payload_directory_cannot_lead_unlinkings_outside(tmp_path):
     raises(lambda: module.prune(site), "is a symlink")
     # The external payload and the RECORD are exactly as they were: nothing
     # outside the install was deleted and nothing inconsistent was recorded.
-    assert (external / f"{HEX}/batched_gemm-09795a1-31ee4e5/"
-            "Bmm_a_swiGlu_dynB_sm100f.cubin").is_file()
+    assert (
+        external / f"{HEX}/batched_gemm-09795a1-31ee4e5/"
+        "Bmm_a_swiGlu_dynB_sm100f.cubin"
+    ).is_file()
     assert record_lines(site) == before
 
 
@@ -261,7 +271,7 @@ def test_the_packaging_step_prunes_and_checks_the_payload():
     assert "check(package.parent)" in text
     # --apply-only stays the source half: the pruning call is behind the build
     # guard, so a source-only application never touches the cubin payload.
-    step = text[text.index("def main("):]
+    step = text[text.index("def main(") :]
     assert step.index("if not args.apply_only:") < step.index("prune(package.parent)")
 
 
@@ -280,7 +290,9 @@ def test_cli_apply_then_check_exit_clean(tmp_path):
     site = tmp_path / "site"
     installed_cubin(site)
     summary = json.loads(_run_cli(site, []))
-    assert summary["status"] == "pruned" and summary["removed_files"] == len(UNSUPPORTED)
+    assert summary["status"] == "pruned" and summary["removed_files"] == len(
+        UNSUPPORTED
+    )
     assert json.loads(_run_cli(site, ["--check"]))["status"] == "pruned"
 
 

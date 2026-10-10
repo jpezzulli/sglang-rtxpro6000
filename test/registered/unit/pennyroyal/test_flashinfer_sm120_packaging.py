@@ -692,8 +692,7 @@ def test_the_launchers_default_the_generic_rtx_targets():
     for script in (*NEXT_SCRIPTS, *OTHER_SCRIPTS):
         text = script.read_text()
         assert (
-            'TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6 8.9 12.0+PTX}"'
-            in text
+            'TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6 8.9 12.0+PTX}"' in text
         ), script
         assert ':-12.0}"' not in text, script
     assert source_manifest()["cuda_arch_list"] == "12.0f"

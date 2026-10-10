@@ -212,11 +212,7 @@ def prune(site: Path) -> dict:
             (site / rel).unlink(missing_ok=True)
     if dropped:
         keep = set(dropped)
-        lines = [
-            line
-            for line in record.read_text().splitlines()
-            if line not in keep
-        ]
+        lines = [line for line in record.read_text().splitlines() if line not in keep]
         temporary = record.with_name(record.name + ".tmp")
         temporary.write_text("\n".join(lines) + "\n")
         os.replace(temporary, record)
@@ -248,9 +244,7 @@ def default_site() -> Path:
     spec = find_spec(PACKAGE)
     search = list(spec.submodule_search_locations or ()) if spec else []
     if not search:
-        raise fail(
-            f"{PACKAGE} is not importable here; pass --site its site directory"
-        )
+        raise fail(f"{PACKAGE} is not importable here; pass --site its site directory")
     return Path(search[0]).resolve().parent
 
 
