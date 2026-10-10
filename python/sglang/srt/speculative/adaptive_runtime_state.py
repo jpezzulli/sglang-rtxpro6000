@@ -1,3 +1,5 @@
+import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -13,6 +15,44 @@ if TYPE_CHECKING:
     from sglang.srt.speculative.eagle_draft_extend_cuda_graph_runner import (
         EAGLEDraftExtendCudaGraphRunner,
     )
+
+
+# Ported from https://github.com/aiueo52/sglang-rtxpro6000 branch
+# flash-next-fast (snapshot 5105985), where the extra adaptive target graphs
+# were captured untuned. Opt in with SGLANG_ADAPTIVE_TARGET_AUTOTUNE=1.
+@contextmanager
+def adaptive_target_graph_warmup(model_runner, attn_backend):
+    """Opt in to target autotuning before each additional state's capture.
+
+    BaseRunner.warmup normally runs once per model. Additional adaptive
+    states share that model but introduce a new verify width after the draft
+    autotuner has run. Skipping their target warmup can capture untuned MoE
+    tactics (including a separate finalize kernel) for the state's lifetime.
+
+    Reuse the normal warmup and its disable/determinism gates. The dummy
+    forward reads model_runner.attn_backend, so temporarily install the
+    candidate's backend as well; never warm up against the base state's
+    graph metadata. This context is only used during state construction, and
+    both attributes go back exactly as they were -- including a model runner
+    that never had _kernel_warmed_up at all -- so a failed capture cannot
+    leave the live state warm against a dead backend.
+    """
+    if os.environ.get("SGLANG_ADAPTIVE_TARGET_AUTOTUNE", "") != "1":
+        yield
+        return
+    missing = object()
+    warmed = getattr(model_runner, "_kernel_warmed_up", missing)
+    backend = model_runner.attn_backend
+    model_runner._kernel_warmed_up = False
+    model_runner.attn_backend = attn_backend
+    try:
+        yield
+    finally:
+        model_runner.attn_backend = backend
+        if warmed is missing:
+            del model_runner._kernel_warmed_up
+        else:
+            model_runner._kernel_warmed_up = warmed
 
 
 @dataclass
