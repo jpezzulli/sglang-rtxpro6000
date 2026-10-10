@@ -96,13 +96,11 @@ RUN MAX_JOBS="$FLASHINFER_BUILD_JOBS" FLASHINFER_NINJA_JOBS="$FLASHINFER_BUILD_J
     && .venv/bin/python scripts/pennyroyal/flashinfer/install.py --check >/dev/null \
     && rm -rf /tmp/penny-fi-sm120
 # NIXL POSIX and optional NVMe PLE reader are built from pinned/vendored source.
-COPY scripts/pennyroyal/flashinfer/check_dependencies.py /tmp/penny-check-dependencies.py
 RUN bash docker/pennyroyal/build-nixl.sh \
     && CARGO_TARGET_DIR=/tmp/penny-ple-cargo PYTHON=/opt/pennyroyal/.venv/bin/python \
       bash tools/ple_nvme/install.sh \
     && rm -rf /tmp/penny-ple-cargo \
-    && .venv/bin/python /tmp/penny-check-dependencies.py \
-    && rm /tmp/penny-check-dependencies.py \
+    && .venv/bin/python scripts/pennyroyal/flashinfer/check_dependencies.py \
     && .venv/bin/python -m pip freeze > /opt/pennyroyal-container-packages.txt
 
 FROM base AS runtime
