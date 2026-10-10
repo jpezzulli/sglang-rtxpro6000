@@ -62,6 +62,7 @@ from sglang.srt.mem_cache.memory_pool import (
     NoOpMHATokenToKVPool,
     PageMajorMHATokenToKVPool,
     ReqToTokenPool,
+    conv_window_dedup_enabled,
 )
 from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
 from sglang.srt.platforms import current_platform
@@ -84,6 +85,7 @@ from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.utils.common import (
     get_available_gpu_memory,
     get_device_memory_capacity,
+    is_cpu,
     is_float4_e2m1fn_x2,
     is_hip,
     is_npu,
@@ -118,6 +120,9 @@ def _get_dsv4_compress_state_dtypes() -> tuple[torch.dtype, torch.dtype]:
 
 
 _is_npu = is_npu()
+# Mirrors the module-level platform flags MambaPool reads to pick the dense vs the
+# deduplicated conv-intermediate layout.
+_is_cpu = is_cpu()
 
 
 def _should_enable_lazy_compaction() -> bool:
@@ -2111,9 +2116,9 @@ class KVCacheConfigurator:
 
         has_spec_dec = not self.spec_algorithm.is_none()
         # ReplaySSM drops the per-step intermediate_ssm scratch, so its mamba budget
-        # no longer reserves the (1 + D/ratio) intermediate factor -- the whole
-        # budget goes to persistent slots (K sized like non-spec), which is how the
-        # freed ~9GB turns into higher max_running.
+        # no longer reserves the (1 + D/ratio) SSM-snapshot factor; the freed ~9GB
+        # turns into higher max_running. What stays charged is the persistent slots
+        # plus the conv rollback windows every spec mode allocates (below).
         # The ring is allocated per slot but is not part of mamba_cache_per_req;
         # the solve must charge it too or num_slots is over-provisioned.
         replayssm_active = get_exec().mamba.enable_linear_replayssm_spec and (
@@ -2142,6 +2147,61 @@ class KVCacheConfigurator:
             assert get_spec().speculative_num_draft_tokens is not None
             assert get_schedule().max_running_requests is not None
 
+        # Per-draft-token verify scratch as the pool actually allocates it (see
+        # memory_pool.MambaPool.__init__): bytes per *spec-decode slot*, holding this
+        # rank's mamba layer slice only, hence pp_layer_scale. The conv rollback
+        # windows are there in every spec mode; the intermediate SSM snapshots are
+        # not under ReplaySSM (ring + cursors own rollback) or
+        # gdn_mtp_cache_mode=none (h_K is recovered from the committed h_0).
+        # Draft count follows the pool that WILL be built:
+        #   * _init_unified_mamba_pools forwards get_spec().speculative_num_draft_tokens
+        #     unchanged (so a PD prefill server's UnifiedMambaPool still allocates
+        #     both dense buffers, priced off the flat field it receives), while
+        #   * _build_req_to_token_pool passes None on PD prefill (no TARGET_VERIFY,
+        #     no scratch) and the adaptive-aware max_speculative_num_draft_tokens()
+        #     otherwise.
+        cache_params = config.mamba2_cache_params
+        unified_pool = get_memory().enable_unified_memory
+        disagg_mode = get_disagg().disaggregation_mode
+        if unified_pool:
+            draft_tokens = get_spec().speculative_num_draft_tokens
+        elif disagg_mode == "prefill":
+            draft_tokens = None
+        else:
+            draft_tokens = max_speculative_num_draft_tokens()
+        spec_intermediate_per_slot = 0
+        if draft_tokens is not None:
+            # UnifiedMambaPool replicates the spec buffers without the ReplaySSM /
+            # none-mode skips and without the deduplicated window layout, so it
+            # always holds the snapshots, in the dense conv-window layout.
+            intermediate_bytes = cache_params.intermediate_conv_window_bytes_per_slot(
+                draft_tokens,
+                dedup=not unified_pool
+                and not cache_params.shape.disable_conv_window_dedup
+                and conv_window_dedup_enabled(
+                    _is_npu,
+                    _is_cpu,
+                    get_spec().speculative_eagle_topk,
+                    cache_params.is_kda,
+                ),
+            )
+            if unified_pool or (
+                not replayssm_active and get_exec().mamba.gdn_mtp_cache_mode != "none"
+            ):
+                intermediate_bytes += cache_params.intermediate_ssm_bytes_per_slot(
+                    draft_tokens
+                )
+            spec_intermediate_per_slot = int(intermediate_bytes * pp_layer_scale)
+        # Padded slot count of that buffer: every pool carries one padding slot,
+        # and only the PD-decode pool (HybridMambaDecodeReqToTokenPool, which gets
+        # mamba_spec_state_size=size+pre_alloc_size) carries the in-transfer
+        # pre-alloc slots. The unified pool keys it by max_num_reqs alone.
+        spec_scratch_slots = 1 + (
+            int(get_disagg().disaggregation_decode_extra_slots or 0)
+            if (disagg_mode == "decode" and not unified_pool)
+            else 0
+        )
+
         if get_schedule().max_mamba_cache_size is not None:
             # Use explicitly set max_mamba_cache_size
             get_context().override(
@@ -2149,20 +2209,18 @@ class KVCacheConfigurator:
                 max_mamba_cache_size=get_schedule().max_mamba_cache_size
                 // self.ps.attn_dp_size,
             )
-            # Reserve intermediate memory based on capped max_num_reqs (+1: the
-            # pool's padding slot, see memory_pool.py). Skipped under replayssm
-            # (no intermediate_ssm allocated).
-            if has_spec_dec and not replayssm_active:
+            # Reserve intermediate memory based on capped max_num_reqs plus the
+            # pool's padded scratch slots. Nothing to reserve when the pool
+            # allocates no verify scratch (no spec / prefill-only server).
+            if spec_intermediate_per_slot:
                 ratio = self._calculate_mamba_ratio()
                 capped_reqs = min(
                     get_schedule().max_running_requests // self.ps.attn_dp_size,
                     get_schedule().max_mamba_cache_size // ratio,
                 )
                 intermediate_size = (
-                    stage_per_req
-                    * (capped_reqs + 1)
-                    * get_spec().speculative_num_draft_tokens
-                )
+                    capped_reqs + spec_scratch_slots
+                ) * spec_intermediate_per_slot
                 total_rest_memory = total_rest_memory - (intermediate_size / (1 << 30))
         elif (
             get_memory().disable_radix_cache
@@ -2175,13 +2233,10 @@ class KVCacheConfigurator:
                 // self.ps.attn_dp_size,
             )
             # Reserve intermediate memory based on capped max_num_reqs (+1: the
-            # pool's padding slot). Skipped under replayssm.
-            if has_spec_dec and not replayssm_active:
-                intermediate_size = (
-                    stage_per_req
-                    * (get_schedule().max_mamba_cache_size + 1)
-                    * get_spec().speculative_num_draft_tokens
-                )
+            # pool's padding slot).
+            if spec_intermediate_per_slot:
+                padded_slots = get_schedule().max_mamba_cache_size + spec_scratch_slots
+                intermediate_size = padded_slots * spec_intermediate_per_slot
                 total_rest_memory = total_rest_memory - (intermediate_size / (1 << 30))
         else:
             # Use ratio-based calculation to auto-fit available memory
@@ -2190,7 +2245,12 @@ class KVCacheConfigurator:
 
             # Solve jointly for max_mamba_cache_size (K), including the pool's
             # +1 padding slot on both buffers (see memory_pool.py):
-            #   (K + 1) * per_req + (K / ratio + 1) * D * per_req = mamba_budget_bytes
+            #   (K + 1) * resident_per_slot
+            #     + (K / ratio + spec_scratch_slots) * spec_intermediate_per_slot
+            #       = mamba_budget_bytes
+            # with resident_per_slot the committed state (plus any ReplaySSM ring)
+            # and spec_intermediate_per_slot the per-draft-token scratch (0 without
+            # spec decoding, which is what makes the equation the non-spec one).
             mamba_budget = (
                 total_rest_memory
                 * get_schedule().mamba_full_memory_ratio
@@ -2198,33 +2258,36 @@ class KVCacheConfigurator:
             )
             mamba_budget_bytes = mamba_budget * (1 << 30)
 
-            if has_spec_dec and not replayssm_active:
-                ratio = self._calculate_mamba_ratio()
-                D = get_spec().speculative_num_draft_tokens
-                # Joint solve: main_state + intermediate = mamba_budget
-                get_context().override(
-                    "mamba_pool.memory_budget_spec",
-                    max_mamba_cache_size=int(
-                        (mamba_budget_bytes - per_req * (1 + D))
-                        // (per_req * (1 + D / ratio))
-                    ),
-                )
+            resident_per_slot = per_req + replayssm_ring_per_req
+            # The ratio only feeds the (K / ratio) spec-slot term; with no verify
+            # scratch the equation is the non-spec one and no ratio is consulted.
+            ratio = self._calculate_mamba_ratio() if spec_intermediate_per_slot else 1
+            get_context().override(
+                (
+                    "mamba_pool.memory_budget_spec"
+                    if spec_intermediate_per_slot
+                    else "mamba_pool.memory_budget"
+                ),
+                max_mamba_cache_size=int(
+                    (
+                        mamba_budget_bytes
+                        - resident_per_slot
+                        - spec_scratch_slots * spec_intermediate_per_slot
+                    )
+                    // (resident_per_slot + spec_intermediate_per_slot / ratio)
+                ),
+            )
+            if spec_intermediate_per_slot:
                 # Intermediate memory is included in mamba_budget, subtract it
                 # so the return value only has main_state subtracted from total
                 capped_reqs = min(
                     get_schedule().max_running_requests // self.ps.attn_dp_size,
                     get_schedule().max_mamba_cache_size // ratio,
                 )
-                intermediate_size = per_req * (capped_reqs + 1) * D
+                intermediate_size = (
+                    capped_reqs + spec_scratch_slots
+                ) * spec_intermediate_per_slot
                 total_rest_memory = total_rest_memory - (intermediate_size / (1 << 30))
-            else:
-                per_slot = per_req + replayssm_ring_per_req
-                get_context().override(
-                    "mamba_pool.memory_budget",
-                    max_mamba_cache_size=int(
-                        (mamba_budget_bytes - per_slot) // per_slot
-                    ),
-                )
 
         # Validate: max_mamba_cache_size must be positive after memory allocation.
         # A non-positive value means GPU memory is insufficient for the requested

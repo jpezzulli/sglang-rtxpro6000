@@ -1,7 +1,7 @@
-"""Per-width ownership of adaptive-MTP (W4/W8/W16) runtime state, CPU-only.
+"""Per-width ownership of adaptive-MTP (W4/W8) runtime state, CPU-only.
 
 Adaptive speculative decoding keeps one SpecRuntimeState per candidate step
-count -- W4/W8/W16 are 3/7/15 steps at topk=1 -- and each of those widths
+count -- W4/W8 are 3/7 steps at topk=1 -- and each of those widths
 captures its own CUDA graphs. So the mutable resources a width bakes in (its
 attention backends and their graph metadata, the draft kernel workspace, its
 static input buffers, its GDN recovery graphs) must belong to exactly one
@@ -57,8 +57,9 @@ from sglang.test.test_utils import CustomTestCase
 
 register_cpu_ci(est_time=10, suite="base-a-test-cpu")
 
-# The candidate table under review: C1 = W4/W8/W16 (3/7/15 speculative steps).
-CANDIDATE_STEPS = [3, 7, 15]
+# The candidate table under review: C1 = W4/W8 (3/7 speculative steps), the
+# bounded launch profile this series is qualified on (no W16 capture).
+CANDIDATE_STEPS = [3, 7]
 COMPRESS_RATIO = 4
 
 
@@ -297,14 +298,14 @@ class TestLaunchCapacity(PublishedConfigCase):
         return AdaptiveController(worker, config_path=path)
 
     def test_candidate_wider_than_the_launch_width_is_refused(self):
-        # Launching at W8 but keeping the W16 candidate would run a 16-token
-        # verify window against start-up buffers sized for 8; growing them
+        # Launching at W4 but keeping the W8 candidate would run an 8-token
+        # verify window against start-up buffers sized for 4; growing them
         # instead would free what the launch state's graphs already point at.
-        controller = self._controller(7, CANDIDATE_STEPS)
+        controller = self._controller(3, CANDIDATE_STEPS)
         with self.assertRaises(ValueError) as ctx:
             controller.init_states()
         message = str(ctx.exception)
-        self.assertIn("15", message)
+        self.assertIn("7", message)
         self.assertIn("CUDA graphs", message)
 
     def test_launch_at_the_widest_candidate_accepts_the_table(self):
@@ -337,13 +338,13 @@ class TestLaunchCapacity(PublishedConfigCase):
         return worker
 
     def test_launch_capacity_serves_every_narrower_width(self):
-        # A W16 launch allocates 5 groups at ratio 4; W16, W8 and W4 all fit,
-        # so an adaptive step-down reuses the allocation its graphs bind.
-        worker = self._worker_with_rings(self._ring(max_draft_tokens=16))
+        # A W8 launch allocates 3 groups at ratio 4; W8 and W4 both fit, so an
+        # adaptive step-down reuses the allocation its graphs bind.
+        worker = self._worker_with_rings(self._ring(max_draft_tokens=8))
         worker._validate_adaptive_widths()
 
     def test_width_above_the_ring_capacity_is_refused_at_start_up(self):
-        # Same table, but the ring was sized for W4: the 16-token window would
+        # Same table, but the ring was sized for W4: the 8-token window would
         # alias two live verify positions onto one ring slot. Refuse rather
         # than resize a buffer the captured graphs already point at.
         worker = self._worker_with_rings(self._ring(max_draft_tokens=4))
@@ -356,7 +357,7 @@ class TestLaunchCapacity(PublishedConfigCase):
 
     def test_draft_ring_counts_even_when_the_target_ring_is_wide_enough(self):
         worker = self._worker_with_rings(
-            self._ring(max_draft_tokens=16), self._ring(max_draft_tokens=4)
+            self._ring(max_draft_tokens=8), self._ring(max_draft_tokens=4)
         )
         with self.assertRaises(ValueError) as ctx:
             worker._validate_adaptive_widths()
@@ -374,14 +375,15 @@ class TestLaunchCapacity(PublishedConfigCase):
 
 
 class TestWidthTransitions(PublishedConfigCase):
-    def test_w16_to_w4_to_w16_swaps_only_the_per_width_resources(self):
-        # Launch at the middle width so the transition under test is a real
-        # W16 -> W4 -> W16 sequence (re-applying the active width is a no-op).
-        worker = _WorkerStub(launch_steps=7)
-        wide, narrow = _state(15), _state(3)
+    def test_w8_to_w4_to_w8_swaps_only_the_per_width_resources(self):
+        # Launch at W4 so every application below is a real switch; the
+        # transition under test is the shipped W8 -> W4 -> W8 sequence
+        # (re-applying the active width is a no-op, checked in the suite below).
+        worker = _WorkerStub(launch_steps=3)
+        wide, narrow = _state(7), _state(3)
 
         worker.apply_runtime_state(wide)
-        self.assertEqual(worker.speculative_num_draft_tokens, 16)
+        self.assertEqual(worker.speculative_num_draft_tokens, 8)
         self.assertIs(worker.draft_runner.attn_backend, wide.draft_extend_attn_backend)
 
         worker.apply_runtime_state(narrow)
@@ -408,7 +410,7 @@ class TestWidthTransitions(PublishedConfigCase):
         )
 
         worker.apply_runtime_state(wide)
-        self.assertEqual(worker.speculative_num_steps, 15)
+        self.assertEqual(worker.speculative_num_steps, 7)
         self.assertIs(worker._draft_worker.cuda_graph_runner, wide.cuda_graph_runner)
         self.assertIs(
             worker._draft_worker.cuda_graph_runner_for_draft_extend,
@@ -427,7 +429,7 @@ class TestWidthTransitions(PublishedConfigCase):
         worker = _WorkerStub(launch_steps=CANDIDATE_STEPS[-1])
         initialized = SimpleNamespace(name="runner-initialized-backend")
         worker.draft_runner.attn_backend = initialized
-        for steps in (15, 3, 15):
+        for steps in (7, 3, 7):
             worker.apply_runtime_state(_state(steps, draft_extend_attn_backend=None))
             self.assertIs(worker.draft_runner.attn_backend, initialized)
 
@@ -466,8 +468,8 @@ class TestWidthTransitions(PublishedConfigCase):
 
     def test_backends_without_recovery_bookkeeping_do_not_disturb_a_switch(self):
         worker = _WorkerStub(launch_steps=CANDIDATE_STEPS[-1])
-        worker.apply_runtime_state(_state(7))
-        self.assertEqual(worker.speculative_num_steps, 7)
+        worker.apply_runtime_state(_state(3))
+        self.assertEqual(worker.speculative_num_steps, 3)
         self.assertEqual(worker.events, ["repoint-target:none"])
 
 
@@ -505,7 +507,7 @@ class TestPerStateConstruction(PublishedConfigCase):
 
     def test_recovery_graphs_are_captured_for_the_states_own_backend(self):
         worker = _WorkerStub(launch_steps=CANDIDATE_STEPS[-1])
-        wide, wide_calls = self._build(worker, 15)
+        wide, wide_calls = self._build(worker, 7)
         narrow, narrow_calls = self._build(worker, 3)
 
         for calls, state in ((wide_calls, wide), (narrow_calls, narrow)):
@@ -520,12 +522,12 @@ class TestPerStateConstruction(PublishedConfigCase):
         worker = _WorkerStub(launch_steps=CANDIDATE_STEPS[-1], qsa_variant="compressed")
         launch_backend = worker.draft_runner.attn_backend
 
-        wide, _ = self._build(worker, 15)
+        wide, _ = self._build(worker, 7)
         narrow, _ = self._build(worker, 3)
 
         # Each width captured its draft-extend graph against its own backend...
-        self.assertEqual(sorted(worker.captured_widths), [3, 15])
-        self.assertIsNot(worker.captured_widths[15], worker.captured_widths[3])
+        self.assertEqual(sorted(worker.captured_widths), [3, 7])
+        self.assertIsNot(worker.captured_widths[7], worker.captured_widths[3])
         for state in (wide, narrow):
             self.assertIsNot(state.draft_extend_attn_backend, launch_backend)
         # ... because the worker asked the draft runner for a twin, against a
@@ -551,13 +553,13 @@ class TestPerStateConstruction(PublishedConfigCase):
         # Triton, and so on) for the runner's target-style backend.
         worker = _WorkerStub(launch_steps=CANDIDATE_STEPS[-1], qsa_variant=None)
 
-        wide, _ = self._build(worker, 15)
+        wide, _ = self._build(worker, 7)
         narrow, _ = self._build(worker, 3)
 
         self.assertEqual(worker.twin_requests, [])
-        self.assertTrue(worker.captured_aliases[15], "identity was equal here")
+        self.assertTrue(worker.captured_aliases[7], "identity was equal here")
         self.assertTrue(worker.captured_aliases[3])
-        self.assertIs(wide.draft_extend_attn_backend, worker.factory_backends[15])
+        self.assertIs(wide.draft_extend_attn_backend, worker.factory_backends[7])
         self.assertIs(narrow.draft_extend_attn_backend, worker.factory_backends[3])
         self.assertIsNot(
             wide.draft_extend_attn_backend, narrow.draft_extend_attn_backend
@@ -570,7 +572,7 @@ class TestPerStateConstruction(PublishedConfigCase):
         worker = _WorkerStub(launch_steps=CANDIDATE_STEPS[-1], qsa_variant="tokenwise")
         runner_backend = worker.draft_runner.attn_backend
 
-        wide, _ = self._build(worker, 15)
+        wide, _ = self._build(worker, 7)
 
         self.assertIsNone(wide.draft_extend_attn_backend)
         self.assertEqual(worker.twin_requests, [])

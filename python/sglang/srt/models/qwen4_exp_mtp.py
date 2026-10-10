@@ -1,6 +1,7 @@
 """Inference-only Qwen4-Exp MTP speculative decoding."""
 
 import copy
+import functools
 import logging
 from contextlib import ExitStack
 from typing import Optional
@@ -23,6 +24,79 @@ from sglang.srt.runtime_context import get_model, get_parallel
 from sglang.srt.utils import add_prefix, is_npu
 
 logger = logging.getLogger(__name__)
+
+#: Hard row limit of the donor dense GEMV (``assert M <= 16`` in w8a16_gemv).
+_GEMV_DONOR_MAX_M = 16
+
+
+@functools.lru_cache(maxsize=None)
+def _sm120_entry_gemm_target(index: int) -> bool:
+    return torch.cuda.get_device_capability(index) == (12, 0)
+
+
+def _bf16_entry_gemm_target_ok(*tensors: torch.Tensor) -> bool:
+    """Where this fork accepts the donor dense GEMV at all.
+
+    One compatible colocated CUDA device, exact SM120 only: that is the part
+    of the donor hardware contract the resident W8A16/dense-GEMV port was
+    measured and accepted for (SGLang #40362/FlashInfer #6227 campaigns stay
+    untouched). Anything else -- CPU tensors, split devices, other GPUs --
+    keeps the original two-Linear path; the ``bf16_gemv`` wrapper itself has
+    no CPU or mixed-dtype fallback (it reaches ``_num_sms`` and its ``tl.dot``
+    contract is BF16).
+    """
+    device = tensors[0].device
+    if device.type != "cuda":
+        return False
+    if any(tensor.device != device for tensor in tensors[1:]):
+        return False
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    return _sm120_entry_gemm_target(index)
+
+
+def _mtp_fc_gemv_supported(
+    normed_embeds: torch.Tensor,
+    embed_weight: torch.Tensor,
+    hidden_rows: torch.Tensor,
+    hidden_weight: torch.Tensor,
+) -> bool:
+    """Eligibility gate for the donor-gated MTP entry fusion GEMVs.
+
+    Validates BOTH normalized activations, BOTH weights (a BF16 embedding
+    side with an FP32 hidden side must keep the old path: the donor kernel's
+    contract is bf16 activations against bf16 weights), the row budget and
+    the K-contiguous weight layout every donor caller provides, plus the
+    accepted-hardware contract above.  The donor comment about ``w.stride(0)
+    == 1`` lives in ``_plan``'s tile choice; the caller contract this gate
+    pins is ``stride(1) == 1`` on every weight and activation.
+    """
+    from sglang.kernels.ops.gemm.sm120_online_fp8 import gated_by_fast_paths
+
+    if not gated_by_fast_paths(envs.SGLANG_MTP_FC_GEMV.get()):
+        # Unset follows the Flash-Next/SM120 default selection (this file's
+        # entry fusion is Flash-Next-draft-only by construction); a saved
+        # explicit true/false remains the private hatch.
+        return False
+    for tensor in (normed_embeds, hidden_rows):
+        if (
+            tensor.dim() != 2
+            or tensor.dtype is not torch.bfloat16
+            or tensor.stride(1) != 1
+        ):
+            return False
+    for weight in (embed_weight, hidden_weight):
+        if (
+            weight.dim() != 2
+            or weight.dtype is not torch.bfloat16
+            or weight.stride(1) != 1
+        ):
+            return False
+    if hidden_rows.shape[0] > _GEMV_DONOR_MAX_M:
+        # hidden_rows is tokens * hc with hc >= 1, so this bounds both GEMVs.
+        return False
+    return _bf16_entry_gemm_target_ok(
+        normed_embeds, embed_weight, hidden_rows, hidden_weight
+    )
 
 
 class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
@@ -105,14 +179,40 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
     def _fuse_residual_linear_shared(
         self, input_embeds: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
-        input_embeds = self.fc_embedding(self.pre_fc_norm_embedding(input_embeds))
+        # Donor parity (aiueo52/sglang-rtxpro6000 @5105985, qwen4_exp_mtp.py
+        # _fuse_residual_linear_shared; companion W8A16 dense-GEMV series):
+        # under SGLANG_MTP_FC_GEMV the decode-size entry GEMMs run through the
+        # resident donor bf16 GEMV instead of cuBLAS, which picks poor kernels
+        # for these skinny [<=16, hidden] x [hidden, hidden] shapes.  Weights
+        # stay BF16; _mtp_fc_gemv_supported guards every case the wrapper
+        # cannot execute, and those keep the original path unchanged.
+        normed_embeds = self.pre_fc_norm_embedding(input_embeds)
         orig_shape = hidden_states.shape
         hidden_states = self.pre_fc_norm_hidden(hidden_states)
         decoder_view = hidden_states.view(
             *hidden_states.shape[:-1], self.hc_count, self.hidden_size
         )
-        encoder_inputs = self.fc_hidden(decoder_view)
-        return (input_embeds.unsqueeze(-2) + encoder_inputs).view(orig_shape)
+        rows = decoder_view.reshape(-1, self.hidden_size)
+        if (
+            self.fc_embedding.bias is None
+            and self.fc_hidden.bias is None
+            and _mtp_fc_gemv_supported(
+                normed_embeds,
+                self.fc_embedding.weight,
+                rows,
+                self.fc_hidden.weight,
+            )
+        ):
+            from sglang.srt.layers.quantization.w8a16_gemv import bf16_gemv
+
+            embed_proj = bf16_gemv(normed_embeds, self.fc_embedding.weight)
+            encoder_inputs = bf16_gemv(rows.contiguous(), self.fc_hidden.weight).view(
+                decoder_view.shape
+            )
+        else:
+            embed_proj = self.fc_embedding(normed_embeds)
+            encoder_inputs = self.fc_hidden(decoder_view)
+        return (embed_proj.unsqueeze(-2) + encoder_inputs).view(orig_shape)
 
     def _fuse_standard(
         self, input_embeds: torch.Tensor, hidden_states: torch.Tensor

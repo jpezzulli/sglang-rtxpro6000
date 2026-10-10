@@ -3,7 +3,7 @@ a width change is allowed to reach the worker.
 
 ``configs/pennyroyal/adaptive-next.json`` is an ordinary file for the existing
 ``--speculative-adaptive-config`` flag -- no Penny-specific policy lives in the
-runtime. It lets a single-request batch (C1) pick W4/W8/W16 (3/7/15 speculative
+runtime. It lets a single-request batch (C1) pick W4/W8 (3/7 speculative
 steps at topk=1, draft width = steps + 1) and pins every C>1 batch to W4, while
 the global ``DEFAULT_ADAPTIVE_CONFIG`` and an ordinary fixed-width launch stay
 unchanged.
@@ -14,7 +14,7 @@ Two mechanics are pinned here:
   width and the captured-bucket geometry a wide C1 needs. ``validate_candidates``
   still refuses a candidate above the launch width, the fixed launch-maximum
   draft-token bound follows the table, ``cuda_graph_bs_for_step`` gives the
-  W8/W16 states only the BS1 bucket, and with no BS1 bucket a C1 batch pads up
+  W8 state only the BS1 bucket, and with no BS1 bucket a C1 batch pads up
   into the C>=2 slot and stays W4 rather than selecting wide shapes nothing
   captured;
 * a verify completion feeds the policy of the batch it came from and cannot
@@ -23,7 +23,7 @@ Two mechanics are pinned here:
   the outgoing backends are drained before anything is repointed). A stale C1
   completion landing while a newer C4 batch is in flight must not hand that
   batch wide speculation -- the donor reference had exactly that, a pending C1
-  steps=15 overriding the next C4 policy of steps=3.
+  steps=7 overriding the next C4 policy of steps=3.
 
 All evidence is CPU-only (no CUDA on this host): real capture, replay, numerics
 and any hardware/performance claim remain GPU-window work.
@@ -61,7 +61,7 @@ ADAPTIVE_NEXT_CONFIG = os.path.abspath(
     )
 )
 
-NEXT_CANDIDATE_STEPS = [3, 7, 15]  # W4 / W8 / W16 verify windows at topk=1
+NEXT_CANDIDATE_STEPS = [3, 7]  # W4 / W8 verify windows at topk=1
 FAST = {"ema_alpha": 1.0, "warmup_batches": 0, "update_interval": 1}
 
 
@@ -119,7 +119,7 @@ class _ConfigCase(CustomTestCase):
             json.dump(cfg, f)
         return path
 
-    def _controller(self, cfg, launch_steps=15, cuda_graph_bs=(1, 2, 4, 8)):
+    def _controller(self, cfg, launch_steps=7, cuda_graph_bs=(1, 2, 4, 8)):
         config_path = self._temp_config(cfg) if isinstance(cfg, dict) else cfg
         worker = _WorkerStub(launch_steps)
         controller = AdaptiveController(worker, config_path=config_path)
@@ -149,40 +149,41 @@ class TestShippedNextConfig(_ConfigCase):
         self.assertEqual(params._slots[1].candidate_steps, NEXT_CANDIDATE_STEPS)
         self.assertEqual(params._slots[2].candidate_steps, [3])
         self.assertEqual(params.candidate_steps, NEXT_CANDIDATE_STEPS)
-        # steps + 1 is the draft width, so C1 covers W4/W8/W16 and C>1 only W4.
-        self.assertEqual({s + 1 for s in params._slots[1].candidate_steps}, {4, 8, 16})
-        self.assertEqual(params.get_steps_for_batch(1), 15)
+        # steps + 1 is the draft width, so C1 covers W4/W8 and C>1 only W4.
+        self.assertEqual({s + 1 for s in params._slots[1].candidate_steps}, {4, 8})
+        self.assertEqual(params.get_steps_for_batch(1), 7)
         for batch_size in (2, 3, 4, 6, 8, 32, 256):
             self.assertEqual(params.get_steps_for_batch(batch_size), 3)
 
-    def test_a_c1_slot_rising_to_w16_leaves_the_concurrent_slots_at_w4(self):
-        params = self._params(15, ADAPTIVE_NEXT_CONFIG)
+    def test_a_c1_slot_rising_to_w8_leaves_the_concurrent_slots_at_w4(self):
+        params = self._params(7, ADAPTIVE_NEXT_CONFIG)
         # Hold C1 at the narrow end, then accept perfectly at C1 only.
         params._slots[1].current_steps = 3
         params._slots[1].ema_accept_len = 2.0
         params._slots[1]._batch_count = 100
         for _ in range(20):
-            params.on_verify_complete([7, 7], batch_size=1)
-        self.assertEqual(params.get_steps_for_batch(1), 15)
+            params.on_verify_complete([3, 3], batch_size=1)
+        self.assertEqual(params.get_steps_for_batch(1), 7)
         self.assertEqual(params.get_steps_for_batch(4), 3)
         self.assertEqual(params.get_steps_for_batch(6), 3)
 
     def test_the_wide_launch_allocation_follows_the_shipped_table(self):
         # The fixed launch-maximum buffers (QSA pending ring, request
-        # reservation) are sized off the widest width the table can reach.
+        # reservation) are sized off the widest width the table can reach:
+        # the shipped W4/W8 table caps the verify window at 8 tokens.
         from sglang.srt.runtime_context import _adaptive_draft_token_bound
 
-        self.assertEqual(_adaptive_draft_token_bound(ADAPTIVE_NEXT_CONFIG), 16)
+        self.assertEqual(_adaptive_draft_token_bound(ADAPTIVE_NEXT_CONFIG), 8)
         self.assertEqual(_adaptive_draft_token_bound(None), 8)
 
     def test_wide_candidates_need_the_widest_launch_width(self):
-        # W4/W8/W16 in one tier means launching at --speculative-num-steps 15;
-        # a W8 launch has to be told, not silently truncated at run time.
-        worker = _WorkerStub(launch_steps=7)
+        # W4/W8 in one tier means launching at --speculative-num-steps 7;
+        # a W4 launch has to be told, not silently truncated at run time.
+        worker = _WorkerStub(launch_steps=3)
         controller = AdaptiveController(worker, config_path=ADAPTIVE_NEXT_CONFIG)
         with self.assertRaises(ValueError) as ctx:
             controller.init_states()
-        self.assertIn("15", str(ctx.exception))
+        self.assertIn("7", str(ctx.exception))
 
     def test_global_defaults_and_the_fixed_width_union_are_unchanged(self):
         defaults = adaptive_spec_params.DEFAULT_ADAPTIVE_CONFIG
@@ -219,14 +220,13 @@ class TestShippedNextConfig(_ConfigCase):
 class TestCapturedBucketGeometry(_ConfigCase):
     def test_the_wide_states_capture_only_the_bucket_c1_can_reach(self):
         _, worker = self._controller(ADAPTIVE_NEXT_CONFIG)
-        self.assertEqual(worker.capture_requests[15], [1])
         self.assertEqual(worker.capture_requests[7], [1])
         self.assertEqual(worker.capture_requests[3], [1, 2, 4, 8])
 
     def test_a_configured_bs1_bucket_keeps_c1_on_the_wide_slot(self):
-        params = self._params(15, ADAPTIVE_NEXT_CONFIG)
+        params = self._params(7, ADAPTIVE_NEXT_CONFIG)
         params.set_cuda_graph_bs([1, 2, 4, 8])
-        self.assertEqual(params.get_steps_for_batch(1), 15)
+        self.assertEqual(params.get_steps_for_batch(1), 7)
         self.assertEqual(params._route(1).candidate_steps, NEXT_CANDIDATE_STEPS)
         self.assertEqual(params.get_steps_for_batch(2), 3)
 
@@ -234,9 +234,8 @@ class TestCapturedBucketGeometry(_ConfigCase):
         # No BS1 graph: the wide states have no bucket to capture, and a C1
         # batch replays the BS2 graph, so it must route as C>=2 (W4) instead of
         # selecting wide shapes nothing captured.
-        params = self._params(15, ADAPTIVE_NEXT_CONFIG)
+        params = self._params(7, ADAPTIVE_NEXT_CONFIG)
         params.set_cuda_graph_bs([2, 4, 8])
-        self.assertEqual(params.cuda_graph_bs_for_step(15), [])
         self.assertEqual(params.cuda_graph_bs_for_step(7), [])
         self.assertEqual(params.cuda_graph_bs_for_step(3), [2, 4, 8])
         self.assertEqual(params.get_steps_for_batch(1), 3)
@@ -250,7 +249,7 @@ class TestWidthAppliesAtTheForwardBoundary(_ConfigCase):
                 "2": {"candidate_steps": [3]},
             }
         )
-        self.assertEqual(worker.speculative_num_steps, 15)  # launched at the widest
+        self.assertEqual(worker.speculative_num_steps, 7)  # launched at the widest
 
         # C1 settles at W4 and the next actual batch -- a C4 one -- starts.
         controller.on_verify_complete([0], batch_size=1)
@@ -260,7 +259,7 @@ class TestWidthAppliesAtTheForwardBoundary(_ConfigCase):
         self.assertEqual(worker.speculative_num_steps, 3)
 
         # The OLDER C1 batch's result lands now, after the C4 forward started,
-        # and its policy wants W8 then W16.
+        # and its policy wants W8.
         before = list(worker.events)
         controller.on_verify_complete([3], batch_size=1)
         self.assertEqual(controller.params.get_steps_for_batch(1), 7)
@@ -273,15 +272,15 @@ class TestWidthAppliesAtTheForwardBoundary(_ConfigCase):
         # Its width comes from its own batch size, not the pending C1 policy.
         controller.activate_step_by_batch(4)
         controller.on_verify_complete([7], batch_size=1)
-        self.assertEqual(controller.params.get_steps_for_batch(1), 15)
+        self.assertEqual(controller.params.get_steps_for_batch(1), 7)
         self.assertEqual(worker.events, before, "C4 was forced wide by a stale C1")
         self.assertEqual(worker.speculative_num_steps, 3)
         self.assertEqual(controller.params.get_steps_for_batch(4), 3)
 
         # The next ACTUAL C1 forward is where the wide state is applied.
         controller.activate_step_by_batch(1)
-        self.assertEqual(worker.events, before + ["apply:15"])
-        self.assertEqual(worker.speculative_num_steps, 15)
+        self.assertEqual(worker.events, before + ["apply:7"])
+        self.assertEqual(worker.speculative_num_steps, 7)
 
     def test_a_stale_c2_completion_cannot_narrow_the_in_flight_c1_batch(self):
         controller, worker = self._controller(
@@ -290,16 +289,16 @@ class TestWidthAppliesAtTheForwardBoundary(_ConfigCase):
                 "2": {"candidate_steps": [3, 7], **FAST},
             }
         )
-        # A C1 batch is replaying its W16 graph.
+        # A C1 batch is replaying its W8 graph.
         controller.activate_step_by_batch(1)
-        self.assertEqual(worker.speculative_num_steps, 15)
+        self.assertEqual(worker.speculative_num_steps, 7)
 
         # A delayed completion of an earlier C2 batch downshifts the C>=2 slot.
         before = list(worker.events)
         controller.on_verify_complete([0, 0], batch_size=2)
         self.assertEqual(controller.params.get_steps_for_batch(2), 3)
         self.assertEqual(worker.events, before, "a completion callback repointed")
-        self.assertEqual(worker.speculative_num_steps, 15)
+        self.assertEqual(worker.speculative_num_steps, 7)
 
         # The wide C1 batch runs on; the narrow width lands at the next C2 forward.
         controller.activate_step_by_batch(1)
