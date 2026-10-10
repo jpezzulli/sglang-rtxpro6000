@@ -10,6 +10,7 @@ from sglang.srt.environ import envs
 from sglang.srt.layers.attention.attention_registry import (
     ATTENTION_BACKENDS,
     attn_backend_wrapper,
+    qsa_replaces_full_attention_backend,
 )
 from sglang.srt.layers.attention.tbo_backend import TboAttnBackend
 from sglang.srt.utils import init_cublas
@@ -238,14 +239,33 @@ def _build_resolved_backend(
 def _build_backend_from_str(
     *, model_runner: ModelRunner, backend_str: str, init_new_workspace: bool
 ) -> AttentionBackend:
-    return attn_backend_wrapper(
-        model_runner,
-        _build_full_attention_backend_from_str(
+    if backend_str == "flashinfer" and qsa_replaces_full_attention_backend(
+        model_runner
+    ):
+        # The one proven discard: attn_backend_wrapper will replace the
+        # full-attention side with QwenSparseAttnBackend (the decision is
+        # the shared qsa_replaces_full_attention_backend selector, checked
+        # again at its own site in the wrapper), and the FlashInfer
+        # constructor would only pin its 384 MiB device workspace (or a
+        # private one under init_new_workspace) for a backend nobody keeps.
+        # The wrapper has no pre-construction rejection to lose here: the
+        # flashinfer factory's preamble only selects the MHA vs MLA class,
+        # and the wrapper's own hybrid+MLA assert (which the base hit after
+        # construction) still fires identically before anything is built.
+        # Every other backend string -- dsa, nsa, hpc_ops, the MLA-only
+        # trio, triton, fa3, ... -- takes the untouched eager path below,
+        # keeping constructor ordering, warnings and registered
+        # incompatibility errors exactly as on the base. The split
+        # prefill/decode composition likewise keeps eager children.
+        model_runner.init_new_workspace = init_new_workspace
+        full_attn_backend = lambda: ATTENTION_BACKENDS["flashinfer"](model_runner)
+    else:
+        full_attn_backend = _build_full_attention_backend_from_str(
             model_runner=model_runner,
             backend_str=backend_str,
             init_new_workspace=init_new_workspace,
-        ),
-    )
+        )
+    return attn_backend_wrapper(model_runner, full_attn_backend)
 
 
 def _build_full_attention_backend_from_str(
