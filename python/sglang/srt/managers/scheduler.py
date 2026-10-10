@@ -276,6 +276,9 @@ from sglang.srt.mem_cache.common import (
     release_kv_cache,
     retraction_discard,
 )
+from sglang.srt.model_executor.cuda_graph_config import (
+    clear_adaptive_launch_capture_scope,
+)
 from sglang.srt.model_executor.forward_batch_info import PPProxyTensors
 from sglang.srt.model_loader.utils import get_resolved_model_impl
 from sglang.srt.multiplex.multiplexing_mixin import SchedulerMultiplexMixin
@@ -1019,10 +1022,27 @@ class Scheduler(
             self.draft_worker.init_attention_backends()
 
     def init_all_cuda_graphs(self):
-        """Capture cuda graphs for all workers."""
-        self.tp_worker.init_cuda_graphs()
-        if self.draft_worker is not None:
-            self.draft_worker.init_cuda_graphs()
+        """Capture cuda graphs for all workers.
+
+        An adaptive EAGLE worker first plans the launch width's capture prune;
+        the scoped config is applied only AT the decode-capture boundaries
+        (the target verify graphs inside capture_cuda_graphs, then the draft
+        decode / draft-extend graphs), never around the whole workers: the
+        process-shared logits buffer and the eager fixed-max buffers must be
+        provisioned off the FULL canonical bucket list to serve every bucket
+        and width the run can reach. The queue is cleared on every exit path.
+        Every other draft worker -- fixed-width, DFLASH, Frozen-KV MTP --
+        queues nothing and captures the published buckets exactly as before.
+        """
+        prepare = getattr(self.draft_worker, "prepare_adaptive_launch_capture", None)
+        try:
+            if prepare is not None:
+                prepare()
+            self.tp_worker.init_cuda_graphs()
+            if self.draft_worker is not None:
+                self.draft_worker.init_cuda_graphs()
+        finally:
+            clear_adaptive_launch_capture_scope()
 
     def init_model_worker(self):
         # Load model weights.

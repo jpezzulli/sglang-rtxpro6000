@@ -140,6 +140,9 @@ def _ownership_check(name):
         fn = getattr(EAGLEWorkerV2, name, None)
         if fn is None:
             self.fail(f"EAGLEWorkerV2.{name} is missing: width state is not owned")
+        if getattr(fn, "__self__", None) is EAGLEWorkerV2:
+            # classmethod / staticmethod: already bound to the class
+            return fn(*args, **kwargs)
         return fn(self, *args, **kwargs)
 
     return _bind
@@ -152,6 +155,7 @@ class _WorkerStub:
     build_adaptive_runtime_state = EAGLEWorkerV2.build_adaptive_runtime_state
     _override_worker_state = EAGLEWorkerV2._override_worker_state
     _own_draft_extend_backend = _ownership_check("_own_draft_extend_backend")
+    _hand_off_qsa_mtp_index_share = _ownership_check("_hand_off_qsa_mtp_index_share")
     _private_capture_scope = _ownership_check("_private_capture_scope")
     _validate_adaptive_widths = _ownership_check("_validate_adaptive_widths")
 
@@ -168,6 +172,7 @@ class _WorkerStub:
         self.captured_widths = {}  # mirrors _capture_cuda_graphs' binding
         self.captured_aliases = {}  # width -> draft-extend backend IS runner's
         self.factory_backends = {}  # width -> object the fake factory returned
+        self.index_share_bindings = []  # width -> (extend backend it bound)
         self.twin_requests = []  # draft-extend twins the worker asked for
         self.draft_runner = SimpleNamespace(
             attn_backend=SimpleNamespace(
@@ -190,6 +195,7 @@ class _WorkerStub:
             draft_runner=self.draft_runner,
             init_attention_backend=self._init_attention_backend,
             _capture_cuda_graphs=self._capture_cuda_graphs,
+            _configure_qsa_mtp_index_share=self._configure_index_share,
             _rebuild_topk1_chain_buffers=lambda: None,
         )
         # The launch state, as init_attention_backend left it at startup: the
@@ -225,6 +231,12 @@ class _WorkerStub:
         """ModelRunner._get_attention_backend on the draft runner (the twin path)."""
         self.twin_requests.append(init_new_workspace)
         return SimpleNamespace(name="draft-extend-twin", pool=self.shared_pool)
+
+    def _configure_index_share(self):
+        """EagleDraftWorker._configure_qsa_mtp_index_share: bind what is live now."""
+        self.index_share_bindings.append(
+            (self.speculative_num_steps, self._draft_worker.draft_extend_attn_backend)
+        )
 
     def _init_attention_backend(self):
         """Mirror of EagleDraftWorker.init_attention_backend's assignments.
@@ -542,6 +554,14 @@ class TestPerStateConstruction(PublishedConfigCase):
         # The launch state's own backend survived every build untouched.
         self.assertIs(worker.draft_runner.attn_backend, launch_backend)
         self.assertIs(worker._draft_worker.draft_extend_attn_backend, launch_backend)
+        # The QSA shared selection was installed on the backend this width really
+        # captured against, never on the shared launch backend the factory handed
+        # out first: a captured draft-extend graph keeps those write addresses.
+        bindings = dict(worker.index_share_bindings)
+        self.assertEqual(sorted(bindings), [3, 7])
+        for width, bound in bindings.items():
+            self.assertIs(bound, worker.captured_widths[width])
+            self.assertIsNot(bound, launch_backend)
 
     def test_a_non_qsa_draft_keeps_the_backend_the_factory_chose(self):
         # The generic families receive a fresh object from DraftBackendFactory per
