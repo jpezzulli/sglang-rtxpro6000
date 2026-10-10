@@ -322,6 +322,11 @@ class Envs:
     # Select the FP8 (deep_gemm) tokenwise QSA indexer; only the BF16 reference
     # path is ported, so setting this fails loudly instead of degrading.
     SGLANG_QWEN_DSA_USE_FP8_INDEXER = EnvBool(False)
+    # Build the QSA CUDA-graph row metadata page table with one program per
+    # page block (layers/attention/qsa/graph_metadata.py) instead of a single
+    # warp walking all max_pages entries.  Same values at the same addresses;
+    # off until measured at the served graph shapes.
+    SGLANG_QSA_META_PAGE_PARALLEL = EnvBool(False)
     SGLANG_PREFETCH_BLOCK_SIZE_MB = EnvInt(16)
     SGLANG_GEMMA_OUT_OF_PLACE_POSITION_MUTATION = EnvBool(False)
     SGLANG_ENABLE_WEIGHT_LOADER_V2 = EnvBool(False)
