@@ -2,16 +2,16 @@
 
 Package: [`ghcr.io/jpezzulli/sglang-rtxpro6000`](https://github.com/users/jpezzulli/packages/container/package/sglang-rtxpro6000).
 Published: **2026-09-15**. First captured: **2026-09-16T12:21:06Z**.
-Latest capture: **2026-10-09T06:08:20Z**.
+Latest capture: **2026-10-10T05:52:14Z**.
 
 | Metric | Latest reported | Change from previous archived day |
 | --- | ---: | ---: |
-| Package total downloads | 5,791 | +150 |
-| Version `build-814db1461bf8baa86d9ce745ec672a84f0fd5311` | 250 | +3 |
-| Version `build-b976bb329cfc1376b7d4589d55871f586d460ad4`, `v2.5.0` | 411 | +5 |
-| Version `build-2d6689abdac6f200091e9aa1ae65e95b86d9dd82`, `v2.5.1` | 771 | +8 |
-| Version `build-5cd0818abf27cc524ee15b1fedb23070855d9ea6`, `v2.5.2` | 591 | +5 |
-| Version `build-cache`, `build-d00d88efc8d6281b12be4f4073126aec95038c55`, `v2.5.3` | 1,181 | +52 |
+| Package total downloads | 5,967 | +176 |
+| Version `build-814db1461bf8baa86d9ce745ec672a84f0fd5311` | 252 | +2 |
+| Version `build-b976bb329cfc1376b7d4589d55871f586d460ad4`, `v2.5.0` | 417 | +6 |
+| Version `build-2d6689abdac6f200091e9aa1ae65e95b86d9dd82`, `v2.5.1` | 776 | +5 |
+| Version `build-5cd0818abf27cc524ee15b1fedb23070855d9ea6`, `v2.5.2` | 603 | +12 |
+| Version `build-cache`, `build-d00d88efc8d6281b12be4f4073126aec95038c55`, `v2.5.3` | 1,237 | +56 |
 
 These are GitHub package download counters, not unique users, successful installations, or repository clones. Container clients may fetch an index, platform manifests, and layers; builds and tests can also contribute downloads.
 
@@ -43,5 +43,6 @@ These are GitHub package download counters, not unique users, successful install
 | 2026-10-07 | 2026-10-07T05:58:57Z | 5,474 | +153 |
 | 2026-10-08 | 2026-10-08T06:03:33Z | 5,641 | +167 |
 | 2026-10-09 | 2026-10-09T06:08:20Z | 5,791 | +150 |
+| 2026-10-10 | 2026-10-10T05:52:14Z | 5,967 | +176 |
 
 GitHub exposes these counters on the public package pages. Its documented Packages REST responses provide package/version metadata but do not include download counters, so this collector validates and archives the public HTML representation. A markup change fails the package step loudly; the preceding repository-traffic step remains safely committed.
