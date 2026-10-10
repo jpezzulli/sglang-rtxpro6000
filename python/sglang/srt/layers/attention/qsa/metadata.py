@@ -239,12 +239,64 @@ class QSAIndexerMetadata(msgspec.Struct, frozen=True):
         )
 
 
+# ---- The pending index-K ring's geometry, in one place.
+#
 # Ported from sgl-project/sglang PR 40143, "[Spec] QSA: let the pending
 # index-K ring hold more than one compression group" (aiueo52, 2026), plus
-# https://github.com/aiueo52/sglang-rtxpro6000 branch flash-next-fast. The
-# ring capacity (group count) is fixed by QSATokenToKVPool at construction;
-# every producer of ring slots below must derive the index the same way or a
-# verify window silently reads another request's keys.
+# https://github.com/aiueo52/sglang-rtxpro6000 branch flash-next-fast (whose
+# ``get_qsa_pending_ring_size`` / ``req * ring + pos % ring`` generalization
+# was inspected while adopting the group shape; its page-parallel metadata
+# flags, RS/draft packages and prefill-pack divergence were not imported).
+#
+# A request's ring spans ``compress_ratio * num_groups`` slots. ``num_groups``
+# is the pool's launch capacity (QSATokenToKVPool derives it from the
+# resolved maximum draft-token window, once, at construction, because CUDA
+# graphs bind the ring buffers' owners for the graph's lifetime), so every
+# producer of slot indices -- the two eager builders below, the sparse
+# backend's call sites, the indexer's fallbacks and the in-graph row-metadata
+# kernel -- must read the count off the pool through ``pending_ring_groups``
+# and must size a run against ``pending_ring_groups_required``. A producer
+# that invents its own width silently reads another group's keys.
+
+
+def pending_ring_groups(pool) -> int:
+    """Ring groups the pool's pending index-K ring holds (1 without a ring).
+
+    Pools that carry no pre-compression ring (tokenwise QSA) and pools that
+    are not resolved yet keep the historical single-group layout.
+    """
+
+    return int(getattr(pool, "qsa_num_groups", 1))
+
+
+def pending_ring_groups_required(*, draft_tokens: int, compress_ratio: int) -> int:
+    """Groups a ring must hold to carry a ``draft_tokens``-wide verify window.
+
+    A speculative-paged forward publishes EVERY new position into the ring
+    before compressing any group it completes (the paged rows carry no
+    ``compress_member_rows``, so the extend path's consume-before-publish
+    protection does not run), and the first completed group may still read up
+    to ``compress_ratio - 1`` members retained from the private prefix. Those
+    live positions span the retained partial group plus the whole window; at
+    an unaligned start that covers ``(draft - 1) // ratio + 2`` distinct ring
+    groups -- one more than a bare window round-up gives. A window no wider
+    than one group (the shipped W4, and any non-speculative run) needs the
+    single-group layout: it is the layout the whole tree is qualified at, and
+    its inherited prefix-tail alias is preserved unchanged rather than
+    silently re-sized.
+    """
+
+    if compress_ratio < 1:
+        raise ValueError(
+            f"QSA pending ring needs a positive compress ratio, got {compress_ratio}"
+        )
+    if draft_tokens is None or draft_tokens <= 0:
+        return 1
+    if draft_tokens <= compress_ratio:
+        return 1
+    return (draft_tokens - 1) // compress_ratio + 2
+
+
 def pending_ring_slot(
     requests: torch.Tensor,
     positions: torch.Tensor,
@@ -376,6 +428,8 @@ def compressed_decode_view(
 __all__ = [
     "QSAIndexerMetadata",
     "build_qsa_row_ranges",
+    "pending_ring_groups",
+    "pending_ring_groups_required",
     "pending_ring_slot",
     "build_pending_ring_slots",
     "build_group_ring_slots",

@@ -263,72 +263,6 @@ def _sparse_gqa_chunk_prefill(
     )
 
 
-@triton.jit
-def _pack_qsa_prefill_kv(
-    k,
-    v,
-    packed_k,
-    packed_v,
-    req_to_token,
-    req_indices,
-    cu_k,
-    SK0: tl.constexpr,
-    SK1: tl.constexpr,
-    SK2: tl.constexpr,
-    SV0: tl.constexpr,
-    SV1: tl.constexpr,
-    SV2: tl.constexpr,
-    SR0: tl.constexpr,
-    SR1: tl.constexpr,
-    HEADS: tl.constexpr,
-    DIM: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    batch = tl.program_id(1)
-    start = tl.load(cu_k + batch).to(tl.int64)
-    end = tl.load(cu_k + batch + 1).to(tl.int64)
-    offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
-    token = offsets // (HEADS * DIM)
-    valid = token < end - start
-    req = tl.load(req_indices + batch).to(tl.int64)
-    dst = start * HEADS * DIM + offsets
-    head = offsets // DIM % HEADS
-    dim = offsets % DIM
-    slot = tl.load(req_to_token + req * SR0 + token * SR1, valid, 0).to(tl.int64)
-    keys = tl.load(k + slot * SK0 + head * SK1 + dim * SK2, valid, 0.0)
-    values = tl.load(v + slot * SV0 + head * SV1 + dim * SV2, valid, 0.0)
-    tl.store(packed_k + dst, keys, valid)
-    tl.store(packed_v + dst, values, valid)
-
-
-def pack_qsa_prefill_kv(
-    k, v, req_to_token, req_indices, cu_k, total_k, max_k, *, output_dtype=None
-):
-    heads, dim = k.shape[1:]
-    packed_k = torch.empty(
-        (total_k, heads, dim), dtype=output_dtype or k.dtype, device=k.device
-    )
-    packed_v = torch.empty(
-        (total_k, heads, dim), dtype=output_dtype or v.dtype, device=v.device
-    )
-    _pack_qsa_prefill_kv[(triton.cdiv(max_k * heads * dim, 1024), req_indices.numel())](
-        k,
-        v,
-        packed_k,
-        packed_v,
-        req_to_token,
-        req_indices,
-        cu_k,
-        *k.stride(),
-        *v.stride(),
-        *req_to_token.stride(),
-        HEADS=heads,
-        DIM=dim,
-        BLOCK=1024,
-    )
-    return packed_k, packed_v
-
-
 def sparse_gqa_fwd_interface_triton_ck(q, k, v, indices, cu_q, cu_k, kv_lens, scale):
     k, v = k.contiguous(), v.contiguous()
     total_q, num_q_heads, head_dim = q.shape
@@ -373,67 +307,6 @@ def sparse_gqa_fwd_interface_triton_ck(q, k, v, indices, cu_q, cu_k, kv_lens, sc
         num_stages=stages,
     )
     return out
-
-
-_PACKABLE_DTYPES = (
-    torch.float8_e4m3fn,
-    torch.float8_e5m2,
-    torch.bfloat16,
-    torch.float16,
-    torch.float32,
-)
-
-
-def qsa_prefill_kv_pack_supported(
-    k: torch.Tensor,
-    v: torch.Tensor,
-    req_to_token: torch.Tensor,
-    req_indices: torch.Tensor,
-    sequence_lens,
-) -> bool:
-    """Whether one fused launch may replace the per-request packed-K/V gather.
-
-    ``pack_qsa_prefill_kv`` walks a rectangular ``max_k`` grid with a per-request
-    ``cu_k`` early exit, so every row needs its own device request id and a
-    rectangular, strided-indexable KV pool.  Anything else (an odd dtype, a
-    padded request map, a row longer than the request table) stays on the
-    joined-index ``index_select`` path.
-
-    Two mismatches between the launch and ordinary tensor metadata are refused
-    here because the kernel does them by raw pointer arithmetic rather than by
-    stride: it reads ``req_indices + batch`` without a request stride, so a
-    strided id row (``[0, 9, 1, 9, 2][::2]``) would silently gather the wrong --
-    possibly out-of-range -- requests; and it dereferences every input as a
-    device address, so host-resident ids beside a device pool/table would fail
-    pointer validation where the old ``tolist()`` path works.  The request
-    *table* may be strided (``SR0``/``SR1`` are passed) because the kernel
-    strides it explicitly.
-
-    ponytail: upstream's grid is ``max_k`` by batch, so a short request next to
-    a 524288-token one launches masked programs that store nothing.  Per-request
-    split launches (or a length-bucketed batch) are the upgrade path if that
-    wasted work ever shows up in a ragged C6 profile.
-    """
-    if k.ndim != 3 or v.shape != k.shape or v.dtype != k.dtype:
-        return False
-    if k.dtype not in _PACKABLE_DTYPES:
-        return False
-    if req_to_token.ndim != 2:
-        return False
-    if (
-        req_indices.ndim != 1
-        or req_indices.dtype not in (torch.int32, torch.int64)
-        or not req_indices.is_contiguous()
-    ):
-        return False
-    # One launch dereferences all four inputs as one device's addresses.
-    if v.device != k.device or req_to_token.device != k.device:
-        return False
-    if req_indices.device != k.device:
-        return False
-    if req_indices.shape[0] != len(sequence_lens):
-        return False
-    return all(0 <= int(n) <= req_to_token.shape[1] for n in sequence_lens)
 
 
 @triton.jit
@@ -575,8 +448,6 @@ def qwen_sparse_kv_extraction_compact_triton(
 
 
 __all__ = [
-    "pack_qsa_prefill_kv",
-    "qsa_prefill_kv_pack_supported",
     "qwen_sparse_fa2_cu_seqlens_triton",
     "qwen_sparse_valid_counts_triton",
     "qwen_sparse_kv_extraction_compact_triton",

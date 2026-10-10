@@ -31,6 +31,7 @@ import triton
 import triton.language as tl
 
 from sglang.srt.environ import envs
+from sglang.srt.layers.attention.qsa.metadata import pending_ring_groups
 
 # Page-table entries one program handles: the serial path's loop trip width,
 # and the slice width the page-parallel path gives each program.
@@ -318,7 +319,7 @@ def launch_graph_metadata(
         req_to_token.stride(0),
         max_pages,
         RATIO=indexer.compress_ratio,
-        NUM_GROUPS=pool.qsa_num_groups,
+        NUM_GROUPS=pending_ring_groups(pool),
         FULL_PAGE=pool.qsa_compressed_page_size * indexer.compress_ratio,
         PAGE_BLOCK=_PAGE_BLOCK,
         PAGE_PARALLEL=page_parallel,

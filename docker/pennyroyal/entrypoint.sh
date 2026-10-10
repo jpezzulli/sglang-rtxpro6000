@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export REPO_ROOT=/opt/pennyroyal
+# REPO_ROOT stays /opt/pennyroyal in the image; honouring a preloaded value is
+# what lets the CPU handoff test exercise this exec path against a stand-in
+# image root instead of a copy of these six lines.
+export REPO_ROOT="${REPO_ROOT:-/opt/pennyroyal}"
 export SGLANG_EXE="$REPO_ROOT/.venv/bin/sglang"
 export PYTHON="$REPO_ROOT/.venv/bin/python"
 export PYTHONPATH="$REPO_ROOT/python${PYTHONPATH:+:$PYTHONPATH}"

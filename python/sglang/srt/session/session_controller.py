@@ -117,8 +117,12 @@ class Session:
         ):
             return
         req.input_ids = req.input_ids[1:]
-        if req.mm_inputs:
-            for item in req.mm_inputs.mm_items:
+        # mm_inputs may be an MMInputsProcessError marker (features lost in
+        # transport); the scheduler rejects such a request before it reaches a
+        # session, but this helper must not be the thing that blows up if it does.
+        mm_items = getattr(req.mm_inputs, "mm_items", None)
+        if mm_items:
+            for item in mm_items:
                 if item.offsets:
                     if any(s == 0 for s, _ in item.offsets):
                         logging.warning(

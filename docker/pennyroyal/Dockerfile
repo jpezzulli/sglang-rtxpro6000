@@ -51,11 +51,30 @@ RUN export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG="0.5.19+g${SOURCE_REVISION:
       --extra-index-url https://docs.sglang.ai/whl/cu130/ \
       --constraint docker/pennyroyal/constraints.txt --no-build-isolation-package sglang -e python \
     && rm -rf /tmp/penny-cargo
-# Match the native installation's prebuilt SM120 kernels. Without this package
+# Match the native installation's prebuilt SM120 kernels. Without these packages
 # FlashInfer compiles its large fused-MoE extension on every fresh cache root.
+# Since 0.7.0 flashinfer-jit-cache is a shim; --no-deps must pull the SM120-family
+# provider wheel explicitly (and both stay aligned with pyproject's flashinfer pin).
 RUN uv pip install --python .venv/bin/python --no-deps \
       --index-url https://flashinfer.ai/whl/cu130 \
-      'flashinfer-jit-cache==0.6.17+cu130'
+      'flashinfer-jit-cache==0.7.0.post1+cu130' \
+      'flashinfer-jit-cache-sm120f==0.7.0.post1+cu130'
+# Package the accepted FlashInfer SM120 source into the image's own FlashInfer
+# package and compile the fused-MoE module from those patched headers, exactly
+# as the native sequences do. The step hands nvcc the CUDAHOSTCXX above (g++-15)
+# as FlashInfer's -ccbin, which reads that setting from CC and would otherwise
+# override NVCC_CCBIN with the C driver; the image now builds the C++ and the CUDA
+# host side with the same GCC 15. The stock provider wheels stay for the other
+# kernels; FlashInfer prefers the package-local module below. Building here is
+# what lets a downloaded image run the Next profiles with no rebuild, no
+# configurator and no first-launch compilation; the JIT objects stay in the
+# build stage. The step also guards one stock include of <sanitizer/...> that the
+# gcc15 package above does not ship, which is why the compile needs no sanitizer
+# development headers here either.
+RUN FLASHINFER_WORKSPACE_BASE=/tmp/penny-fi-sm120 \
+    .venv/bin/python scripts/pennyroyal/flashinfer/install.py \
+    && .venv/bin/python scripts/pennyroyal/flashinfer/install.py --check >/dev/null \
+    && rm -rf /tmp/penny-fi-sm120
 # NIXL POSIX and optional NVMe PLE reader are built from pinned/vendored source.
 RUN bash docker/pennyroyal/build-nixl.sh \
     && CARGO_TARGET_DIR=/tmp/penny-ple-cargo PYTHON=/opt/pennyroyal/.venv/bin/python \

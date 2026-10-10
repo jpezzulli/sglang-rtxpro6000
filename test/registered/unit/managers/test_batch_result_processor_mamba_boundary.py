@@ -186,5 +186,159 @@ class TestMambaBoundaryMaskReuse(unittest.TestCase):
                     self.assertTrue(cache_update.call_args.kwargs["known_boundary"])
 
 
+class _SpecAlgorithm:
+    def is_none(self) -> bool:
+        return False
+
+
+class _DecodeMode:
+    def is_decode(self) -> bool:
+        return True
+
+    def is_extend(self) -> bool:
+        return False
+
+
+class _SpecBatch:
+    def __init__(self, reqs):
+        self.reqs = reqs
+        self.has_grammar = any(req.grammar is not None for req in reqs)
+        self.forward_mode = _DecodeMode()
+        self.spec_algorithm = _SpecAlgorithm()
+
+
+class _Grammar:
+    """Grammar stub that terminates past `keep` accepted tokens; keep=0 rejects
+    the very first one, so nothing is retained."""
+
+    def __init__(self, keep: int):
+        self.finished = False
+        self._keep = keep
+        self._accepted = 0
+
+    def accept_token(self, token_id: int):
+        if self._keep == 0:
+            raise ValueError("token rejected by grammar")
+        self._accepted += 1
+
+    def is_terminated(self) -> bool:
+        return self._accepted >= self._keep
+
+
+class TestSpecGrammarTrackBoundary(unittest.TestCase):
+    """A grammar-truncated speculative run must only checkpoint on the tokens
+    it actually committed (upstream sgl-project/sglang#43029)."""
+
+    STRATEGIES = ["extra_buffer", "extra_buffer_lazy"]
+
+    def _step(self, *, prompt_len, output_len, grammar, accepted, stride, strategy):
+        """Run one spec-v2 decode step through the production post-processing
+        and return the boundary the scheduler would record for it."""
+        sampling_params = SamplingParams(max_new_tokens=256, temperature=0)
+        sampling_params.normalize(None)
+        req = Req(
+            rid="spec-grammar",
+            origin_input_text="",
+            origin_input_ids=array("q", [1] * prompt_len),
+            sampling_params=sampling_params,
+            vocab_size=128,
+        )
+        req.kv_committed_len = prompt_len
+        req.output_ids.extend([7] * output_len)
+        req.grammar = grammar
+
+        processor = _make_processor()
+        result = SimpleNamespace(
+            next_token_ids=torch.tensor(
+                accepted + [0] * (stride - len(accepted)), dtype=torch.long
+            ),
+            accept_lens=torch.tensor([len(accepted)], dtype=torch.long),
+            speculative_num_draft_tokens=stride,
+            num_correct_drafts=None,
+            num_correct_drafts_per_req_cpu=None,
+            block_accept_lens=None,
+            cap_lens=None,
+            copy_done=None,
+            grammar_advanced=False,
+            grammar_retained_tokens=None,
+        )
+        batch = _SpecBatch([req])
+
+        with get_context().override_server_args(
+            mamba_radix_cache_strategy=strategy,
+            mamba_track_interval=TRACK_INTERVAL,
+            _mamba_cache_chunk_size=TRACK_INTERVAL,
+        ):
+            predicted = processor._resolve_spec_v2_tokens(result, batch)[0]
+            # process_batch_result_decode appends the committed run before the
+            # track-boundary check, so seqlen reflects the retained run only.
+            req.output_ids.extend(predicted)
+            return processor._mamba_check_track_boundary(req, batch, result, 0)
+
+    def test_truncated_run_below_boundary_records_no_checkpoint(self):
+        # seq_len 9 before the step, 4 drafts accepted, the grammar keeps 1: the
+        # retained run covers position 9 alone, so no grid line is crossed. The
+        # accepted-run step-back still reports line 8 -- a checkpoint this step
+        # never wrote -- and moves the ping-pong pointer onto it.
+        for strategy in self.STRATEGIES:
+            with self.subTest(strategy=strategy):
+                boundary = self._step(
+                    prompt_len=3,
+                    output_len=6,
+                    grammar=_Grammar(keep=1),
+                    accepted=[101, 102, 103, 104],
+                    stride=4,
+                    strategy=strategy,
+                )
+                self.assertEqual(boundary, (False, 0))
+
+    def test_truncated_run_that_reaches_the_boundary_still_checkpoints(self):
+        # Truncation must not hide a real crossing: seq_len 8 -> 10 covers line 8.
+        for strategy in self.STRATEGIES:
+            with self.subTest(strategy=strategy):
+                boundary = self._step(
+                    prompt_len=4,
+                    output_len=4,
+                    grammar=_Grammar(keep=2),
+                    accepted=[101, 102, 103, 104],
+                    stride=4,
+                    strategy=strategy,
+                )
+                self.assertEqual(boundary, (True, 8))
+
+    def test_fully_rejected_run_records_no_checkpoint(self):
+        for strategy in self.STRATEGIES:
+            with self.subTest(strategy=strategy):
+                boundary = self._step(
+                    prompt_len=3,
+                    output_len=6,
+                    grammar=_Grammar(keep=0),
+                    accepted=[101, 102, 103, 104],
+                    stride=4,
+                    strategy=strategy,
+                )
+                self.assertEqual(boundary, (False, 0))
+
+    def test_untruncated_spec_run_is_unchanged(self):
+        # No grammar: the accepted run (drafts + bonus) is the committed run, so
+        # the boundary step-back keeps its pre-#43029 shape.
+        for strategy, prompt_len, expected in [
+            ("extra_buffer", 3, (False, 0)),  # seq_len 5 -> 7, grid line 8 unreached
+            ("extra_buffer", 4, (True, 8)),  # seq_len 6 -> 8, crosses on the last token
+            ("extra_buffer_lazy", 3, (False, 0)),
+            ("extra_buffer_lazy", 4, (True, 8)),
+        ]:
+            with self.subTest(strategy=strategy, prompt_len=prompt_len):
+                boundary = self._step(
+                    prompt_len=prompt_len,
+                    output_len=2,
+                    grammar=None,
+                    accepted=[101, 102, 103],
+                    stride=4,
+                    strategy=strategy,
+                )
+                self.assertEqual(boundary, expected)
+
+
 if __name__ == "__main__":
     unittest.main()

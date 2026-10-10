@@ -23,11 +23,6 @@ from sglang.srt.layers.attention.qsa.config import (
     is_qwen_qsa,
     parse_qsa_profile,
 )
-from sglang.srt.layers.attention.qsa.decode_attn import (
-    QSADecodeAttnWorkspace,
-    qsa_decode_attention,
-    qsa_decode_attention_supported,
-)
 from sglang.srt.layers.attention.qsa.kernel import (
     QSA_PREFILL_ALL_VISIBLE_MAX_BATCH,
     qsa_sparse_attention,
@@ -39,10 +34,10 @@ from sglang.srt.layers.attention.qsa.metadata import (
     build_qsa_row_ranges,
     build_rope_position_matrix,
     compressed_decode_view,
+    pending_ring_groups,
+    pending_ring_groups_required,
 )
 from sglang.srt.layers.attention.qsa.sparse_attn import (
-    pack_qsa_prefill_kv,
-    qsa_prefill_kv_pack_supported,
     qwen_sparse_fa2_cu_seqlens_triton,
     qwen_sparse_kv_extraction_compact_triton,
     qwen_sparse_valid_counts_triton,
@@ -51,7 +46,6 @@ from sglang.srt.layers.attention.qsa.sparse_attn import (
 )
 from sglang.srt.layers.attention.qsa.stall_diagnostics import QSAStallDiagnostics
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
-from sglang.srt.utils import print_warning_once
 
 logger = logging.getLogger(__name__)
 
@@ -156,15 +150,6 @@ class QSAMTPSharedSparseIndices:
     ) -> None:
         self.layer_slots = {int(l): i for i, l in enumerate(sorted(layer_ids))}
         self.tail_width = tail_width
-        # The split-KV decode kernel may stop scanning at seq_lens, which is only
-        # sound when nothing valid sits behind a -1 hole; that gate therefore also
-        # selects this layout instead of a second, mismatch-prone flag.
-        self.shared_tail_prefix = envs.SGLANG_OPT_TRITON_DECODE_ATTN.get()
-        if self.shared_tail_prefix:
-            logger.info(
-                "QSA MTP shared indices: drafted tail after the valid prefix "
-                "(SGLANG_OPT_TRITON_DECODE_ATTN)"
-            )
         self.trash_row = num_requests
         # Logical index 0 keeps never-captured rows (graph warmup dummies)
         # attending exactly the first token instead of an empty/invalid set.
@@ -205,26 +190,10 @@ class QSAMTPSharedSparseIndices:
         The tail columns append exactly ``[captured_len, current_position]``
         -- disjoint from the frozen set by construction, -1 (dropped
         downstream) where the gap is shorter than the tail width.
-
-        Two layouts of that one attention set.  Default: the frozen rows stay
-        as captured and the tail occupies the last ``tail_width`` columns, so a
-        short (``-1``-padded) frozen row leaves holes the packed paths -- which
-        read the row as a valid prefix -- cannot see past.  Shared-tail-prefix
-        mode compacts the frozen selection to the front and puts the drafted
-        tail immediately behind it, which is what the split-KV decode kernel
-        needs to bound its scan at ``seq_lens``.  Same columns, same causal
-        bound and order, and every op below has a static shape (``num_frozen``
-        is a device tensor), so both layouts record into the decode graphs.
         """
         slot = self.layer_slots[int(layer_id)]
         rows = req_pool_indices.to(torch.long)
         out = self.indices[slot, rows]
-        if self.shared_tail_prefix:
-            return self._lookup_valid_prefix(
-                out=out,
-                base=self.captured_len[slot, rows].to(torch.int64),
-                current_positions=current_positions,
-            )
         base = self.captured_len[slot, rows].to(torch.int64)
         tail = base.unsqueeze(1) + self._tail_offsets.unsqueeze(0)
         valid = tail <= current_positions.to(torch.int64).unsqueeze(1)
@@ -232,33 +201,6 @@ class QSAMTPSharedSparseIndices:
             out.dtype
         )
         return out
-
-    def _lookup_valid_prefix(
-        self, *, out: torch.Tensor, base: torch.Tensor, current_positions: torch.Tensor
-    ) -> torch.Tensor:
-        num_columns = out.shape[1]
-        frozen_width = num_columns - self.tail_width
-        frozen = out[:, :frozen_width]
-        valid = frozen >= 0
-        # Valid columns keep their relative order and the -1 padding goes last:
-        # a stable sort of the (valid ? rank : rank + frozen_width) keys is the
-        # cumsum compaction, without a data-dependent shape.
-        ranks = torch.arange(frozen_width, device=out.device).unsqueeze(0)
-        keys = torch.where(valid, ranks, ranks + frozen_width)
-        out[:, :frozen_width] = frozen.gather(
-            1, torch.argsort(keys, dim=1, stable=True)
-        )
-        num_frozen = valid.sum(dim=1, keepdim=True)
-        # The tail follows the prefix, so the row is valid up to
-        # ``num_frozen + tail_width`` and -1 (dropped downstream) after that.
-        columns = torch.arange(num_columns, device=out.device).unsqueeze(0)
-        tail_offset = columns - num_frozen
-        tail = base.unsqueeze(1) + tail_offset
-        tail_valid = (tail_offset < self.tail_width) & (
-            tail <= current_positions.to(torch.int64).unsqueeze(1)
-        )
-        tail = torch.where(tail_valid, tail, -1).to(out.dtype)
-        return torch.where(columns < num_frozen, out, tail)
 
 
 class QwenSparseAttnBackend(AttentionBackend):
@@ -323,9 +265,6 @@ class QwenSparseAttnBackend(AttentionBackend):
         self._trtllm_sparse_tables = {}
         self._mtp_shared_sparse_indices = None
         self._trtllm_workspace = None
-        self._triton_decode_attn = envs.SGLANG_OPT_TRITON_DECODE_ATTN.get()
-        self._fused_prefill_kv = envs.SGLANG_OPT_FUSED_QSA_PREFILL_KV.get()
-        self._decode_attn_workspace: Optional[QSADecodeAttnWorkspace] = None
         self._graph_extend_lens = None
         self._graph_extend_lens_pin = None
         self.qsa_stall_diagnostics = (
@@ -342,8 +281,14 @@ class QwenSparseAttnBackend(AttentionBackend):
 
     @property
     def _pending_ring_groups(self) -> int:
-        """Groups the pending index-K ring holds; the pool fixes this at construction."""
-        return self.token_to_kv_pool.qsa_num_groups
+        """Groups the pending index-K ring holds; the pool fixes this at construction.
+
+        Read defensively: a backend built before its pool resolves (the capture
+        path, and every ``__new__``-style harness) has no pool to ask, and the
+        single-group layout is the right answer for it -- the guard then refuses
+        any window wider than one group rather than raising AttributeError.
+        """
+        return pending_ring_groups(getattr(self, "token_to_kv_pool", None))
 
     @staticmethod
     def _can_use_qsa_prefill_all_visible(
@@ -364,19 +309,27 @@ class QwenSparseAttnBackend(AttentionBackend):
                 "Qwen QSA target verification supports only " "speculative_eagle_topk=1"
             )
         draft_tokens = int(getattr(spec_info, "draft_token_num", 0) or 0)
-        window = self.compress_ratio * self._pending_ring_groups
-        if draft_tokens > window:
-            # The ring keys state by position % ratio within a group, so a
-            # window wider than every group it holds would collide within
-            # one forward. The pool sizes its group count off the resolved
-            # maximum draft-token window with headroom for the retained
-            # prefix (see QSATokenToKVPool.pending_ring_num_groups; W4 -> 1,
-            # W8 -> 3 at R4), so only an inconsistent configuration raises.
+        # One span model for both sides of the ring: the pool sized its group
+        # count off the resolved LAUNCH-MAXIMUM draft-token window (with
+        # headroom for the retained prefix a partial group may still read), so
+        # a verify window is legal exactly when the groups it needs are among
+        # the groups the allocation holds. W4 -> 1 group (the shipped layout,
+        # bit-for-bit), W8 -> 3, W16 -> 5 at ratio 4. Asking for a window wider
+        # than the launch capacity -- an active width the ring was never sized
+        # for, which would alias two live positions onto one slot -- is the
+        # only thing that raises here.
+        required = pending_ring_groups_required(
+            draft_tokens=draft_tokens, compress_ratio=self.compress_ratio
+        )
+        groups = self._pending_ring_groups
+        if required > groups:
             raise NotImplementedError(
-                "Qwen QSA requires speculative_num_draft_tokens <= the QSA "
-                f"compress ratio ({self.compress_ratio}) times the pending "
-                f"index-key ring's group count ({self._pending_ring_groups}): "
-                f"got {draft_tokens}"
+                "Qwen QSA requires a verify window the pending index-key ring "
+                f"can hold: {draft_tokens} draft tokens need {required} ring "
+                f"groups at compress ratio {self.compress_ratio}, the QSA pool "
+                f"holds {groups}; raise the launch maximum draft-token count "
+                "(speculative_num_draft_tokens / the adaptive candidate table) "
+                "so the ring is sized for every width the run can select"
             )
 
     @staticmethod
@@ -1452,7 +1405,7 @@ class QwenSparseAttnBackend(AttentionBackend):
                 logical_positions=current_positions,
                 compress_ratio=ratio,
                 is_extend=False,
-                num_groups=pool.qsa_num_groups,
+                num_groups=pending_ring_groups(pool),
             )
         )
         metadata.graph_ring_group_locs.copy_(
@@ -1461,7 +1414,7 @@ class QwenSparseAttnBackend(AttentionBackend):
                 group_end_positions=current_positions,
                 sequence_ids=metadata.token_to_batch_idx.long(),
                 compress_ratio=ratio,
-                num_groups=pool.qsa_num_groups,
+                num_groups=pending_ring_groups(pool),
             ).to(torch.int32)
         )
 
@@ -1713,88 +1666,12 @@ class QwenSparseAttnBackend(AttentionBackend):
             diagnostics.mark_before_kv_getters(layer.layer_id, pool)
         k_buffer = pool.get_key_buffer(layer.layer_id)
         v_buffer = pool.get_value_buffer(layer.layer_id)
+        if diagnostics is not None:
+            diagnostics.set_phase(layer.layer_id, "before_req_indices_to_list")
         req_to_token = self.req_to_token_pool.req_to_token
-        packed_k, packed_v, cu_seqlens_k, sequence_lens_tensor = (
-            self._pack_qsa_prefill_kv(
-                k_buffer,
-                v_buffer,
-                req_to_token,
-                forward_batch,
-                sequence_lens,
-                q.device,
-                layer.layer_id,
-                diagnostics,
-            )
-        )
-        if diagnostics is not None:
-            diagnostics.set_phase(layer.layer_id, "before_sparse_attention")
-        output = sparse_gqa_fwd_interface_triton_ck(
-            q.contiguous(),
-            packed_k,
-            packed_v,
-            topk_indices,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            sequence_lens_tensor,
-            layer.scaling,
-        )
-        if diagnostics is not None:
-            diagnostics.set_phase(layer.layer_id, "sparse_attention_enqueued")
-        return self._pad_extend_output(output, num_output_rows)
-
-    def _pack_qsa_prefill_kv(
-        self,
-        k_buffer: torch.Tensor,
-        v_buffer: torch.Tensor,
-        req_to_token: torch.Tensor,
-        forward_batch,
-        sequence_lens: list,
-        device: torch.device,
-        layer_id: int,
-        diagnostics,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Full-context K/V packed per request for the chunk-prefill kernel.
-
-        Default-OFF (SGLANG_OPT_FUSED_QSA_PREFILL_KV) fused route: one Triton
-        launch gathers K and V together straight from the pool through the
-        request table, so the device request ids are never materialised as a
-        host list and no long gather index is built.  The packed tensors keep
-        the pool dtype -- an FP8 pool stays FP8 -- exactly as the joined-index
-        path below produced, so the FP8 staging size of a full 524288-token
-        prefix is unchanged and the attention consumer still converts FP8
-        tiles itself.  Unsupported shapes fall back to the old path.
-        """
-        if self._fused_prefill_kv and qsa_prefill_kv_pack_supported(
-            k_buffer,
-            v_buffer,
-            req_to_token,
-            forward_batch.req_pool_indices,
-            sequence_lens,
-        ):
-            if diagnostics is not None:
-                diagnostics.set_phase(layer_id, "before_fused_kv_pack")
-            sequence_lens_tensor = torch.tensor(
-                sequence_lens, dtype=torch.int32, device=device
-            )
-            cu_seqlens_k = F.pad(sequence_lens_tensor.cumsum(0), (1, 0)).contiguous()
-            packed_k, packed_v = pack_qsa_prefill_kv(
-                k_buffer,
-                v_buffer,
-                req_to_token,
-                forward_batch.req_pool_indices,
-                cu_seqlens_k,
-                sum(sequence_lens),
-                max(sequence_lens, default=1),
-            )
-            if diagnostics is not None:
-                diagnostics.set_phase(layer_id, "after_fused_kv_pack")
-            return packed_k, packed_v, cu_seqlens_k, sequence_lens_tensor
-
-        if diagnostics is not None:
-            diagnostics.set_phase(layer_id, "before_req_indices_to_list")
         req_indices = forward_batch.req_pool_indices.tolist()
         if diagnostics is not None:
-            diagnostics.set_phase(layer_id, "after_req_indices_to_list")
+            diagnostics.set_phase(layer.layer_id, "after_req_indices_to_list")
         # Join the gather INDICES, not the gathered K/V.  An index row is 8 B
         # per token; a K (or V) row is tp_kv_head_num * head_dim bytes.  Gathering
         # per request and then torch.cat-ing the results materialised a SECOND
@@ -1811,15 +1688,24 @@ class QwenSparseAttnBackend(AttentionBackend):
             gather_index[0] if len(gather_index) == 1 else torch.cat(gather_index)
         )
         sequence_lens_tensor = torch.tensor(
-            sequence_lens, dtype=torch.int32, device=device
+            sequence_lens, dtype=torch.int32, device=q.device
         )
         cu_seqlens_k = F.pad(sequence_lens_tensor.cumsum(0), (1, 0)).contiguous()
-        return (
+        if diagnostics is not None:
+            diagnostics.set_phase(layer.layer_id, "before_sparse_attention")
+        output = sparse_gqa_fwd_interface_triton_ck(
+            q.contiguous(),
             k_buffer.index_select(0, gather_index),
             v_buffer.index_select(0, gather_index),
+            topk_indices,
+            cu_seqlens_q,
             cu_seqlens_k,
             sequence_lens_tensor,
+            layer.scaling,
         )
+        if diagnostics is not None:
+            diagnostics.set_phase(layer.layer_id, "sparse_attention_enqueued")
+        return self._pad_extend_output(output, num_output_rows)
 
     @staticmethod
     def _pad_extend_output(output: torch.Tensor, num_rows: int) -> torch.Tensor:
@@ -1994,53 +1880,6 @@ class QwenSparseAttnBackend(AttentionBackend):
         )
         return output.reshape(q.shape[0], -1)
 
-    def _forward_triton_decode(
-        self,
-        *,
-        q: torch.Tensor,
-        k_buffer: torch.Tensor,
-        v_buffer: torch.Tensor,
-        layer,
-        forward_batch,
-        metadata,
-        topk_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        if self._decode_attn_workspace is None:
-            # The arrival counters are zeroed eagerly at construction, never
-            # inside a capture: CUDA graph capture only runs after the eager
-            # warmup forwards, and the workspace address is baked into every
-            # graph recorded from here on.
-            if torch.cuda.is_current_stream_capturing():
-                raise RuntimeError("QSA decode attention workspace not allocated")
-            self._decode_attn_workspace = QSADecodeAttnWorkspace(
-                num_kv_heads=k_buffer.shape[1],
-                head_dim=k_buffer.shape[2],
-                device=q.device,
-            )
-        return qsa_decode_attention(
-            q=q,
-            k_buffer=k_buffer,
-            v_buffer=v_buffer,
-            req_to_token=self.req_to_token_pool.req_to_token,
-            row_req_pool_indices=(
-                metadata.row_req_pool_indices
-                if metadata.row_req_pool_indices is not None
-                else forward_batch.req_pool_indices
-            ),
-            topk_indices=topk_indices,
-            seq_lens=metadata.sequence_lengths,
-            sm_scale=layer.scaling,
-            workspace=self._decode_attn_workspace,
-            # Draft decode rows reuse the draft-extend selection, which leaves -1
-            # holes before the drafted tail unless the tail follows the valid
-            # prefix -- and the shared state reads the same gate as this path,
-            # so a full scan is the fallback, never a mismatched pairing.
-            prefix_valid=(
-                not self.should_reuse_mtp_sparse_indices(forward_batch)
-                or self._mtp_shared_sparse_indices.shared_tail_prefix
-            ),
-        ).reshape(q.shape[0], -1)
-
     def forward_decode(
         self,
         q: torch.Tensor,
@@ -2079,23 +1918,6 @@ class QwenSparseAttnBackend(AttentionBackend):
 
         metadata = self._resolve_metadata(forward_batch)
         topk_indices = topk_indices.to(torch.int32).contiguous()
-        if self._triton_decode_attn:
-            if qsa_decode_attention_supported(
-                q=q, k_buffer=k_buffer, v_buffer=v_buffer, topk_indices=topk_indices
-            ):
-                return self._forward_triton_decode(
-                    q=q,
-                    k_buffer=k_buffer,
-                    v_buffer=v_buffer,
-                    layer=layer,
-                    forward_batch=forward_batch,
-                    metadata=metadata,
-                    topk_indices=topk_indices,
-                )
-            print_warning_once(
-                "SGLANG_OPT_TRITON_DECODE_ATTN: unsupported QSA attention shape, "
-                "falling back to the packed path"
-            )
         trtllm_decode = _resolve_trtllm_sparse_decode()
         if trtllm_decode is not None:
             return self._forward_trtllm_sparse(

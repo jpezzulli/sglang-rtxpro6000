@@ -1,0 +1,4 @@
+# Carried FlashInfer source mailboxes are kept byte-for-byte. Their own
+# diff content lines include empty context lines, which are a single space,
+# so the usual whitespace hygiene rules must not be applied to them.
+scripts/pennyroyal/flashinfer/patches/*.patch -whitespace

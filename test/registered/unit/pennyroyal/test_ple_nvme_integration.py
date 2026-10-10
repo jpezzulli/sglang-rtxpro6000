@@ -60,12 +60,14 @@ def test_ram_mode_and_online_fp8_defaults_are_inert():
     )
 
     assert result.returncode == 0, result.stderr
+    # Unset stays unset/blank: the runtime decides automatically, the helper
+    # no longer manufactures a false opt-out.
     assert result.stdout.splitlines() == [
         "original",
         "--ple-offload-embedding",
         "0",
         "true",
-        "false",
+        "",
     ]
 
 
@@ -127,9 +129,19 @@ def test_online_fp8_switch_requires_literal_boolean():
         'echo "$SGLANG_SM120_ONLINE_MXFP8"',
         SGLANG_SM120_ONLINE_MXFP8="true",
     )
+    disabled = _run_helper(
+        'echo "$SGLANG_SM120_ONLINE_MXFP8"',
+        SGLANG_SM120_ONLINE_MXFP8="false",
+    )
+    blank = _run_helper(
+        'echo "$SGLANG_SM120_ONLINE_MXFP8"',
+        SGLANG_SM120_ONLINE_MXFP8="",
+    )
     invalid = _run_helper(":", SGLANG_SM120_ONLINE_MXFP8="1")
 
     assert enabled.returncode == 0 and enabled.stdout.strip() == "true"
+    assert disabled.returncode == 0 and disabled.stdout.strip() == "false"
+    assert blank.returncode == 0  # a saved blank reads as automatic
     assert invalid.returncode != 0
     assert "must be true or false" in invalid.stderr
 
@@ -223,10 +235,7 @@ def test_next_recipes_initialize_cache_environment_before_nvme_preflight(tmp_pat
 
 def test_source_guard_matches_every_hooked_publication_module():
     guard = json.loads(GUARD.read_text())
-    assert guard["source"] == (
-        "Pennyroyal candidate f804f21af3ad633744d0a50455a0a72bef68b546 "
-        "(prereq 69583da7c71b87ac36371333a19f2749bab72773, unqualified)"
-    )
+    assert guard["source"].startswith("Pennyroyal v2.5.3")
     assert "sglang.srt.models.qwen4_exp" in guard["modules"]
 
     for module, expected in guard["modules"].items():

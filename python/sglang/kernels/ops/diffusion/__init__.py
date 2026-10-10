@@ -345,7 +345,7 @@ for _op, _backend, _target, _caps, _description in _SPECS:
 # then symbol; a new public kernel belongs here and nowhere else.
 # ---------------------------------------------------------------------------
 _EXPORTS: dict[str, str] = {
-    "load_extension_with_recovery": "ext.loader",
+    "load_extension_with_recovery": "sglang.srt.utils.cpp_extension_loader",
     # Normalization: RMSNorm / LayerNorm / GroupNorm and their fused epilogues
     "FLYDSL_NORM_MIN_ALIGNED_DIM": "norm.fused_residual_norm_flydsl",
     "flydsl_fused_residual_norm_scale_shift": "norm.fused_residual_norm_flydsl",
@@ -495,7 +495,8 @@ def __getattr__(name: str) -> Any:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     from importlib import import_module
 
-    value = getattr(import_module(f"{__name__}.{module}"), name)
+    owner = module if module.startswith("sglang.") else f"{__name__}.{module}"
+    value = getattr(import_module(owner), name)
     globals()[name] = value  # cache; later lookups skip __getattr__ entirely
     return value
 

@@ -1,0 +1,1050 @@
+From 5e86c489f5759cb4006d3b1b5e7bdd14f7a581df Mon Sep 17 00:00:00 2001
+From: Penny <Pennyroyal@agentmail.to>
+Date: Thu, 8 Oct 2026 16:42:07 -0400
+Subject: [PATCH 1/3] perf(moe): port the donor A0 fused routing prologue to
+ 512 experts / top-10
+
+Direct port of the published donor patch, kept at the text level: every added and
+removed line of csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh is
+byte-identical to
+
+  https://github.com/aiueo52/flash-next-rtxpro6000 @ 524af49abcca66fcb4377ba8297022804535fccf
+  patches/flashinfer/01-a0-fused-routing-prologue.patch
+
+(benches/optimizations documented in that repo's docs/optimizations.md section D1,
+"Flash-Next" work by aiueo52; the wheel-side copy of the file,
+flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh, is
+byte-identical to the one in the flashinfer_python-0.7.0.post1 wheel, so the only
+mechanical 0.7 change is the source-repo path and the resulting line offsets).
+
+FlashInfer has a one-kernel routing prologue, fusedBuildExpertMapsSortFirstToken,
+but on this base it cannot be reached by the Flash-Next model shape: expert_log = 10
+fell outside the `expert_log <= 9` tier and top-k = 10 was absent from the
+{1,2,4,6,8} dispatch, so the 512-expert / top-10 route always ran the 3-kernel
+unfused preparation.  Enabling both gates naively is slower than the fallback it
+replaces (~15 us vs 9.4 us), because cub::BlockRadixRank's temp storage is
+COUNTER_LANES * BLOCK_THREADS * PACKING_RATIO digit counters, 65,696 B at
+BLOCK_SIZE=32 / RADIX_BITS=10 (512 experts + the num_experts / num_experts+1
+sentinels), which 32 threads then zero and rake.  The donor therefore switches only
+the >=10-bit tier, which upstream never reached, to cub::BlockRadixRankMatch
+(one counter per (digit, warp), 4,256 B here, ranks via warp match_any); measured
+3.36 us/call.  Every configuration with expert_log <= 9 keeps cub::BlockRadixRank
+bit-for-bit through the FusedPrologueRadixRank alias.
+
+What is preserved: existing <=9-bit ranker behaviour, the num_experts_per_node /
+num_experts_per_node + 1 sentinel selection, the PDL
+cudaGridDependencySynchronize/cudaTriggerProgrammaticLaunchCompletion pairing and
+the per-launch ProgrammaticStreamSerialization attribute, the single-block and
+<=256-token gates, the token-row maps and the start_expert/end_expert TP2/EP range
+semantics, and the `if (!fused_prologue_result)` fallback to
+threeStepBuildExpertMapsSortFirstToken for option-off and larger/unsupported shapes.
+Selected experts and routing weights are unchanged; nothing is capped, dropped or
+reweighted.  FLASHINFER_MOE_FUSED_PROLOGUE=0 is the kill switch (default on), read
+once per process before the expert_log dispatch.
+
+tests/moe/test_cutlass_fused_moe_a0_prologue.py is the target-GPU half of the check:
+fused vs kill-switched runs must be bit-identical at the new and pre-existing tiers
+(a fixed tactic and use_fused_finalize=False make the MoE output a strict function of
+the three prologue products), and NVFP4 output must still match the fp4-dequantised
+reference, including the >256-token shape that must fall back.  Not run here: this
+checkout host has no CUDA toolchain, no GPU and a CPU-only torch.
+---
+ .../cutlass_fused_moe_kernels.cuh             | 40 +++++++++++++++++--
+ 1 file changed, 36 insertions(+), 4 deletions(-)
+
+diff --git a/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh b/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
+index cb77222..60ed9b8 100644
+--- a/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
++++ b/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
+@@ -72,6 +72,8 @@
+ #include "3rdparty/cub/cub.cuh"
+ #endif
+ 
++#include <cstdlib>
++
+ using namespace tensorrt_llm::kernels;
+ using namespace tensorrt_llm::common;
+ 
+@@ -407,6 +409,19 @@ void buildMinLatencyActiveExpertMaps(
+                      smart_routing, cluster_rank, cluster_size, num_experts_smem);
+ }
+ 
++// A0: cub::BlockRadixRank's temp storage is COUNTER_LANES * BLOCK_THREADS * PACKING_RATIO
++// digit counters, i.e. 64 KiB at BLOCK_SIZE=32 / RADIX_BITS=10 (512 experts + sentinel).
++// Zeroing and raking that with 32 threads costs ~15 us -- more than the 3-kernel fallback it
++// replaces.  BlockRadixRankMatch keeps one counter per (digit, warp) instead (~4 KiB here) and
++// ranks with warp match_any, so it is ~10x cheaper at this block size.  Only the >=10-bit tier
++// (which upstream never reached) switches over; every existing configuration keeps
++// cub::BlockRadixRank bit-for-bit.
++template <int BLOCK_SIZE, int LOG2_NUM_EXPERTS>
++using FusedPrologueRadixRank =
++    ::cuda::std::conditional_t<(LOG2_NUM_EXPERTS >= 10),
++                               cub::BlockRadixRankMatch<BLOCK_SIZE, LOG2_NUM_EXPERTS, false>,
++                               cub::BlockRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS, false>>;
++
+ template <int BLOCK_SIZE, int EXPERTS_PER_TOKEN, int LOG2_NUM_EXPERTS>
+ __global__ void fusedBuildExpertMapsSortFirstTokenKernel(
+     int const* const token_selected_experts, int* const permuted_row_to_unpermuted_row,
+@@ -456,7 +471,7 @@ __global__ void fusedBuildExpertMapsSortFirstTokenKernel(
+   // that to elide the binary search
+ 
+   // sort the expert map
+-  using BlockRadixRank = cub::BlockRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS, false>;
++  using BlockRadixRank = FusedPrologueRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS>;
+   extern __shared__ unsigned char temp_storage[];
+   auto& sort_temp = *reinterpret_cast<typename BlockRadixRank::TempStorage*>(temp_storage);
+ 
+@@ -507,7 +522,7 @@ bool fusedBuildExpertMapsSortFirstTokenDispatch(
+   int const blocks = (num_tokens + threads - 1) / threads;
+   TLLM_CHECK_WITH_INFO(blocks == 1, "Current implementation requires single block");
+ 
+-  using BlockRadixRank = cub::BlockRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS, false>;
++  using BlockRadixRank = FusedPrologueRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS>;
+   size_t shared_size = sizeof(typename BlockRadixRank::TempStorage);
+ 
+   cudaLaunchConfig_t config;
+@@ -603,6 +618,10 @@ bool fusedBuildExpertMapsSortFirstTokenBlockSize(
+       func = &fusedBuildExpertMapsSortFirstTokenBlockSize<8, LOG2_NUM_EXPERTS>;
+       break;
+     }
++    case 10: {
++      func = &fusedBuildExpertMapsSortFirstTokenBlockSize<10, LOG2_NUM_EXPERTS>;
++      break;
++    }
+     default: {
+       TLLM_LOG_TRACE("Top-K value %d does not have supported fused moe prologues",
+                      experts_per_token);
+@@ -615,15 +634,27 @@ bool fusedBuildExpertMapsSortFirstTokenBlockSize(
+               stream);
+ }
+ 
++// FLASHINFER_MOE_FUSED_PROLOGUE=0 forces the unfused 3-kernel prologue (A0 kill switch).
++inline bool fusedPrologueEnabled() {
++  static bool const enabled = [] {
++    char const* v = std::getenv("FLASHINFER_MOE_FUSED_PROLOGUE");
++    return !(v && v[0] == '0' && v[1] == '\0');
++  }();
++  return enabled;
++}
++
+ bool fusedBuildExpertMapsSortFirstToken(
+     int const* token_selected_experts, int* permuted_row_to_unpermuted_row,
+     int* unpermuted_row_to_permuted_row, int64_t* expert_first_token_offset,
+     int64_t const num_tokens, int const num_experts_per_node, int const experts_per_token,
+     int const start_expert, int const end_expert, bool enable_pdl, cudaStream_t stream) {
++  if (!fusedPrologueEnabled()) {
++    return false;
++  }
+   // We need enough bits to represent [0, num_experts_per_node+1] (inclusive) i.e.
+   // num_experts_per_node + 2 values This is floor(log2(num_experts_per_node+1)) + 1
+   int expert_log = static_cast<int>(log2(num_experts_per_node + 1)) + 1;
+-  if (expert_log <= 9) {
++  if (expert_log <= 10) {
+     auto funcs = std::array{&fusedBuildExpertMapsSortFirstTokenBlockSize<1>,
+                             &fusedBuildExpertMapsSortFirstTokenBlockSize<2>,
+                             &fusedBuildExpertMapsSortFirstTokenBlockSize<3>,
+@@ -632,7 +663,8 @@ bool fusedBuildExpertMapsSortFirstToken(
+                             &fusedBuildExpertMapsSortFirstTokenBlockSize<6>,
+                             &fusedBuildExpertMapsSortFirstTokenBlockSize<7>,
+                             &fusedBuildExpertMapsSortFirstTokenBlockSize<8>,
+-                            &fusedBuildExpertMapsSortFirstTokenBlockSize<9>};
++                            &fusedBuildExpertMapsSortFirstTokenBlockSize<9>,
++                            &fusedBuildExpertMapsSortFirstTokenBlockSize<10>};
+ 
+     return funcs[expert_log - 1](token_selected_experts, permuted_row_to_unpermuted_row,
+                                  unpermuted_row_to_permuted_row, expert_first_token_offset,
+-- 
+2.56.0
+
+
+From b9fa8893102dc3bbcec92762230e7f1678644a4e Mon Sep 17 00:00:00 2001
+From: Penny <Pennyroyal@agentmail.to>
+Date: Thu, 8 Oct 2026 18:32:29 -0400
+Subject: [PATCH 2/3] perf(moe): fold the fused-finalize output zeroing into
+ the activation kernel
+
+Direct port of the published donor patch, kept at the text level: every
+added and removed line of the two csrc files is line-for-line the donor's,
+
+  aiueo52/flash-next-rtxpro6000 @ e0fa9fa9fc3ccd710a8fb3d2639b85ce62188c23
+  patches/flashinfer/03-g2-1-fold-finalize-memset.patch
+
+(wheel-side flashinfer/data/csrc/... paths map 1:1 to this repo's
+csrc/... paths).  doActivationKernel now takes [fused_zero_ptr,
+fused_zero_ptr + 16 * fused_zero_vec16) and zeroes it with uint4 stores in
+a grid-stride loop *before* cudaGridDependencySynchronize(), and gemm2
+skips cudaMemsetAsync(final_output, 0x0, ...) when it handed the activation
+kernel that buffer, removing one launch from the serial
+GEMM1 -> activation -> GEMM2 chain.  Donor algorithm, synchronisation,
+guards, alignment checks and fallback are as supplied:
+FLASHINFER_MOE_FOLD_MEMSET=0 restores the standalone memset, the fold
+still requires the fused-finalize GEMM2 tactic, a TMA-warp-specialized
+GEMM1 config, a gated activation, no LoRA, no W4AFP8 and no fp8
+block-scale runner, and it stands down unless the finalize region is a
+multiple of 16 B and final_output is 16B-aligned.  Rejected A3 stride
+fusion is absent (no FLASHINFER_MOE_FUSED_STRIDES anywhere in the tree) and
+this commit stands on the accepted A0 base alone.
+
+Mechanical 0.7 adaptations, the donor preimage being an older wheel-side
+copy; the ladder of changes is signature-shape only:
+
+* The 0.7 doActivationKernel/doActivation parameter lists carry
+  permuted_token_selected_experts, fp8_token_dequant_scale and
+  fp8_expert_residual_scale, so five touched lines are the base line plus
+  the donor's addition rather than the donor's text.  Two of them
+  re-wrapped under the repo .clang-format (ColumnLimit 100).
+* The base's lora bias epilogue call passes the extra activation arguments
+  as the donor's did not, so its explicit "no fold" arguments are
+  `..., enable_pdl, stream, nullptr, 0`.
+* The run() insertion point is the same: after the fc1-side
+  applyPrequantScale(smoothed_act_, permuted_data_, ..., hidden_size,
+  use_awq, ...) and its sync_check_cuda_error, before Self::gemm1.
+* gemm1/gemm2 keep their new arguments defaulted in the header
+  declaration, so the min-latency call sites and the GEMM profiler path
+  (which must keep its own memset while timing tactics) are unchanged.
+
+Applicability on the intended SM120 profile, checked in the base sources:
+the profile reaches the CUTLASS runner through isNvfp4Quant() as
+CutlassMoeFCRunner<Fp4Type, Fp4Type>, where use_fp4 holds and
+use_w4afp8 / use_wfp4a16 / blockscale_gemm_runner do not, so every donor
+gate is openable; GEMM2 finalize-fusion tactics are enumerated
+(getTactics(GEMM_2) -> getTmaWarpSpecializedConfigs(..., FINALIZE
+duplicates)) because mayHaveFinalizeFused() holds for that instantiation
+on SM120.  Two base gates are worth naming for review: (1) a bf16-
+activation W4A16 runner (WeightType Fp4Type with T bf16) sets
+use_sm90_mixed_input_gemm, which mayHaveFinalizeFused() rejects, so there
+is no fused finalize and nothing to fold on that instantiation at all;
+(2) the untuned default GEMM2 tactic is mAllProfiles[gemm1_tactic_count],
+the first candidate, which is a *non*-finalize config, so the memset --
+and therefore this optimization -- is only in play when a finalize-fusion
+tactic is chosen (autotune or explicit profile_ids).  The new test runs the
+autotuner for that reason.  One behaviour change to note: the zeroing used
+to be a stream-ordered memset, which cannot start until everything earlier
+in the stream has finished; the folded version runs before
+cudaGridDependencySynchronize(), so under PDL it is separated from the
+previous call's GEMM2 only by the launch chain.  The repeated-call arm of
+the test is the check for that, and the kill switch is the escape hatch.
+
+New GPU regression tests/moe/test_cutlass_fused_moe_g21_fold_memset.py
+reuses the accepted A0 NVFP4 harness (same 512-expert / top-10 route
+shapes, same helpers, subprocess arms per kill-switch value) and makes
+three observations per case instead of trusting the flag: launched device
+ops must contain doActivationKernel (the fold's host kernel) and must not
+contain finalizeMoeRouting*Kernel (the fused epilogue was chosen, so an
+output zeroing exists), and the folded arm must show exactly one fewer
+device memset than FLASHINFER_MOE_FOLD_MEMSET=0 -- an unpatched build or a
+shape that fails the gate shows equal counts and fails rather than passing
+vacuously.  Both arms are called twice into one reused output buffer and
+compared with the same torch NVFP4 reference, so output that is not
+re-zeroed (the second call accumulating onto the first) is detectable; a
+use_fused_finalize=False case pins memset counts and results as identical
+across the two arms, which is the fallback-preservation check.
+
+Not run here: room101 has no GPU, no CUDA toolkit, no pytest and no
+tvm_ffi.  Checked on room101: python -m py_compile of the new test, a
+symbol cross-check of every imported helper (A0 module and
+test_trtllm_cutlass_fused_moe), a line-by-line diff of this commit against
+the donor patch (only the five documented 0.7 signature lines differ), and
+greps proving no A3 or other donor patch leaked in.  Compilation and the
+SM120 pytest arms are for the thegrid run.
+---
+ .../cutlass_fused_moe_kernels.cuh             | 74 ++++++++++++++++---
+ .../cutlass_kernels/include/moe_kernels.h     |  9 ++-
+ 2 files changed, 70 insertions(+), 13 deletions(-)
+
+diff --git a/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh b/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
+index 60ed9b8..b43cf5a 100644
+--- a/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
++++ b/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
+@@ -2408,6 +2408,16 @@ void doGatedActivation(ActivationOutputType* output, GemmOutputType const* gemm_
+ 
+ // ============================== Activation =================================
+ 
++// G2-1: FLASHINFER_MOE_FOLD_MEMSET=0 keeps the fused-finalize output zeroing as its own
++// cudaMemsetAsync launch instead of folding it into doActivationKernel's grid.
++inline bool foldMemsetEnabled() {
++  static bool const enabled = [] {
++    char const* v = std::getenv("FLASHINFER_MOE_FOLD_MEMSET");
++    return !(v && v[0] == '0' && v[1] == '\0');
++  }();
++  return enabled;
++}
++
+ template <class T, class GemmOutputType, class ScaleBiasType, class ActFn,
+           TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType BlockScalingType,
+           bool DISABLE_FP4_QUANT_FAST_MATH = false, typename NVFP4_4OVER6_CONFIG = std::false_type>
+@@ -2417,7 +2427,8 @@ __global__ __launch_bounds__(MAX_ACTIVATION_THREADS_PER_BLOCK) void doActivation
+     int const* permuted_token_selected_experts, int num_experts_per_node, int64_t inter_size,
+     float const* fc2_act_global_scale, bool use_per_expert_act_scale,
+     TmaWarpSpecializedGroupedGemmInput::ElementSF* fc2_act_sf_flat, float* fp8_token_dequant_scale,
+-    float const* fp8_expert_residual_scale, ActivationParams activation_params) {
++    float const* fp8_expert_residual_scale, ActivationParams activation_params,
++    void* fused_zero_ptr, int64_t fused_zero_vec16) {
+ #ifdef ENABLE_FP4
+   constexpr bool IsNVFP4 =
+       std::is_same_v<T, Fp4Type> &&
+@@ -2455,6 +2466,20 @@ __global__ __launch_bounds__(MAX_ACTIVATION_THREADS_PER_BLOCK) void doActivation
+ 
+   int64_t const num_valid_tokens = expert_first_token_offset[num_experts_per_node];
+ 
++  // G2-1: fold the fused-finalize output zeroing (a 1.0 us memset32 launch in the serial MoE
++  // chain) into this kernel.  It is placed *before* cudaGridDependencySynchronize() because the
++  // zeroing depends on nothing GEMM1 produces; the stores are ordered ahead of GEMM2 by this
++  // kernel's cudaTriggerProgrammaticLaunchCompletion() below, exactly as the memset was.
++  if (fused_zero_ptr != nullptr) {
++    uint4* zero_out = reinterpret_cast<uint4*>(fused_zero_ptr);
++    uint4 const zero_val = make_uint4(0u, 0u, 0u, 0u);
++    int64_t const zero_tid = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
++    int64_t const zero_stride = int64_t(gridDim.x) * blockDim.x;
++    for (int64_t i = zero_tid; i < fused_zero_vec16; i += zero_stride) {
++      zero_out[i] = zero_val;
++    }
++  }
++
+ #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+   cudaGridDependencySynchronize();
+ #endif
+@@ -2636,7 +2661,8 @@ void doActivation(T* output, GemmOutputType const* gemm_result, float const* fp8
+                   QuantParams const& quant_params, bool use_per_expert_act_scale,
+                   TmaWarpSpecializedGroupedGemmInput::ElementSF* fc2_act_sf_flat,
+                   float* fp8_token_dequant_scale, float const* fp8_expert_residual_scale,
+-                  bool enable_pdl, cudaStream_t stream) {
++                  bool enable_pdl, cudaStream_t stream, void* fused_zero_ptr = nullptr,
++                  int64_t fused_zero_vec16 = 0) {
+   TLLM_CHECK_WITH_INFO(
+       (inter_size * std::min(sizeof_bits<T>::value, sizeof_bits<GemmOutputType>::value)) % 128 == 0,
+       "inter_size %ld rows are not a multiple of 16B; doActivationKernel requires 16B-aligned rows",
+@@ -2778,7 +2804,7 @@ void doActivation(T* output, GemmOutputType const* gemm_result, float const* fp8
+                      expert_first_token_offset, permuted_token_selected_experts,
+                      num_experts_per_node, inter_size, quant_params.fp4.fc2.act_global_scale,
+                      use_per_expert_act_scale, fc2_act_sf_flat, fp8_token_dequant_scale,
+-                     fp8_expert_residual_scale, activation_type);
++                     fp8_expert_residual_scale, activation_type, fused_zero_ptr, fused_zero_vec16);
+ }
+ 
+ // ============================== Lora Add Bias =================================
+@@ -3465,7 +3491,8 @@ void CutlassMoeFCRunner<
+                    ActivationParams fc1_activation_type, float const** alpha_scale_ptr_array,
+                    bool bias_is_broadcast, cudaStream_t stream,
+                    cutlass_extensions::CutlassGemmConfig config, bool min_latency_mode,
+-                   int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl) {
++                   int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl,
++                   void* fused_zero_ptr, int64_t fused_zero_vec16) {
+   if (fp8_blockscale_gemm_runner) {
+     TLLM_CHECK(!min_latency_mode);
+     Self::BlockScaleFC1(*fp8_blockscale_gemm_runner, input, output, intermediate_result,
+@@ -3561,7 +3588,7 @@ void CutlassMoeFCRunner<
+         bias_is_broadcast, expert_first_token_offset, permuted_token_selected_experts,
+         num_experts_per_node, inter_size, expanded_num_rows, fc1_activation_type, quant_params,
+         use_per_expert_act_scale, fc2_fp4_act_flat, fp8_token_dequant_scale,
+-        fp8_expert_residual_scale, enable_pdl, stream);
++        fp8_expert_residual_scale, enable_pdl, stream, fused_zero_ptr, fused_zero_vec16);
+ 
+     sync_check_cuda_error(stream);
+   } else if (use_fp8) {
+@@ -3714,7 +3741,8 @@ void CutlassMoeFCRunner<T, WeightType, OutputType, InputType, BackBoneType, IsMX
+           bool use_lora, void* fc2_lora, cudaStream_t stream,
+           MOEParallelismConfig parallelism_config, bool const enable_alltoall,
+           cutlass_extensions::CutlassGemmConfig config, bool min_latency_mode,
+-          int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl) {
++          int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl,
++          bool finalize_output_prezeroed) {
+   int64_t const* total_tokens_including_expert = expert_first_token_offset + 1;
+ 
+   bool const using_tma_ws_gemm2 = gemm_runner.isTmaWarpSpecialized(config);
+@@ -3746,8 +3774,11 @@ void CutlassMoeFCRunner<T, WeightType, OutputType, InputType, BackBoneType, IsMX
+       //
+       // This also means it is included in the timing for the profiler, which is probably more
+       // representative until we can overlap it
+-      check_cuda_error(cudaMemsetAsync(
+-          final_output, 0x0, sizeof(OutputType) * num_rows * unpadded_hidden_size, stream));
++      // G2-1: skipped when doActivationKernel already zeroed this buffer in its own grid.
++      if (!finalize_output_prezeroed) {
++        check_cuda_error(cudaMemsetAsync(
++            final_output, 0x0, sizeof(OutputType) * num_rows * unpadded_hidden_size, stream));
++      }
+     }
+   } else if (use_fp8) {
+     alpha_scale_ptr_array = computeFP8DequantScale(alpha_scale_ptr_array, num_experts_per_node,
+@@ -3800,7 +3831,7 @@ void CutlassMoeFCRunner<T, WeightType, OutputType, InputType, BackBoneType, IsMX
+                       static_cast<ScaleBiasType const*>(fc2_lora), false, expert_first_token_offset,
+                       /*permuted_token_selected_experts=*/nullptr, num_experts_per_node,
+                       hidden_size, expanded_num_rows, ActivationParams(ActivationType::Identity),
+-                      {}, false, nullptr, nullptr, nullptr, enable_pdl, stream);
++                      {}, false, nullptr, nullptr, nullptr, enable_pdl, stream, nullptr, 0);
+     sync_check_cuda_error(stream);
+   }
+ 
+@@ -4392,6 +4423,26 @@ void CutlassMoeFCRunner<
+                              num_valid_tokens_ptr, expanded_num_rows, hidden_size, use_awq, stream);
+     }
+     sync_check_cuda_error(stream);
++
++    // G2-1: the fused-finalize output zeroing is a ~1.0 us memset32 launch sitting between
++    // doActivationKernel and GEMM2 in a strictly serial chain.  Hand it to doActivationKernel's
++    // grid instead (same position in the stream, one fewer launch).  Fails safe: any condition
++    // we do not cover leaves the memset where it was.
++    void* fused_zero_ptr = nullptr;
++    int64_t fused_zero_vec16 = 0;
++    if (foldMemsetEnabled() && !min_latency_mode &&
++        gemm2_tma_ws_input.fusion ==
++            TmaWarpSpecializedGroupedGemmInput::EpilogueFusion::FINALIZE &&
++        moe_gemm_runner_.isTmaWarpSpecialized(*gemm1_config_) && !use_lora &&
++        isGatedActivation(fc1_activation_type) && !use_w4afp8 && !blockscale_gemm_runner) {
++      size_t const zero_bytes =
++          sizeof(OutputType) * static_cast<size_t>(num_rows) * unpadded_hidden_size;
++      if (zero_bytes % 16 == 0 && (reinterpret_cast<uintptr_t>(final_output) % 16) == 0) {
++        fused_zero_ptr = final_output;
++        fused_zero_vec16 = static_cast<int64_t>(zero_bytes / 16);
++      }
++    }
++
+     Self::gemm1(moe_gemm_runner_, blockscale_gemm_runner, gemm1_input, fc1_result_,
+                 glu_inter_result_, expert_first_token_offset_,
+                 humming_permuted_token_selected_experts, gemm1_tma_ws_input, fc1_expert_weights,
+@@ -4400,7 +4451,7 @@ void CutlassMoeFCRunner<
+                 fc1_fp4_act_scale_, fc2_fp4_act_scale_, quant_params, num_rows, expanded_num_rows,
+                 hidden_size, inter_size, num_experts_per_node, fc1_activation_type,
+                 alpha_scale_ptr_array_fc1_, !use_lora, stream, *gemm1_config_, false, nullptr,
+-                nullptr, enable_pdl);
++                nullptr, enable_pdl, fused_zero_ptr, fused_zero_vec16);
+     sync_check_cuda_error(stream);
+ 
+     if (use_lora) {
+@@ -4421,7 +4472,8 @@ void CutlassMoeFCRunner<
+         permuted_row_to_unpermuted_row_, token_selected_experts, num_valid_tokens_ptr, num_rows,
+         expanded_num_rows, hidden_size, unpadded_hidden_size, inter_size, num_experts_per_node,
+         experts_per_token, alpha_scale_ptr_array_fc2_, use_lora, lora_fc2_result_, stream,
+-        parallelism_config, enable_alltoall, *gemm2_config_, false, nullptr, nullptr, enable_pdl);
++        parallelism_config, enable_alltoall, *gemm2_config_, false, nullptr, nullptr, enable_pdl,
++        /*finalize_output_prezeroed*/ fused_zero_ptr != nullptr);
+     sync_check_cuda_error(stream);
+   }
+ }
+diff --git a/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h b/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h
+index 360ecf6..4324770 100644
+--- a/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h
++++ b/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h
+@@ -733,7 +733,10 @@ class CutlassMoeFCRunner : public CutlassMoeFCRunnerInterface {
+                     ActivationParams fc1_activation_type, float const** alpha_scale_ptr_array,
+                     bool bias_is_broadcast, cudaStream_t stream,
+                     cutlass_extensions::CutlassGemmConfig config, bool min_latency_mode,
+-                    int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl);
++                    int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl,
++                    // G2-1: when non-null, doActivationKernel zeroes [fused_zero_ptr,
++                    // fused_zero_ptr + 16 * fused_zero_vec16) so gemm2 can skip its memset.
++                    void* fused_zero_ptr = nullptr, int64_t fused_zero_vec16 = 0);
+ 
+   static void gemm2(
+       MoeGemmRunner<T, WeightType, OutputType, ScaleBiasType, IsMXFPX, Sm90Wfp4Afp8Mode>&
+@@ -755,7 +758,9 @@ class CutlassMoeFCRunner : public CutlassMoeFCRunnerInterface {
+       void* fc2_lora, cudaStream_t stream, MOEParallelismConfig parallelism_config,
+       bool const enable_alltoall, cutlass_extensions::CutlassGemmConfig config,
+       bool min_latency_mode, int* num_active_experts_per, int* active_expert_global_ids,
+-      bool enable_pdl);
++      bool enable_pdl,
++      // G2-1: set when gemm1's doActivationKernel already zeroed final_output.
++      bool finalize_output_prezeroed = false);
+ 
+   // Overrides to allow us to forward on to the internal functions with the pointers using the
+   // correct type
+-- 
+2.56.0
+
+
+From 2a4d8d3a9501bf3b3fe3b78d7c6bad38bfc76064 Mon Sep 17 00:00:00 2001
+From: Penny <Pennyroyal@agentmail.to>
+Date: Thu, 8 Oct 2026 19:25:15 -0400
+Subject: [PATCH 3/3] perf(moe): fold the row expansion into the A0 fused
+ routing prologue (donor G2-2)
+
+Direct port of the published donor patch's input-preparation half, kept at the
+text level wherever the separation from A3 does not require a change:
+
+  aiueo52/flash-next-rtxpro6000 @ e0fa9fa9fc3ccd710a8fb3d2639b85ce62188c23
+  patches/flashinfer/04-g2-2-fold-expand-rows.patch
+
+(wheel-side flashinfer/data/csrc/... paths map 1:1 to this repo's csrc/...
+paths).  expandInputRowsKernel's NVFP4 branch -- the row duplication/permute
+plus the re-quantisation -- now runs inside the routing prologue launch: every
+block re-runs the cheap deterministic rank, block 0 publishes the routing maps
+and expert offsets, and every block stages the rows it owns out of block-local
+copies of the inverse row and expert maps, so the row phase needs neither a
+global round trip nor findTotalEltsLessThanTarget's binary search per row.  The
+donor's register-staged row loads (G2_EXPAND_MAX_CHUNKS), the quantise loop,
+the K-dim SF padding loop and the permuted-router-scale write are its, line
+for line.  The standalone expandInputRowsKernelLauncher is skipped only when
+the fused launch actually took the offer.
+
+This is the item John chose to split out: the rejected stride fusion is NOT
+restored.  computeStridesTmaWarpSpecialized stays a separate launch, in its
+usual place behind setupTmaWarpSpecializedInputs, in the same order relative to
+the prologue and GEMM1 as on the base, and the fused kernel is given no
+layout_info, problem shape or weight argument at all.  The donor's row branch
+consumes only the routing offsets, the inverse maps and the activation/scaling
+inputs, so nothing here depends on the descriptors; no concrete dependency
+forced a different design.
+
+Port deviations (all wiring, none algorithmic):
+
+* The donor folded the rows into its A3 kernel and switched it on with a
+  FUSE_EXPAND template flag; with A3 out of the picture that kernel and the
+  stride_blocks/row_blocks split do not exist, so this adds its own
+  fusedBuildExpertMapsSortFirstTokenAndExpandKernel and drops the flag and the
+  if-constexpr around it.  The row loop iterates blockIdx.x / gridDim.x
+  directly instead of row_slot / row_blocks, and the grid is exactly
+  num_tokens * experts_per_token (one block per possible permuted row) rather
+  than stride_blocks + row_blocks.  The launcher is templated on
+  <T, InputAct, EXPERTS_PER_TOKEN> only; WeightType/OutputType/ScaleBiasType
+  were there for the descriptor branch.
+* FusedPrologueRequest (moe_kernels.h) carries the donor's expand_* fields and
+  the routing pointers, but no layout_info/gemm/weight/bias/quant_params.  The
+  A0 kernel itself is untouched, so the accepted prologue stays bit-for-bit
+  whatever the fold decides.
+* The type test is std::is_same_v<T, Fp4Type>, not the donor's
+  __nv_fp4_e2m1: this repo's fp4_compat.h makes Fp4Type cutlass::float_e2m1_t
+  in the Hopper-CUTLASS-FP4 build, and the standalone kernel keys off Fp4Type
+  too, so raw FP16/BF16 -> NVFP4 keeps the fold on whichever alias is in play.
+* cudaTriggerProgrammaticLaunchCompletion sits right after the routing stores
+  are issued (where the A0 kernel puts it) rather than at the end of the donor
+  body: the next launch is now the independent stride setup, which reads only
+  expert_first_token_offset, so releasing it early lets it overlap the rows.
+  Its own cudaGridDependencySynchronize still waits for this grid, so the
+  permuted rows are visible to GEMM1 before it reads them.
+* Added the two row-alignment asserts the standalone launcher's host checks
+  cover when it does run, and kept the donor's host gate verbatim:
+  bf16/fp16 -> NVFP4 only, non-null input/output/SF pointers, hidden_size
+  divisible by CVT_ELTS_PER_THREAD * 32, chunk count <= G2_EXPAND_MAX_CHUNKS,
+  positive num_tokens/top-k, num_experts_per_node + 1 < 1024, num_tokens <= 32,
+  top-k in {1,2,4,6,8,10}, and no FLASHINFER_USE_NVFP4_4OVER6 /
+  DISABLE_FP4_QUANT_FAST_MATH (the kernel fixes those tags to keep one
+  instantiation).  The caller only offers the fold where the standalone
+  launcher's other arguments are inactive: use_fp4, no AWQ / W4AFP8 /
+  wfp4afp8 / MXFP8 act scaling / LoRA, raw (unquantised) input, FC1 weight
+  block scales and fc1_fp4_act_scale_ present.  FLASHINFER_MOE_FUSED_PROLOGUE=0
+  turns the fold off too, and everything else -- including TP2/EP and
+  concurrent use, which see the same expert masking and the same buffers as A0
+  -- keeps the accepted routing plus the standalone expansion.  Internal
+  environment switch only; no new launch flag, configurator control or doc.
+
+Tests: new GPU check tests/moe/test_cutlass_fused_moe_g22_fold_expand.py
+reuses the accepted A0/G2-1 NVFP4 harness (same 512-expert / top-10 shapes,
+same subprocess-per-arm pattern, same torch reference) and pins the launched
+device ops instead of trusting the flag: the FLASHINFER_MOE_FOLD_EXPAND=1 arm
+must show fusedBuildExpertMapsSortFirstTokenAndExpandKernel with neither
+expandInputRowsKernel nor the A0 kernel nor the 3-kernel prologue, while the
+=0 arm and the >32-token shape must show the A0 prologue plus the standalone
+expansion.  Both arms must also show computeStridesTmaWarpSpecializedKernel --
+the separate stride launch is the point of this split, and the A3-era fused
+name may never appear -- so a build that quietly skipped the stride setup, or
+that folded nothing, fails rather than passing vacuously.  Per case: the two
+arms must agree bit for bit, each arm must be stable across two calls into one
+reused output buffer, and both must match the torch NVFP4 reference.
+test_cutlass_fused_moe_a0_prologue.py's assert_path now counts the folded
+kernel as the fused prologue (its kill switch is unchanged), since the fold is
+on by default; the A0 kernel name is not a substring of the folded name, so
+both are matched explicitly.
+
+Review 1 follow-up (one test gap, no runtime change): the G2-2 cases went
+through the G2-1 _inputs/_reference helpers, which are fixed at HIDDEN=256, so
+every arm staged a single 8-element chunk per row -- trips = hidden /
+(8 * 32) = 1 -- while the Flash-Next width is 2560 (ten chunks, the widest the
+donor's G2_EXPAND_MAX_CHUNKS = 16 gate allows).  Both helpers now take an
+optional hidden width (default HIDDEN, so the accepted G2-1 arms and their
+assertions are untouched) and the case list gains exactly one real-width case,
+(512 experts, top-10, 4 tokens, hidden 2560), with the same on/off subprocess
+arms, the same bit-for-bit cross-arm and repeat-call comparisons and the same
+torch NVFP4 reference; the small-shape cases, the stride-separation assertions
+and the >32-token fallback case keep what they were.  The width reaches the
+subprocess through the same run_case(*args) tuple as everything else, so the
+arm and its reference cannot drift apart, and the case still has to satisfy the
+host gate for the folded kernel to appear at all (2560 % 256 == 0 and
+trips = 10 <= 16), i.e. it fails loudly rather than silently measuring the
+fallback.
+
+Not run here: room101 has no GPU, no CUDA toolkit and no torch/pytest, so the
+SM120 build and every pytest arm (including the numerical ones) are for the
+thegrid run.  Checked on room101: python -m py_compile of the new test, a
+symbol cross-check of every imported helper, a line-by-line diff of the folded
+row branch against the donor patch (only the documented blockIdx/gridDim
+rewiring, the re-wraps under ColumnLimit 100 and the added asserts differ), a
+check that the five kernel-name matchers cannot match each other (so no arm can
+pass vacuously), greps proving no stride-fusion code leaked in (the only
+layout_info mention in the diff is the comment saying it is absent), and
+git grep on the exact base proving the folded-arm assertion is the one that
+fails on b9fa889, where the kernel and the switch do not exist.
+---
+ .../cutlass_fused_moe_kernels.cuh             | 397 +++++++++++++++++-
+ .../cutlass_kernels/include/moe_kernels.h     |  33 ++
+ 2 files changed, 415 insertions(+), 15 deletions(-)
+
+diff --git a/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh b/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
+index b43cf5a..d3931c8 100644
+--- a/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
++++ b/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
+@@ -1571,6 +1571,334 @@ __host__ __device__ constexpr static U arrayConvert(T const& input) {
+ // (k-1)*rows_in_input all map to row 0 in the original matrix. Thus, to know where to read in the
+ // source matrix, we simply take the modulus of the expanded index.
+ 
++// ============ G2-2: routing prologue fused with the row expansion (input preparation) ==========
++//
++// expandInputRowsKernel needs nothing from the routing side but the row maps and the expert
++// offsets the prologue has just produced, and the stride/descriptor setup does not read what it
++// writes -- so the row phase can ride along in the prologue launch instead of being a second
++// serial launch of its own.  As in A0/A3 every block re-runs the cheap, deterministic rank so no
++// grid-wide barrier is needed; block 0 publishes the routing maps and offsets, and every block
++// stages the rows it owns out of block-local copies of the inverse row/expert maps, which is also
++// what buys the fused path the expert id without the binary search
++// (findTotalEltsLessThanTarget) the standalone kernel pays per row.
++//
++// Deliberately NOT fused here: computeStridesTmaWarpSpecializedKernel stays its own launch in its
++// usual place (after this, from setupTmaWarpSpecializedInputs).  This kernel takes no layout_info,
++// problem shape or weight pointer at all, which is the separation from the rejected donor A3.
++//
++// Restricted to BLOCK_SIZE = 32 (num_tokens <= 32, i.e. decode/verify) and LOG2_NUM_EXPERTS = 10
++// (num_experts_per_node + 1 < 1024) to keep the instantiation count to one per top-k value per
++// runner type.  Everything else keeps the accepted A0 prologue plus the standalone
++// expandInputRowsKernel, and FLASHINFER_MOE_FOLD_EXPAND=0 restores that pair at any shape.
++
++// The maximum number of 8-element chunks one thread stages per row.  hidden_size /
++// (8 * BLOCK_SIZE) must be <= this; the host gate refuses the fusion otherwise.
++constexpr int G2_EXPAND_MAX_CHUNKS = 16;
++
++template <class T, class InputAct, int BLOCK_SIZE, int EXPERTS_PER_TOKEN, int LOG2_NUM_EXPERTS>
++__global__ void fusedBuildExpertMapsSortFirstTokenAndExpandKernel(
++    int const* const token_selected_experts, int* const permuted_row_to_unpermuted_row,
++    int* const unpermuted_row_to_permuted_row, int64_t* const expert_first_token_offset,
++    int64_t const num_tokens, int const start_expert, int const end_expert,
++    int const num_experts_per_node, InputAct const* expand_input, T* expand_output,
++    float const* expand_unpermuted_scales, float* expand_permuted_scales,
++    TmaWarpSpecializedGroupedGemmInput::ElementSF* expand_act_sf_flat,
++    float const* expand_act_global_scale, bool expand_use_per_expert_act_scale,
++    int64_t expand_hidden_size) {
++  using BlockRadixRank = FusedPrologueRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS>;
++  static_assert(BlockRadixRank::BINS_TRACKED_PER_THREAD * BLOCK_SIZE >= (1 << LOG2_NUM_EXPERTS));
++  assert(num_experts_per_node < (1 << LOG2_NUM_EXPERTS));
++  assert(num_experts_per_node == (end_expert - start_expert));
++
++  extern __shared__ unsigned char temp_storage[];
++  auto& sort_temp = *reinterpret_cast<typename BlockRadixRank::TempStorage*>(temp_storage);
++  int* const shared_offsets =
++      reinterpret_cast<int*>(temp_storage + sizeof(typename BlockRadixRank::TempStorage));
++  // The inverse permutation and the per-permuted-row expert id.  Every block re-runs the rank, so
++  // these are block-local: no global round trip and no grid barrier.
++  int* const shared_inv_row = shared_offsets + (num_experts_per_node + 1);
++  int* const shared_inv_expert = shared_inv_row + BLOCK_SIZE * EXPERTS_PER_TOKEN;
++
++  int const token = threadIdx.x;
++  bool const is_valid_token = token < num_tokens;
++
++  // This is the masked expert id for this token
++  int local_token_selected_experts[EXPERTS_PER_TOKEN];
++  // This is the final permuted rank of this token (ranked by selected expert)
++  int local_token_permuted_indices[EXPERTS_PER_TOKEN];
++
++  // Wait PDL before reading token_selected_experts (and the row input below)
++#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
++  cudaGridDependencySynchronize();
++#endif
++
++// build expert map
++// we need to populate expert ids for all threads, even if there are
++// fewer tokens
++#pragma unroll
++  for (int i = 0; i < EXPERTS_PER_TOKEN; i++) {
++    int const expert = is_valid_token ? token_selected_experts[token * EXPERTS_PER_TOKEN + i]
++                                      : num_experts_per_node;
++
++    // If the token is not valid, set the expert id to num_experts_per_node + 1
++    // If expert is not in the current node, set it to num_experts_per_node
++    // If expert is in the current node, subtract start_expert to shift the range to [0,
++    // num_experts_per_node)
++    bool is_valid_expert = expert >= start_expert && expert < end_expert;
++    local_token_selected_experts[i] = !is_valid_token   ? num_experts_per_node + 1
++                                      : is_valid_expert ? (expert - start_expert)
++                                                        : num_experts_per_node;
++  }
++
++  int local_expert_first_token_offset[BlockRadixRank::BINS_TRACKED_PER_THREAD];
++  cub::BFEDigitExtractor<int> extractor(0, LOG2_NUM_EXPERTS);
++  BlockRadixRank(sort_temp).RankKeys(local_token_selected_experts, local_token_permuted_indices,
++                                     extractor, local_expert_first_token_offset);
++
++  // RankKeys gives BLOCK_SIZE * EXPERTS_PER_TOKEN distinct ranks, so these writes never collide
++  // (invalid tokens rank past num_valid_rows and are simply never read back).
++#pragma unroll
++  for (int i = 0; i < EXPERTS_PER_TOKEN; i++) {
++    int const permuted_row = local_token_permuted_indices[i];
++    shared_inv_row[permuted_row] = i * static_cast<int>(num_tokens) + token;
++    shared_inv_expert[permuted_row] = local_token_selected_experts[i];
++  }
++
++  bool const writer_block = blockIdx.x == 0;
++  if (writer_block && is_valid_token) {
++#pragma unroll
++    for (int i = 0; i < EXPERTS_PER_TOKEN; i++) {
++      int const unpermuted_row = i * static_cast<int>(num_tokens) + token;
++      int const permuted_row = local_token_permuted_indices[i];
++      permuted_row_to_unpermuted_row[permuted_row] = unpermuted_row;
++      unpermuted_row_to_permuted_row[unpermuted_row] = permuted_row;
++    }
++  }
++
++#pragma unroll
++  for (int expert_id = 0; expert_id < BlockRadixRank::BINS_TRACKED_PER_THREAD; expert_id++) {
++    int out_expert_id = expert_id + token * BlockRadixRank::BINS_TRACKED_PER_THREAD;
++    if (out_expert_id < num_experts_per_node + 1) {
++      shared_offsets[out_expert_id] = local_expert_first_token_offset[expert_id];
++      if (writer_block) {
++        expert_first_token_offset[out_expert_id] = local_expert_first_token_offset[expert_id];
++      }
++    }
++  }
++  __syncthreads();
++
++  // The stride setup that follows is a separate launch and only reads expert_first_token_offset,
++  // which is published above, so release the dependent grid here (as the A0 kernel does) and let
++  // its launch overlap the row phase below.  That kernel's own cudaGridDependencySynchronize still
++  // waits for this grid's stores, so the permuted rows are visible before anything reads them.
++#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
++  cudaTriggerProgrammaticLaunchCompletion();
++#endif
++
++#ifdef ENABLE_FP4
++  if constexpr (std::is_same_v<T, Fp4Type> &&
++                (std::is_same_v<InputAct, __nv_bfloat16> || std::is_same_v<InputAct, half>)) {
++    // ---- expandInputRowsKernel, folded in (the host gate guarantees the tag selection below)
++    constexpr int64_t ELEM_PER_THREAD = CVT_ELTS_PER_THREAD;  // 8
++    constexpr int VecSize = TmaWarpSpecializedGroupedGemmInput::NVFP4BlockScaleVectorSize;
++    constexpr int64_t min_k_dim_alignment =
++        TmaWarpSpecializedGroupedGemmInput::MinKDimAlignmentNVFP4;
++    using DataElem = cutlass::Array<InputAct, ELEM_PER_THREAD>;
++    using OutputElem = uint32_t;
++
++    int64_t const padded_hidden_size =
++        TmaWarpSpecializedGroupedGemmInput::alignToSfDim(expand_hidden_size, min_k_dim_alignment);
++    int64_t const num_elems_in_col = expand_hidden_size / ELEM_PER_THREAD;
++    int const trips = static_cast<int>(num_elems_in_col) / BLOCK_SIZE;  // exact, host-gated
++    int64_t const num_valid_rows = shared_offsets[num_experts_per_node];
++
++    for (int64_t permuted_row = blockIdx.x; permuted_row < num_valid_rows;
++         permuted_row += gridDim.x) {
++      int const unpermuted_row = shared_inv_row[permuted_row];
++      int const row_expert = shared_inv_expert[permuted_row];
++      int64_t const num_tokens_before_expert = shared_offsets[row_expert];
++      float const global_scale_val =
++          expand_act_global_scale
++              ? expand_act_global_scale[expand_use_per_expert_act_scale ? row_expert : 0]
++              : 1.0f;
++      int64_t const source_row = unpermuted_row % num_tokens;
++      int64_t const source_k_rank = unpermuted_row / num_tokens;
++
++      auto const* source_row_ptr =
++          reinterpret_cast<DataElem const*>(expand_input + source_row * expand_hidden_size);
++      auto* dest_row_ptr =
++          reinterpret_cast<OutputElem*>(expand_output) + permuted_row * num_elems_in_col;
++      // The same row-alignment assumptions expandInputRowsKernelLauncher checks on the host.
++      assert(reinterpret_cast<std::uintptr_t>(source_row_ptr) % sizeof(DataElem) == 0);
++      assert(reinterpret_cast<std::uintptr_t>(dest_row_ptr) % sizeof(OutputElem) == 0);
++
++      // Stage the whole row in registers first: with one warp per row the loads must all be in
++      // flight at once, or the dependent round trips cost more than the launch we deleted.
++      DataElem staged[G2_EXPAND_MAX_CHUNKS];
++#pragma unroll
++      for (int chunk = 0; chunk < G2_EXPAND_MAX_CHUNKS; chunk++) {
++        if (chunk < trips) {
++          staged[chunk] = source_row_ptr[threadIdx.x + chunk * BLOCK_SIZE];
++        }
++      }
++#pragma unroll
++      for (int chunk = 0; chunk < G2_EXPAND_MAX_CHUNKS; chunk++) {
++        if (chunk < trips) {
++          int64_t const elem_index = threadIdx.x + chunk * BLOCK_SIZE;
++          auto res =
++              quantizePackedFPXValue<InputAct, T, DataElem, VecSize, false, std::false_type>(
++                  staged[chunk], global_scale_val, num_tokens_before_expert, row_expert,
++                  permuted_row, elem_index, padded_hidden_size, expand_act_sf_flat,
++                  TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NVFP4);
++          static_assert(sizeof(res) == sizeof(*dest_row_ptr),
++                        "Quantized value must be the same size as the output");
++          dest_row_ptr[elem_index] = res;
++        }
++      }
++
++      // K-dim SF padding, exactly as expandInputRowsKernel does it (a no-op whenever the hidden
++      // size needs no padding, which is every shape the host gate accepts).
++      for (int64_t elem_index = expand_hidden_size / VecSize + threadIdx.x;
++           elem_index < padded_hidden_size / VecSize; elem_index += BLOCK_SIZE) {
++        writeSF<VecSize, VecSize>(num_tokens_before_expert, row_expert, /*source_row*/ -1,
++                                  permuted_row, elem_index, padded_hidden_size,
++                                  expand_act_sf_flat, /*input_sf*/ nullptr);
++      }
++
++      if (expand_permuted_scales && threadIdx.x == 0) {
++        int64_t const source_k_idx = source_row * EXPERTS_PER_TOKEN + source_k_rank;
++        expand_permuted_scales[permuted_row] =
++            expand_unpermuted_scales ? expand_unpermuted_scales[source_k_idx] : 1.0f;
++      }
++    }
++  }
++#endif
++}
++
++// FLASHINFER_MOE_FOLD_EXPAND=0 keeps expandInputRowsKernel as its own launch.
++inline bool foldExpandEnabled() {
++  static bool const enabled = [] {
++    char const* v = std::getenv("FLASHINFER_MOE_FOLD_EXPAND");
++    return !(v && v[0] == '0' && v[1] == '\0');
++  }();
++  return enabled;
++}
++
++template <class T, class InputAct, int EXPERTS_PER_TOKEN>
++bool launchFusedPrologueAndExpand(FusedPrologueRequest& req, int const num_experts_per_node,
++                                  bool enable_pdl, cudaStream_t stream) {
++  constexpr int BLOCK_SIZE = 32;
++  constexpr int LOG2_NUM_EXPERTS = 10;
++  using BlockRadixRank = FusedPrologueRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS>;
++
++  size_t const shared_size = sizeof(typename BlockRadixRank::TempStorage) +
++                             sizeof(int) * static_cast<size_t>(num_experts_per_node + 1) +
++                             2 * sizeof(int) * static_cast<size_t>(BLOCK_SIZE) *
++                                 static_cast<size_t>(EXPERTS_PER_TOKEN);
++
++  int device = 0;
++  int max_smem_per_block = 0;
++  check_cuda_error(cudaGetDevice(&device));
++  check_cuda_error(
++      cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
++  if (shared_size >= static_cast<size_t>(max_smem_per_block)) {
++    return false;
++  }
++
++  auto kernel = &fusedBuildExpertMapsSortFirstTokenAndExpandKernel<
++      T, InputAct, BLOCK_SIZE, EXPERTS_PER_TOKEN, LOG2_NUM_EXPERTS>;
++  check_cuda_error(
++      cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_size));
++
++  cudaLaunchConfig_t config;
++  // One block per possible permuted row; the grid-stride loop inside leaves the blocks with no row
++  // of their own to the rank they already ran.
++  config.gridDim = static_cast<int>(req.num_tokens) * req.experts_per_token;
++  config.blockDim = BLOCK_SIZE;
++  config.dynamicSmemBytes = shared_size;
++  config.stream = stream;
++  cudaLaunchAttribute attrs[1];
++  attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
++  attrs[0].val.programmaticStreamSerializationAllowed = enable_pdl;
++  config.numAttrs = 1;
++  config.attrs = attrs;
++
++  check_cuda_error(cudaLaunchKernelEx(
++      &config, kernel, req.token_selected_experts, req.permuted_row_to_unpermuted_row,
++      req.unpermuted_row_to_permuted_row, req.expert_first_token_offset, req.num_tokens,
++      req.start_expert, req.end_expert, num_experts_per_node,
++      reinterpret_cast<InputAct const*>(req.expand_input),
++      reinterpret_cast<T*>(req.expand_output), req.expand_unpermuted_scales,
++      req.expand_permuted_scales, req.expand_act_sf_flat, req.expand_act_global_scale,
++      req.expand_use_per_expert_act_scale, req.expand_hidden_size));
++  return true;
++}
++
++// Returns true (and sets req.expand_fused) when the single fused launch ran; false means nothing
++// was launched and the caller makes the A0 prologue and expandInputRowsKernel launches as before.
++template <class T, class InputAct>
++bool tryFusedPrologueAndExpand(FusedPrologueRequest& req, int const num_experts_per_node,
++                               bool enable_pdl, cudaStream_t stream) {
++  req.expand_fused = false;
++#ifdef ENABLE_FP4
++  constexpr int BLOCK_SIZE = 32;
++  if (!req.expand_requested || !fusedPrologueEnabled() || !foldExpandEnabled()) {
++    return false;
++  }
++  if (req.num_tokens > BLOCK_SIZE || req.num_tokens <= 0 || req.experts_per_token <= 0 ||
++      num_experts_per_node + 1 >= (1 << 10) ||
++      num_experts_per_node != (req.end_expert - req.start_expert)) {
++    return false;
++  }
++
++  constexpr bool kTypesOk =
++      std::is_same_v<T, Fp4Type> &&
++      (std::is_same_v<InputAct, __nv_bfloat16> || std::is_same_v<InputAct, half>);
++  int64_t const elems_per_row = req.expand_hidden_size / CVT_ELTS_PER_THREAD;
++  bool const fuse_expand =
++      kTypesOk && req.expand_input != nullptr && req.expand_output != nullptr &&
++      req.expand_act_sf_flat != nullptr && req.expand_hidden_size > 0 &&
++      req.expand_hidden_size % (CVT_ELTS_PER_THREAD * BLOCK_SIZE) == 0 &&
++      elems_per_row / BLOCK_SIZE <= G2_EXPAND_MAX_CHUNKS &&
++      // the kernel hard-codes the default quantiser tags to keep one instantiation
++      !tensorrt_llm::common::getEnvNVFP4Use4Over6() &&
++      !tensorrt_llm::common::getEnvDisableFP4QuantFastMath();
++  if (!fuse_expand) {
++    return false;
++  }
++
++  auto go = [&](auto tag) {
++    bool const ok = launchFusedPrologueAndExpand<T, InputAct, decltype(tag)::value>(
++        req, num_experts_per_node, enable_pdl, stream);
++    req.expand_fused = ok;
++    return ok;
++  };
++  switch (req.experts_per_token) {
++    case 1:
++      return go(std::integral_constant<int, 1>{});
++    case 2:
++      return go(std::integral_constant<int, 2>{});
++    case 4:
++      return go(std::integral_constant<int, 4>{});
++    case 6:
++      return go(std::integral_constant<int, 6>{});
++    case 8:
++      return go(std::integral_constant<int, 8>{});
++    case 10:
++      return go(std::integral_constant<int, 10>{});
++    default:
++      return false;
++  }
++#else
++  (void)req;
++  (void)num_experts_per_node;
++  (void)enable_pdl;
++  (void)stream;
++  return false;
++#endif
++}
++// ==================== end G2-2 ================================================================
++
+ constexpr static int EXPAND_THREADS_PER_BLOCK = 256;
+ 
+ template <class InputActivationsType, class ExpandedActivationsType,
+@@ -4329,13 +4657,49 @@ void CutlassMoeFCRunner<
+     sync_check_cuda_error(stream);
+   } else {
+     bool fused_prologue_result = false;
++    FusedPrologueRequest fused_prologue;
+     if (!use_sm90_mixed_input_gemm) {
+-      // WAR: fusedBuildExpertMapsSortFirstToken kernel will lead to illegal memory access for
+-      // W4AFP8
+-      fused_prologue_result = fusedBuildExpertMapsSortFirstToken(
+-          token_selected_experts, permuted_row_to_unpermuted_row_, unpermuted_row_to_permuted_row,
+-          expert_first_token_offset_, num_rows, num_experts_per_node, experts_per_token,
+-          start_expert, end_expert, enable_pdl, stream);
++      fused_prologue.token_selected_experts = token_selected_experts;
++      fused_prologue.permuted_row_to_unpermuted_row = permuted_row_to_unpermuted_row_;
++      fused_prologue.unpermuted_row_to_permuted_row = unpermuted_row_to_permuted_row;
++      fused_prologue.expert_first_token_offset = expert_first_token_offset_;
++      fused_prologue.num_tokens = num_rows;
++      fused_prologue.experts_per_token = experts_per_token;
++      fused_prologue.start_expert = start_expert;
++      fused_prologue.end_expert = end_expert;
++      // G2-2: offer the row duplication/permute/NVFP4 re-quantisation to the routing prologue, so
++      // one launch prepares the activations.  The shape/type/quantiser gate lives in
++      // tryFusedPrologueAndExpand; `expand_fused` below says whether it took the offer.  Only the
++      // raw-activation -> NVFP4 path is offered, so every extra argument the standalone launcher
++      // would pass (pre-quantised input, AWQ/W4AFP8 scales, wfp4afp8 token scales) is inactive
++      // there; anything else keeps that launch.  The stride descriptors are not offered to this
++      // kernel at all: computeStridesTmaWarpSpecialized stays a launch of its own below.
++      if (foldExpandEnabled() && use_fp4 && !use_awq && !use_w4afp8 && !use_lora &&
++          input_sf == nullptr && !use_wfp4afp8 && !use_mxfp8_act_scaling &&
++          quant_params.fp4.fc1.weight_block_scale && fc1_fp4_act_scale_ != nullptr) {
++        fused_prologue.expand_requested = true;
++        fused_prologue.expand_input = static_cast<void const*>(input_activations);
++        fused_prologue.expand_output = static_cast<void*>(permuted_data_);
++        fused_prologue.expand_unpermuted_scales = token_topk_unpermuted_scales;
++        fused_prologue.expand_permuted_scales = permuted_token_final_scales_;
++        fused_prologue.expand_act_sf_flat = fc1_fp4_act_scale_;
++        fused_prologue.expand_act_global_scale = quant_params.fp4.fc1.act_global_scale;
++        fused_prologue.expand_use_per_expert_act_scale =
++            use_fp4 ? quant_params.fp4.fc1.use_per_expert_act_scale : false;
++        fused_prologue.expand_hidden_size = hidden_size;
++      }
++
++      fused_prologue_result = tryFusedPrologueAndExpand<T, InputType>(
++          fused_prologue, num_experts_per_node, enable_pdl, stream);
++
++      if (!fused_prologue_result) {
++        // WAR: fusedBuildExpertMapsSortFirstToken kernel will lead to illegal memory access for
++        // W4AFP8
++        fused_prologue_result = fusedBuildExpertMapsSortFirstToken(
++            token_selected_experts, permuted_row_to_unpermuted_row_, unpermuted_row_to_permuted_row,
++            expert_first_token_offset_, num_rows, num_experts_per_node, experts_per_token,
++            start_expert, end_expert, enable_pdl, stream);
++      }
+     }
+ 
+     if (!fused_prologue_result) {
+@@ -4381,15 +4745,18 @@ void CutlassMoeFCRunner<
+       humming_permuted_token_selected_experts = permuted_token_selected_experts_;
+       act_fp8_token_scale_ptr_array = alpha_scale_ptr_array_fc1_;
+     }
+-    expandInputRowsKernelLauncher(
+-        input_activations, gemm1_input_expand, token_topk_unpermuted_scales,
+-        permuted_token_final_scales_, permuted_row_to_unpermuted_row_,
+-        humming_permuted_token_selected_experts, num_rows, hidden_size, experts_per_token,
+-        num_experts_per_node, quant_params, use_per_expert_act_scale, expert_first_token_offset_,
+-        fc1_fp4_act_scale_, input_sf, swizzled_input_sf,
+-        (use_w4afp8 && !use_fp8_input) ? quant_params.groupwise.fc1.act_scales : nullptr,
+-        fp8_token_dequant_scale, fp8_expert_residual_scale, act_fp8_token_scale_ptr_array,
+-        enable_pdl, stream);
++    // G2-2: skipped when the fused prologue already permuted and re-quantised the rows.
++    if (!fused_prologue.expand_fused) {
++      expandInputRowsKernelLauncher(
++          input_activations, gemm1_input_expand, token_topk_unpermuted_scales,
++          permuted_token_final_scales_, permuted_row_to_unpermuted_row_,
++          humming_permuted_token_selected_experts, num_rows, hidden_size, experts_per_token,
++          num_experts_per_node, quant_params, use_per_expert_act_scale, expert_first_token_offset_,
++          fc1_fp4_act_scale_, input_sf, swizzled_input_sf,
++          (use_w4afp8 && !use_fp8_input) ? quant_params.groupwise.fc1.act_scales : nullptr,
++          fp8_token_dequant_scale, fp8_expert_residual_scale, act_fp8_token_scale_ptr_array,
++          enable_pdl, stream);
++    }
+     auto const* gemm1_input = gemm1_input_expand;
+ 
+     sync_check_cuda_error(stream);
+diff --git a/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h b/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h
+index 4324770..44de31f 100644
+--- a/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h
++++ b/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h
+@@ -450,6 +450,39 @@ struct MoeMinLatencyParams {
+         active_expert_global_ids(active_expert_global_ids) {}
+ };
+ 
++// G2-2: request for fusing the routing prologue together with expandInputRowsKernel (the row
++// duplication/permute plus the NVFP4 re-quantisation).  Deliberately free of the runner's
++// template parameters so it can cross the (declared in this header, defined in
++// cutlass_fused_moe_kernels.cuh) boundary without new instantiations.
++//
++// The TMA stride/descriptor setup is *not* part of this request: it keeps its own
++// computeStridesTmaWarpSpecializedKernel launch, in its usual place after the routing prologue
++// (donor A3 stays out of this change).  The row phase below consumes the routing offsets, the
++// inverse row/expert maps and the activation/scaling inputs, never the descriptors.
++struct FusedPrologueRequest {
++  int const* token_selected_experts = nullptr;
++  int* permuted_row_to_unpermuted_row = nullptr;
++  int* unpermuted_row_to_permuted_row = nullptr;
++  int64_t* expert_first_token_offset = nullptr;
++  int64_t num_tokens = 0;
++  int experts_per_token = 0;
++  int start_expert = 0;
++  int end_expert = 0;
++
++  // The host fills expand_requested in and then checks `expand_fused`; when that is false the
++  // standalone expandInputRowsKernel launch must still be made.
++  bool expand_requested = false;
++  bool expand_fused = false;  // set by the fused launch when it took the offer
++  void const* expand_input = nullptr;   // InputType const*, [num_tokens, hidden_size]
++  void* expand_output = nullptr;        // T*, [num_tokens * k, hidden_size]
++  float const* expand_unpermuted_scales = nullptr;
++  float* expand_permuted_scales = nullptr;
++  TmaWarpSpecializedGroupedGemmInput::ElementSF* expand_act_sf_flat = nullptr;
++  float const* expand_act_global_scale = nullptr;
++  bool expand_use_per_expert_act_scale = false;
++  int64_t expand_hidden_size = 0;
++};
++
+ class CutlassMoeFCRunnerInterface {
+  public:
+   virtual ~CutlassMoeFCRunnerInterface() = default;
+-- 
+2.56.0
+

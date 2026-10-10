@@ -68,6 +68,10 @@ def _build_unified_chain(cap, length=3):
     component.cache = cache
     component.tree_core = core
     component.mamba_max_states_per_path = cap
+    # The eviction walk checks resume lease ownership, which __init__ sets up.
+    component._resume_leases = {}
+    component._resume_pins = {}
+    component._pending_resume_backup = {}
 
     nodes = []
     parent = core.root_node

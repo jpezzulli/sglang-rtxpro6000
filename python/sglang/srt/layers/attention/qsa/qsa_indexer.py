@@ -16,6 +16,7 @@ from sglang.srt.layers.attention.qsa.metadata import (
     build_group_ring_slots,
     build_pending_ring_slots,
     build_rope_position_matrix,
+    pending_ring_groups,
 )
 from sglang.srt.layers.attention.qsa.mqa import qsa_mqa_decode, qsa_mqa_prefill
 from sglang.srt.layers.layernorm import GemmaRMSNorm
@@ -269,7 +270,7 @@ class QSAIndexer(MultiPlatformOp):
             logical_positions=logical_positions,
             compress_ratio=self.compress_ratio,
             is_extend=is_extend,
-            num_groups=metadata.token_to_kv_pool.qsa_num_groups,
+            num_groups=pending_ring_groups(metadata.token_to_kv_pool),
         )
 
     def _group_ring_slots(
@@ -280,7 +281,7 @@ class QSAIndexer(MultiPlatformOp):
             group_end_positions=group_end_positions,
             sequence_ids=sequence_ids,
             compress_ratio=self.compress_ratio,
-            num_groups=metadata.token_to_kv_pool.qsa_num_groups,
+            num_groups=pending_ring_groups(metadata.token_to_kv_pool),
         )
 
     def update_key_state_and_compress(

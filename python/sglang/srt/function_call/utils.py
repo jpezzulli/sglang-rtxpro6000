@@ -3,7 +3,7 @@ import threading
 import warnings
 from json import JSONDecodeError, JSONDecoder
 from json.decoder import WHITESPACE
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import orjson
 import partial_json_parser
@@ -457,3 +457,46 @@ def get_json_schema_constraint(
         return json_schema
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Aggregate tool-call parser instrumentation (narrow, label-free sink)
+# ---------------------------------------------------------------------------
+# Detectors report logical parser events through this sink; the serving-side
+# Prometheus collector (TokenizerMetricsCollector) registers it. Counters are
+# aggregate only: never tool names, arguments, prompts, request ids or other
+# caller data. They are not a tool execution success rate: a call can be
+# counted as accepted and also as argument_conversion_failed.
+TOOL_PARSER_ACCEPTED = "accepted"
+TOOL_PARSER_INCOMPLETE = "incomplete"
+TOOL_PARSER_UNKNOWN_TOOL = "unknown_tool"
+TOOL_PARSER_ARGUMENT_CONVERSION_FAILED = "argument_conversion_failed"
+TOOL_PARSER_PARSE_ERROR = "parse_error"
+TOOL_PARSER_EVENT_OUTCOMES = (
+    TOOL_PARSER_ACCEPTED,
+    TOOL_PARSER_INCOMPLETE,
+    TOOL_PARSER_UNKNOWN_TOOL,
+    TOOL_PARSER_ARGUMENT_CONVERSION_FAILED,
+    TOOL_PARSER_PARSE_ERROR,
+)
+
+# Set only when metrics are enabled; a None sink makes recording a no-op, so
+# disabled servers keep the original low-overhead behaviour.
+_tool_parser_event_sink: Optional[Callable[[str], None]] = None
+
+
+def set_tool_parser_event_sink(sink: Optional[Callable[[str], None]]) -> None:
+    """Install the aggregate event sink (usually the metrics collector)."""
+    global _tool_parser_event_sink
+    _tool_parser_event_sink = sink
+
+
+def get_tool_parser_event_sink() -> Optional[Callable[[str], None]]:
+    return _tool_parser_event_sink
+
+
+def record_tool_parser_event(outcome: str) -> None:
+    """Record one logical parser event. Callers must pass a fixed outcome."""
+    sink = _tool_parser_event_sink
+    if sink is not None:
+        sink(outcome)

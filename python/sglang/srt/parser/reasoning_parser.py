@@ -204,13 +204,26 @@ class BaseReasoningFormatDetector:
         ):
             return StreamingParseResult()
 
-        # Strip `<think>` token if present
+        # Strip a generated opener only before the active block's boundary.
+        # A prefilled opener is absent from output; later content tags stay intact.
         if not self.stripped_think_start and think_start_text in current_text:
-            current_text = current_text.replace(think_start_text, "", 1)
-            # Write back, or stream_reasoning=False carries the token into finish().
-            self._buffer = current_text
-            self.stripped_think_start = True
-            self._in_reasoning = True
+            start_idx = current_text.find(think_start_text)
+            boundary_tool_idx = -1
+            if self._in_reasoning and self.tool_start_token:
+                boundary_tool_idx, _ = self._find_tool_start(current_text)
+            boundary_idx = (
+                self._find_think_end(current_text, boundary_tool_idx)
+                if self._in_reasoning
+                else -1
+            )
+            if boundary_idx == -1:
+                boundary_idx = boundary_tool_idx
+            if boundary_idx == -1 or start_idx < boundary_idx:
+                current_text = current_text.replace(think_start_text, "", 1)
+                # Buffered reasoning must not carry the opener into finish().
+                self._buffer = current_text
+                self.stripped_think_start = True
+                self._in_reasoning = True
 
         tool_idx, tool_start_confirmed = -1, None
         if self._in_reasoning and self.tool_start_token:
@@ -224,6 +237,8 @@ class BaseReasoningFormatDetector:
 
             self._buffer = ""
             self._in_reasoning = False
+            # Closing the block accounts for its opener, including a prefilled one.
+            self.stripped_think_start = True
             normal_text = current_text[end_idx + len(self.think_end_token) :]
 
             return StreamingParseResult(
@@ -238,6 +253,7 @@ class BaseReasoningFormatDetector:
                 if tool_start_confirmed:
                     self._buffer = ""
                     self._in_reasoning = False
+                    self.stripped_think_start = True
                     return StreamingParseResult(
                         normal_text=current_text[tool_idx:],
                         reasoning_text=current_text[:tool_idx],

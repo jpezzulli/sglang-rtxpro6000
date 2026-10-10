@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sglang.srt.environ import envs
 from sglang.srt.layers.attention.qwen_sparse_attn_backend import (
     QSAMTPSharedSparseIndices,
     QwenSparseAttnBackend,
@@ -33,31 +32,14 @@ def _make_backend(state=None):
     return backend
 
 
-def _make_state(num_requests=8, tail_width=4, triton_decode_attn=False):
-    with envs.SGLANG_OPT_TRITON_DECODE_ATTN.override(triton_decode_attn):
-        return QSAMTPSharedSparseIndices(
-            layer_ids=[48],
-            num_requests=num_requests,
-            token_topk=TOPK,
-            tail_width=tail_width,
-            device="cpu",
-        )
-
-
-def _capture(state, req_rows, frozen_rows, captured_lens):
-    state.capture(
-        torch.tensor(frozen_rows, dtype=torch.int32),
-        torch.tensor(req_rows, dtype=torch.int32),
-        torch.tensor(captured_lens, dtype=torch.int32),
-        layer_id=48,
+def _make_state(num_requests=8, tail_width=4):
+    return QSAMTPSharedSparseIndices(
+        layer_ids=[48],
+        num_requests=num_requests,
+        token_topk=TOPK,
+        tail_width=tail_width,
+        device="cpu",
     )
-
-
-def _valid_prefix_property(row):
-    """True when no valid column sits behind a -1 hole, which is exactly what
-    the split-KV decode kernel needs in order to stop scanning at ``seq_lens``."""
-    holes = [i for i, value in enumerate(row) if value < 0]
-    return not holes or all(row[i] < 0 for i in range(holes[0], len(row)))
 
 
 def _forward_batch(mode, **kwargs):
@@ -277,112 +259,6 @@ def test_index_share_flag_reads_override_and_checkpoint_locations():
     assert _qsa_index_share_requested(checkpoint_style)
     assert _qsa_index_share_requested(flat_style)
     assert not _qsa_index_share_requested(off)
-
-
-# --- shared-tail valid-prefix layout (SGLANG_OPT_TRITON_DECODE_ATTN) ------
-
-
-def test_gate_off_keeps_the_captured_row_layout_unchanged():
-    """Default-off: the frozen rows stay exactly as the indexer wrote them and
-    the tail keeps the trailing columns, byte for byte as before."""
-    state = _make_state()
-    assert not state.shared_tail_prefix
-    frozen = [3, 7, 11, 15, 19, -1, -1, -1]
-    _capture(state, [5], [frozen], [32])
-    got = state.lookup(torch.tensor([5]), torch.tensor([34], dtype=torch.int32), 48)
-    assert got[0, :TOPK].tolist() == frozen
-    assert got[0, TOPK:].tolist() == [32, 33, 34, -1]
-
-
-def test_shared_tail_prefix_compacts_holes_without_changing_the_set():
-    """A short (``-1``-padded) frozen row plus a drafted tail is the hole case the
-    packed prefix readers mis-handle.  The prefix layout reorders the same
-    columns -- frozen order first, then the contiguous ``[captured_len,
-    position]`` tail -- and nothing else: no missing token, no duplicate, no
-    extra token, and the causal bound (every column < seq_len) is untouched."""
-    frozen = [3, 7, 11, 15, 19, -1, -1, -1]
-    rows = {}
-    for gate in (False, True):
-        state = _make_state(triton_decode_attn=gate)
-        assert state.shared_tail_prefix is gate
-        _capture(state, [5], [frozen], [32])
-        rows[gate] = state.lookup(
-            torch.tensor([5]), torch.tensor([34], dtype=torch.int32), 48
-        )[0].tolist()
-    assert not _valid_prefix_property(rows[False])  # the bug the layout fixes
-    assert _valid_prefix_property(rows[True])
-    assert (
-        sorted(v for v in rows[True] if v >= 0)
-        == sorted(v for v in rows[False] if v >= 0)
-        == [3, 7, 11, 15, 19, 32, 33, 34]
-    )
-    assert rows[True] == [3, 7, 11, 15, 19, 32, 33, 34, -1, -1, -1, -1]
-
-
-def test_shared_tail_prefix_is_per_row_for_ragged_and_empty_selections():
-    """Rows share one launch, so the compaction boundary is per row: a fully
-    padded frozen row (``num_frozen == 0``, only the drafted tail) and a full
-    one must both end up prefix-packed with their own tail offset."""
-    state = _make_state(triton_decode_attn=True)
-    _capture(
-        state,
-        [2, 3, 4],
-        [
-            [1, 2, -1, -1, -1, -1, -1, -1],
-            [0, 5, 9, 13, 17, 21, 25, -1],
-            [-1, -1, -1, -1, -1, -1, -1, -1],
-        ],
-        [8, 26, 5],
-    )
-    got = state.lookup(
-        torch.tensor([2, 3, 4], dtype=torch.int32),
-        torch.tensor([10, 26, 6], dtype=torch.int32),
-        48,
-    )
-    assert got[0].tolist() == [1, 2, 8, 9, 10, -1, -1, -1, -1, -1, -1, -1]
-    assert got[1].tolist() == [0, 5, 9, 13, 17, 21, 25, 26, -1, -1, -1, -1]
-    assert got[2].tolist() == [5, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]
-    assert all(_valid_prefix_property(row) for row in got.tolist())
-
-
-def test_shared_tail_prefix_leaves_no_stale_row_and_stays_warmup_safe():
-    """A reused request row must show only the new capture (a wider frozen set
-    first, then a short one), and a never-captured row must keep attending
-    logical index 0 instead of an empty set."""
-    state = _make_state(num_requests=4, triton_decode_attn=True)
-    _capture(state, [3], [[4, 8, 12, 16, 20, 24, 28, 32]], [33])
-    _capture(state, [3], [[1, 4, -1, -1, -1, -1, -1, -1]], [5])
-    got = state.lookup(
-        torch.tensor([3, 1], dtype=torch.int32),
-        torch.tensor([6, 0], dtype=torch.int32),
-        48,
-    )
-    assert got[0].tolist() == [1, 4, 5, 6, -1, -1, -1, -1, -1, -1, -1, -1]
-    # Row 1 was never captured: zeros are valid columns, captured_len 1 > 0
-    # invalidates the whole tail.
-    assert got[1].tolist() == [0] * TOPK + [-1] * 4
-    assert got.dtype == torch.int32
-    assert got.shape == (2, TOPK + 4)
-
-
-def test_shared_tail_prefix_shapes_are_static_for_graph_capture():
-    """The compaction boundary is a device value, so every row keeps the same
-    static width and the lookup stays recordable into the decode graphs."""
-    state = _make_state(triton_decode_attn=True)
-    _capture(
-        state,
-        [1, 2],
-        [[-1] * TOPK, [0, 1, 2, 3, 4, 5, 6, 7]],
-        [9, 9],
-    )
-    got = state.lookup(
-        torch.tensor([1, 2], dtype=torch.int32),
-        torch.tensor([12, 12], dtype=torch.int32),
-        48,
-    )
-    assert got.shape == (2, TOPK + 4)
-    assert got[0].tolist() == [9, 10, 11, 12] + [-1] * (TOPK)
-    assert got[1].tolist() == [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12]
 
 
 if __name__ == "__main__":
