@@ -78,6 +78,22 @@ class StartupSummaryTest(unittest.TestCase):
             "Storage backend: nixl | NIXL location: /cache/NIXL pool [one]", output
         )
         self.assertIn("Media preprocessing: CPU (sglang)", output)
+        # Without the adaptive flag the widths stay reported as static.
+        self.assertNotIn("adaptive", output)
+
+    def test_adaptive_nextn_reports_the_width_policy_not_a_static_width(self):
+        output = self.summary(
+            "serve",
+            "--model-path=/models/next",
+            "--speculative-algorithm=NEXTN",
+            "--speculative-num-steps=7",
+            "--speculative-eagle-topk=1",
+            "--speculative-num-draft-tokens=8",
+            "--speculative-adaptive",
+            "--speculative-adaptive-config=/cfg/adaptive-next.json",
+        )
+        self.assertIn("Speculation: adaptive MTP up to steps=7", output)
+        self.assertIn("draft tokens=8 (policy /cfg/adaptive-next.json)", output)
 
     def test_nextn_without_frspec_reports_automatic_cap_and_secondary_gpu(self):
         output = self.summary(
@@ -207,7 +223,32 @@ class StartupSummaryTest(unittest.TestCase):
                 )
                 self.assertNotIn("Pennyroyal startup — requested settings", base_output)
                 self.assertIn("Pennyroyal startup — requested settings", current_output)
-                self.assertEqual(base_argv, current_argv)
+                # The approved 3.0 default swaps the Next launchers' static
+                # NEXTN 3/1/4 profile for the adaptive one; outside that one
+                # segment the two argvs must stay byte-identical.
+                self.assertEqual(self._adaptive_30_default(base_argv), current_argv)
+
+    @staticmethod
+    def _adaptive_30_default(argv: list[str]) -> list[str]:
+        # The intended delta, stated once: launch the approved policy's
+        # maximum width (steps 7, draft tokens 8 at topk 1) plus the two
+        # adaptive flags right after the draft-token count. The DFlash2
+        # profile has no static NEXTN width, so it passes through unchanged.
+        if "--speculative-num-steps" not in argv:
+            return argv
+        at = argv.index("--speculative-num-steps")
+        draft_at = argv.index("--speculative-num-draft-tokens")
+        assert argv[at + 1] == "3" and argv[draft_at + 1] == "4", argv
+        updated = list(argv)
+        updated[at + 1] = "7"
+        updated[draft_at + 1] = "8"
+        updated[draft_at + 2 : draft_at + 2] = [
+            "--speculative-adaptive",
+            "--speculative-adaptive-config",
+            # The fixture names the pinned policy file below.
+            "/configs/adaptive policy [approved].json",
+        ]
+        return updated
 
     @staticmethod
     def _qualified_hicache_size(current_source: str) -> str:
@@ -265,6 +306,7 @@ class StartupSummaryTest(unittest.TestCase):
             "CHAT_TEMPLATE": "/templates/chat template (tools).jinja",
             "IMAGE_PROCESSOR_BACKEND": "sglang",
             "TOKEN_MAP": "/maps/token map [FR Spec].npy",
+            "ADAPTIVE_CONFIG": "/configs/adaptive policy [approved].json",
             "DRAFT_TOKENS": "8",
             "DRAFT_WINDOW_SIZE": "32",
         }

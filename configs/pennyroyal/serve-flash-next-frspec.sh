@@ -62,6 +62,14 @@ source "$SCRIPT_DIR/tp-devices.sh"
 # Pin the qualified map and tokenizer: a different ID mapping changes draft
 # proposals and must never silently reuse this representation's cache namespace.
 TOKEN_MAP="$SCRIPT_DIR/frspec/flash-next-64k.pt"
+# The approved adaptive MTP width policy (C1 picks W4/W8 = steps 3/7, C2+
+# stays W4) ships as ordinary --speculative-adaptive-config file: automatic,
+# no user toggle. The launch runs the table's maximum (steps 7, draft tokens 8
+# at topk 1) because a candidate wider than the launch width is refused, not
+# resized, under captured graphs; the W8 state alone needs the BS1 decode
+# bucket, which the default spec-decode capture list keeps. This is a runtime
+# asset, so it is read from the repository, never copied to a host directory.
+ADAPTIVE_CONFIG="$SCRIPT_DIR/adaptive-next.json"
 
 CONTEXT_LENGTH=524288
 PAGE_SIZE=64
@@ -99,6 +107,7 @@ fi
   exit 1
 }
 [[ -f "$TOKEN_MAP" ]] || { echo "FR-Spec map missing: $TOKEN_MAP" >&2; exit 1; }
+[[ -f "$ADAPTIVE_CONFIG" ]] || { echo "Adaptive MTP policy missing: $ADAPTIVE_CONFIG" >&2; exit 1; }
 mkdir -p "$CACHE_BASE"/{huggingface,torch,torchinductor,triton,cuda,flashinfer,sglang/jit}
 if [[ "$NIXL" == on ]]; then
   mkdir -p "$NIXL_STORAGE_BASE"
@@ -147,7 +156,7 @@ configure_max_total_tokens 824384
 TARGET_OVERRIDES='{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":2.0,"original_max_position_embeddings":262144}}}'
 printf 'Pennyroyal profile: Flash-Next FR-Spec\n  runtime: %s\n  target: %s\n  token map: %s\n  cache root: %s\n  NIXL root: %s\n' \
   "$SGLANG_EXE" "$TARGET_MODEL" "$TOKEN_MAP" "$CACHE_BASE" "${NIXL_STORAGE_BASE:-none}"
-echo "Verifying the pinned FR-Spec map and tokenizer..."
+echo "Verifying the pinned FR-Spec map, tokenizer and adaptive MTP policy..."
 read -r TOKEN_MAP_SHA _ < <(sha256sum "$TOKEN_MAP")
 [[ "$TOKEN_MAP_SHA" == becfa41d394b86c26c632bea8f3c6ea64bbb76d7b238d8673c06afae21269f25 ]] || {
   echo "FR-Spec map does not match the bundled checksum" >&2; exit 1;
@@ -155,6 +164,10 @@ read -r TOKEN_MAP_SHA _ < <(sha256sum "$TOKEN_MAP")
 read -r TOKENIZER_SHA _ < <(sha256sum "$TARGET_MODEL/tokenizer.json")
 [[ "$TOKENIZER_SHA" == 0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3 ]] || {
   echo "Target tokenizer differs from the qualified FR-Spec tokenizer" >&2; exit 1;
+}
+read -r ADAPTIVE_SHA _ < <(sha256sum "$ADAPTIVE_CONFIG")
+[[ "$ADAPTIVE_SHA" == 64070286310a0d3eeeb3ff3ae074d1ca0fed2937d2274a0adfcb8ace84bc01ee ]] || {
+  echo "Adaptive MTP policy does not match the approved checksum" >&2; exit 1;
 }
 SGLANG_REV="$(git -C "$REPO_ROOT" rev-parse --short=10 HEAD)"
 PENNY_IDENTITY_PROBE="$("$PYTHON" -c 'import sys; import torch; from sglang.srt.utils import resolve_mm_preprocess_device; resolve_mm_preprocess_device(); from sglang.kernels.ops.gemm.sm120_online_fp8 import launch_precision; print(torch.__version__); print(launch_precision(sys.argv[1]))' "$TARGET_MODEL")"
@@ -191,9 +204,11 @@ else
       --field "compute_dtype=$COMPUTE_DTYPE" \
       --field "target_kv_dtype=$KV_DTYPE" \
       --field "speculative_algorithm=NEXTN" \
-      --field "speculative_num_steps=3" \
+      --field "speculative_num_steps=7" \
       --field "speculative_eagle_topk=1" \
-      --field "speculative_num_draft_tokens=4" \
+      --field "speculative_num_draft_tokens=8" \
+      --field "speculative_adaptive=true" \
+      --field "speculative_adaptive_policy_sha256=$ADAPTIVE_SHA" \
       --field "speculative_draft_quantization=unquant" \
       --field "gdn_mtp_cache_mode=none" \
       --field "gdn_fp16_accum_mma=$GDN_FP16_ACCUM_MMA" \
@@ -247,8 +262,9 @@ launch_args=(serve \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \
   --default-chat-template-kwargs "$DEFAULT_CHAT_TEMPLATE_KWARGS" \
-  --speculative-algorithm NEXTN --speculative-num-steps 3 \
-  --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 \
+  --speculative-algorithm NEXTN --speculative-num-steps 7 \
+  --speculative-eagle-topk 1 --speculative-num-draft-tokens 8 \
+  --speculative-adaptive --speculative-adaptive-config "$ADAPTIVE_CONFIG" \
   --speculative-draft-model-quantization unquant \
   --speculative-token-map "$TOKEN_MAP" --watchdog-timeout 1800)
 source "$SCRIPT_DIR/startup-summary.sh"

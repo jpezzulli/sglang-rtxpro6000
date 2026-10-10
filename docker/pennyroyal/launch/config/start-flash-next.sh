@@ -91,6 +91,15 @@ source "$IMAGE_CONFIGS/reasoning-effort.sh"
 source "$IMAGE_CONFIGS/tp-devices.sh"
 
 CONTEXT_LENGTH=524288
+# The approved adaptive MTP width policy (C1 picks W4/W8 = steps 3/7, C2+
+# stays W4) ships as ordinary --speculative-adaptive-config file: automatic,
+# no user toggle. The launch runs the table's maximum (steps 7, draft tokens 8
+# at topk 1) because a candidate wider than the launch width is refused, not
+# resized, under captured graphs; the W8 state alone needs the BS1 decode
+# bucket, which the default spec-decode capture list keeps. Like the template
+# and map, the policy is an image asset under REPO_ROOT, not a /config copy
+# the host may edit.
+ADAPTIVE_CONFIG="$IMAGE_CONFIGS/adaptive-next.json"
 PAGE_SIZE=64
 if [[ ! "$TP_SIZE" =~ ^[1-9][0-9]*$ ]]; then
   echo "TP_SIZE must be a positive integer" >&2
@@ -115,6 +124,11 @@ fi
 [[ -f "$TARGET_MODEL/config.json" && -f "$TARGET_MODEL/model.safetensors.index.json" ]] || {
   echo "Incomplete target checkpoint: $TARGET_MODEL" >&2
   exit 1
+}
+[[ -f "$ADAPTIVE_CONFIG" ]] || { echo "Adaptive MTP policy missing: $ADAPTIVE_CONFIG" >&2; exit 1; }
+read -r ADAPTIVE_SHA _ < <(sha256sum "$ADAPTIVE_CONFIG")
+[[ "$ADAPTIVE_SHA" == 64070286310a0d3eeeb3ff3ae074d1ca0fed2937d2274a0adfcb8ace84bc01ee ]] || {
+  echo "Adaptive MTP policy does not match the approved checksum" >&2; exit 1;
 }
 # The image entrypoint checks these for its built-in profiles; the exec path
 # leaves the roots this script actually uses to the script itself.
@@ -208,9 +222,11 @@ if [[ "$NIXL" == on ]]; then
     --field "compute_dtype=$COMPUTE_DTYPE" \
     --field "target_kv_dtype=$KV_DTYPE" \
     --field "speculative_algorithm=NEXTN" \
-    --field "speculative_num_steps=3" \
+    --field "speculative_num_steps=7" \
     --field "speculative_eagle_topk=1" \
-    --field "speculative_num_draft_tokens=4" \
+    --field "speculative_num_draft_tokens=8" \
+    --field "speculative_adaptive=true" \
+    --field "speculative_adaptive_policy_sha256=$ADAPTIVE_SHA" \
     --field "speculative_draft_quantization=unquant" \
     --field "gdn_mtp_cache_mode=none" \
     --field "gdn_fp16_accum_mma=$GDN_FP16_ACCUM_MMA" \
@@ -270,8 +286,9 @@ launch_args=(serve \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \
   --default-chat-template-kwargs "$DEFAULT_CHAT_TEMPLATE_KWARGS" \
-  --speculative-algorithm NEXTN --speculative-num-steps 3 \
-  --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 \
+  --speculative-algorithm NEXTN --speculative-num-steps 7 \
+  --speculative-eagle-topk 1 --speculative-num-draft-tokens 8 \
+  --speculative-adaptive --speculative-adaptive-config "$ADAPTIVE_CONFIG" \
   --speculative-draft-model-quantization unquant --watchdog-timeout 1800)
 source "$IMAGE_CONFIGS/startup-summary.sh"
 pennyroyal_startup_summary "${launch_args[@]}"

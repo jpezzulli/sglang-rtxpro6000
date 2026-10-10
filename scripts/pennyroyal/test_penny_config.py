@@ -576,6 +576,7 @@ class RecipeHiCacheSizeTests(unittest.TestCase):
         "CHAT_TEMPLATE": "/templates/chat template (tools).jinja",
         "IMAGE_PROCESSOR_BACKEND": "pil",
         "TOKEN_MAP": "/maps/token map [FR Spec].pt",
+        "ADAPTIVE_CONFIG": "/configs/adaptive policy [approved].json",
         "DRAFT_TOKENS": "8",
         "DRAFT_WINDOW_SIZE": "2048",
         "PLE_NAMESPACE_ARGS": "",

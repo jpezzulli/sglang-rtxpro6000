@@ -9,9 +9,9 @@ pennyroyal_startup_summary() {
     arg="$1"
     case "$arg" in
       --*=*) key="${arg%%=*}"; value="${arg#*=}" ;;
-      --model-path|--speculative-draft-model-path|--speculative-algorithm|--speculative-token-map|--context-length|--max-total-tokens|--max-running-requests|--max-mamba-cache-size|--kv-cache-dtype|--speculative-draft-kv-cache-dtype|--hicache-size|--hicache-storage-backend|--image-processor-backend|--tp|--speculative-num-steps|--speculative-eagle-topk|--speculative-num-draft-tokens)
+      --model-path|--speculative-draft-model-path|--speculative-algorithm|--speculative-token-map|--context-length|--max-total-tokens|--max-running-requests|--max-mamba-cache-size|--kv-cache-dtype|--speculative-draft-kv-cache-dtype|--hicache-size|--hicache-storage-backend|--image-processor-backend|--tp|--speculative-num-steps|--speculative-eagle-topk|--speculative-num-draft-tokens|--speculative-adaptive-config)
         key="$arg"; value="${2:-unspecified}"; if (( $# > 1 )); then shift; fi ;;
-      --ple-offload-embedding|--enable-hierarchical-cache) key="$arg"; value=true ;;
+      --ple-offload-embedding|--enable-hierarchical-cache|--speculative-adaptive) key="$arg"; value=true ;;
       *) shift; continue ;;
     esac
     setting["$key"]="$value"
@@ -63,10 +63,20 @@ pennyroyal_startup_summary() {
   if [[ -n ${setting[--speculative-draft-kv-cache-dtype]:-} ]]; then
     printf '  Draft KV dtype: %s\n' "${setting[--speculative-draft-kv-cache-dtype]}"
   fi
-  printf '  Speculation: steps=%s | top-k=%s | draft tokens=%s\n' \
-    "${setting[--speculative-num-steps]:-not set}" \
-    "${setting[--speculative-eagle-topk]:-not set}" \
-    "${setting[--speculative-num-draft-tokens]:-not set}"
+  if [[ ${setting[--speculative-adaptive]:-false} == true ]]; then
+    # The launch line names the policy maximum; the runtime picks the width
+    # per batch from the adaptive config file, so do not report a static one.
+    printf '  Speculation: adaptive MTP up to steps=%s | top-k=%s | draft tokens=%s (policy %s)\n' \
+      "${setting[--speculative-num-steps]:-not set}" \
+      "${setting[--speculative-eagle-topk]:-not set}" \
+      "${setting[--speculative-num-draft-tokens]:-not set}" \
+      "${setting[--speculative-adaptive-config]:-built-in table}"
+  else
+    printf '  Speculation: steps=%s | top-k=%s | draft tokens=%s\n' \
+      "${setting[--speculative-num-steps]:-not set}" \
+      "${setting[--speculative-eagle-topk]:-not set}" \
+      "${setting[--speculative-num-draft-tokens]:-not set}"
+  fi
   printf '  Context: %s tokens | KV cap: %s\n' \
     "${setting[--context-length]:-automatic}" "${setting[--max-total-tokens]:-automatic}"
   printf '  Max running requests: %s | Mamba slots: %s\n' \
