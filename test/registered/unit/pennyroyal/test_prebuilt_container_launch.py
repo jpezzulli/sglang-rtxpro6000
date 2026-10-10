@@ -12,6 +12,7 @@ import csv
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from sglang.test.ci.ci_register import register_cpu_ci
@@ -40,6 +41,7 @@ CONTROLLED = (
     "CACHE_BASE",
     "NIXL_STORAGE_BASE",
     "NIXL_CONFIG",
+    "NIXL",
     "PENNY_HICACHE_SIZE_GB",
     "PENNY_PLE_BACKEND",
     "TP_SIZE",
@@ -48,6 +50,7 @@ CONTROLLED = (
     "MAX_TOTAL_TOKENS",
     "SGLANG_MM_PREPROCESS_DEVICE",
     "SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR",
+    "FLASHINFER_GDN_FP16_ACCUM_MMA",
     "CUDA_VISIBLE_DEVICES",
     "FAKE_CUDA_DEVICES",
 )
@@ -186,6 +189,67 @@ def test_launcher_mounts_directories_and_runs_the_mounted_script(tmp_path):
     assert argv[argv.index("pennyroyal:test") + 1] == "exec"
     # A config outside the script's directory arrives as a container path.
     assert values_after(argv, "-e") == ["NIXL_CONFIG=/nixl-config/nixl conf.toml"]
+
+
+def test_next_profiles_default_the_accepted_gdn_mode(tmp_path):
+    # The accepted FlashInfer GDN fix is opted in per Next profile, in the
+    # launched process's own environment: the image recipe and the operator's
+    # mounted startup file both default it, an explicit opt-out survives, and
+    # the 27B profile never sees the variable at all. The mode also separates the
+    # persisted NIXL identity, because the two kernels write different numbers.
+    mounted = prepared_config(tmp_path, "start-flash-next.sh") / "start-flash-next.sh"
+    plain = prepared_config(tmp_path, "start-27b-dflash2.sh") / "start-27b-dflash2.sh"
+    for startup, via_entrypoint in (
+        (mounted, True),
+        (RECIPES / "serve-flash-next.sh", False),
+    ):
+        result, _, server_env, _ = launch(
+            tmp_path, startup, through_entrypoint=via_entrypoint
+        )
+        assert result.returncode == 0, (startup, result.stderr)
+        assert server_env["gdn_fp16_accum_mma"] == "1", startup
+        assert server_env["namespace"] != "unset", startup
+        modes = {"default": server_env["namespace"]}
+        for label, value in (("explicit on", "1"), ("off", "0"), ("unenabled", "true")):
+            result, _, env, _ = launch(
+                tmp_path,
+                startup,
+                through_entrypoint=via_entrypoint,
+                env={"FLASHINFER_GDN_FP16_ACCUM_MMA": value},
+            )
+            assert result.returncode == 0, (startup, result.stderr)
+            assert env["gdn_fp16_accum_mma"] == value, env
+            modes[label] = env["namespace"]
+        # Only the literal 1 enables the kernels, and only the resolved mode is
+        # cache identity: a value that does not enable must not fork the root.
+        assert modes["explicit on"] == modes["default"] != modes["off"], modes
+        assert modes["unenabled"] == modes["off"], modes
+        result, _, opted_out, _ = launch(
+            tmp_path,
+            startup,
+            through_entrypoint=via_entrypoint,
+            env={"FLASHINFER_GDN_FP16_ACCUM_MMA": "0"},
+        )
+        assert result.returncode == 0, (startup, result.stderr)
+        assert opted_out["gdn_fp16_accum_mma"] == "0", startup
+    for startup, via_entrypoint in (
+        (plain, True),
+        (RECIPES / "serve-qwen38-27b-dflash2.sh", False),
+    ):
+        result, _, server_env, _ = launch(
+            tmp_path, startup, through_entrypoint=via_entrypoint
+        )
+        assert result.returncode == 0, (startup, result.stderr)
+        assert server_env["gdn_fp16_accum_mma"] == "unset", startup
+        # The 27B namespace is untouched by the Next-only knob.
+        result, _, opted_out, _ = launch(
+            tmp_path,
+            startup,
+            through_entrypoint=via_entrypoint,
+            env={"FLASHINFER_GDN_FP16_ACCUM_MMA": "0"},
+        )
+        assert result.returncode == 0, (startup, result.stderr)
+        assert opted_out["namespace"] == server_env["namespace"], startup
 
 
 def test_launcher_default_startup_keeps_the_script_own_nixl_config(tmp_path):
@@ -392,6 +456,15 @@ def image_root(tmp_path: Path) -> tuple[Path, Path, Path]:
         'printf "namespace=%s\\n" "${SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
         'printf "cache=%s\\n" "${SGLANG_CACHE_DIR:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
         'printf "cuda=%s\\n" "${CUDA_VISIBLE_DEVICES:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
+        # The settings the launcher can forward with -e, recorded as the server
+        # actually receives them: a mounted script that exports a fixed value
+        # over an operator's saved choice shows up here, not in the plan.
+        'printf "forward_unknown_tools=%s\\n" "${SGLANG_FORWARD_UNKNOWN_TOOLS:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
+        'printf "mm_device=%s\\n" "${SGLANG_MM_PREPROCESS_DEVICE:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
+        'printf "max_running_requests=%s\\n" "${MAX_RUNNING_REQUESTS:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
+        'printf "ple_backend=%s\\n" "${PENNY_PLE_BACKEND:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
+        'printf "nccl_p2p_disable=%s\\n" "${NCCL_P2P_DISABLE:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
+        'printf "gdn_fp16_accum_mma=%s\\n" "${FLASHINFER_GDN_FP16_ACCUM_MMA:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
     )
     sglang.chmod(0o755)
     (root / "configs").symlink_to(REPO / "configs")
@@ -490,9 +563,10 @@ def launch(
             SGLANG_ENV_CAPTURE=str(env_capture),
             TARGET_MODEL=str(target_checkpoint(tmp_path)),
             DRAFT_MODEL=str(draft_checkpoint(tmp_path)),
-            **qualified_defaults(),
-            # Two GPUs granted by Docker unless the test says otherwise.
-            **{"FAKE_CUDA_DEVICES": "2", **(env or {})},
+            # Two GPUs granted by Docker unless the test says otherwise, and a
+            # per-test override of any qualified default (one dict, so an
+            # override cannot collide with the default it replaces).
+            **{"FAKE_CUDA_DEVICES": "2", **qualified_defaults(), **(env or {})},
         ),
         text=True,
         capture_output=True,
@@ -674,9 +748,7 @@ def test_container_startup_keeps_every_granted_gpu_visible(tmp_path):
     assert argv_after(argv, "--image-processor-backend") == "torchvision"
 
     # The TP guard still refuses a device Docker never granted.
-    result, argv, _, _ = launch(
-        tmp_path, startup, env={"FAKE_CUDA_DEVICES": "1"}
-    )
+    result, argv, _, _ = launch(tmp_path, startup, env={"FAKE_CUDA_DEVICES": "1"})
     assert result.returncode != 0 and argv is None
     assert "needs at least 2 visible CUDA device(s)" in result.stderr
 
@@ -728,6 +800,253 @@ def test_mounted_recipe_launches_exactly_like_the_image_recipe(tmp_path):
             for item in mounted_argv
         ]
         assert normalised == recipe_argv, recipe
+
+
+STORAGE_FLAGS = (
+    "--hicache-storage-backend",
+    "--hicache-storage-prefetch-policy",
+    "--hicache-storage-backend-extra-config",
+)
+
+
+def without_storage_args(argv: list[str]) -> list[str]:
+    """The launch argv with the three disk-tier arguments and their values cut."""
+    kept: list[str] = []
+    skip = False
+    for item in argv:
+        if skip:
+            skip = False
+            continue
+        if item in STORAGE_FLAGS:
+            skip = True
+            continue
+        kept.append(item)
+    return kept
+
+
+def test_forwarded_settings_survive_the_mounted_script_for_every_profile(tmp_path):
+    # What the operator saved is what the server sees: the launcher can forward
+    # these with -e, and the mounted startup files keep their qualified default
+    # only when nothing was forwarded. Checked in the launched process's own
+    # environment, not in a plan dictionary.
+    profiles = ("start-flash-next.sh", "start-27b-dflash2.sh")
+    for name in profiles:
+        config = prepared_config(tmp_path, name)
+        startup = config / name
+        default_result, default_argv, default_env, _ = launch(tmp_path, startup)
+        assert default_result.returncode == 0, (name, default_result.stderr)
+        # Nothing forwarded: the qualified defaults stay exactly as qualified.
+        assert default_env["forward_unknown_tools"] == "true", name
+        assert default_env["nccl_p2p_disable"] == "unset", name
+        assert '"reasoning_effort":"medium"' in argv_after(
+            default_argv, "--default-chat-template-kwargs"
+        ), name
+        result, argv, server_env, _ = launch(
+            tmp_path, startup, env={"SGLANG_FORWARD_UNKNOWN_TOOLS": "false"}
+        )
+        assert result.returncode == 0, (name, result.stderr)
+        assert server_env["forward_unknown_tools"] == "false", (
+            name,
+            server_env["forward_unknown_tools"],
+        )
+        # The value is not merely exported: the tool parser still qualifies.
+        assert argv_after(argv, "--tool-call-parser") == "qwen3_coder", name
+    # The FR-Spec example cannot launch against the stand-in checkpoint (its
+    # pinned tokenizer guard stops it, as it should), so the same guarantee is
+    # read from the file the operator edits instead.
+    frspec = (CONFIGS / "start-flash-next-frspec.sh").read_text()
+    assert (
+        "export SGLANG_FORWARD_UNKNOWN_TOOLS=" '"${SGLANG_FORWARD_UNKNOWN_TOOLS:-true}"'
+    ) in frspec
+    assert "export SGLANG_FORWARD_UNKNOWN_TOOLS=true" not in frspec
+    # The 27b recipe pins its own capacity, TP and PLE placement in the launch
+    # line, so an ambient value there is decoration: the saved settings must be
+    # refused up front (penny_config's profile check), not quietly ignored.
+    result, argv, server_env, _ = launch(
+        tmp_path,
+        RECIPES / "serve-qwen38-27b-dflash2.sh",
+        through_entrypoint=False,
+        env={
+            "MAX_RUNNING_REQUESTS": "8",
+            "MAX_MAMBA_CACHE_SIZE": "48",
+            "MAX_TOTAL_TOKENS": "262144",
+            "TP_SIZE": "2",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert argv_after(argv, "--max-running-requests") == "4"
+    assert argv_after(argv, "--max-mamba-cache-size") == "24"
+    assert argv_after(argv, "--tp") == "1"
+    assert "--max-total-tokens" not in argv
+
+
+def test_a_generated_launch_forwards_the_saved_value_end_to_end(tmp_path):
+    """Generated files, docker stub and the image stand-in: saved false stays false.
+
+    This is the chain the review asked for: the configurator's generated run.sh
+    must hand the saved value to docker, and the generated startup script must
+    let it reach the launched server instead of exporting its own default. No
+    daemon or GPU here: docker is a recorder and the server is a capturing stub.
+    """
+    sys.path.insert(0, str(REPO / "scripts" / "pennyroyal"))
+    import penny_config as pc  # noqa: E402
+
+    host_root = tmp_path / "model-share"
+    cache = tmp_path / "cache root"
+    nixl = tmp_path / "nixl root"
+    for directory in (host_root, cache, nixl):
+        directory.mkdir(parents=True, exist_ok=True)
+    model = make_checkpoint(host_root / "penny-model", "generated")
+    saved = {
+        "HOST_MODELS_ROOT": str(host_root),
+        "HOST_CACHE_BASE": str(cache),
+        "HOST_NIXL_STORAGE_BASE": str(nixl),
+        "LAUNCH_DIR": str(tmp_path / "generated"),
+        "SGLANG_FORWARD_UNKNOWN_TOOLS": "false",
+        # Saved but not one of the wizard's own keys: docker compose forwards
+        # these today, so the generated launch must not lose them either.
+        "PENNY_REASONING_EFFORT": "high",
+        "NCCL_P2P_DISABLE": "1",
+        "FLASHINFER_GDN_FP16_ACCUM_MMA": "0",
+        "TARGET_MODEL": "/models/penny-model",
+    }
+    env_file = tmp_path / "container.env"
+    env_file.write_text(
+        pc.serialize_env(
+            [("", sorted(saved.items()))], header=(f"{pc.PROFILE_KEY}=next-plain",)
+        )
+    )
+    plan = pc.build_plan(
+        "container", pc.load_config("container", env_file, {}, REPO), {}, repo_root=REPO
+    )
+    assert [issue.message for issue in plan.errors] == []
+    pc.write_container_files(plan)
+    run_sh = plan.launch_dir / "run.sh"
+    assert run_sh.is_file(), plan.launch_dir
+
+    # 1. Host side: the printed command reaches docker with the saved value.
+    directory, capture = fake_docker(tmp_path)
+    result = subprocess.run(
+        ["bash", str(run_sh)],
+        env=clean_env(
+            PATH=f"{directory}:{os.environ['PATH']}",
+            DOCKER_CAPTURE=str(capture),
+            HOME=str(tmp_path / "home"),
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    argv = capture.read_text().splitlines()
+    index = argv.index("-e")
+    forwarded = [value for value in argv[index:] if value.startswith("SGLANG_")]
+
+    # 2. Container side: the same generated script, run by the image's own
+    # exec path with exactly the -e pairs docker was handed, exports what it
+    # received (paths rewritten the way an operator rewrites them before the
+    # first start).
+    passed_through = dict(
+        argv[index + 1].split("=", 1)
+        for index, value in enumerate(argv)
+        if value == "-e" and "=" in argv[index + 1]
+    )
+    startup = plan.launch_dir / "config" / "start-flash-next.sh"
+    generated = startup.read_text()
+    assert "TARGET_MODEL=/models/penny-model" in generated, generated
+    startup.write_text(
+        generated.replace("TARGET_MODEL=/models/penny-model", f'TARGET_MODEL="{model}"')
+    )
+    result, server_argv, server_env, _ = launch(tmp_path, startup, env=passed_through)
+    assert result.returncode == 0, result.stderr
+    assert server_env["forward_unknown_tools"] == "false", server_env
+    assert server_env["cache"] == str(cache / "sglang"), server_env
+    # The launcher-side reasoning tier reached the chat-template kwargs the
+    # server is started with, and the NCCL workaround reached its environment.
+    assert '"reasoning_effort":"high"' in argv_after(
+        server_argv, "--default-chat-template-kwargs"
+    ), server_argv
+    assert server_env["nccl_p2p_disable"] == "1", server_env
+    # The saved GDN opt-out survives the generated startup file's own default,
+    # which is the only reason to forward it.
+    assert server_env["gdn_fp16_accum_mma"] == "0", server_env
+    # The profile's qualified flags are untouched by any of this.
+    assert argv_after(server_argv, "--speculative-algorithm") == "NEXTN"
+
+    # Nothing forwarded either: the same generated file keeps its qualified
+    # default of 1 rather than honouring an absent setting.
+    unforwarded = {
+        k: v for k, v in passed_through.items() if k != "FLASHINFER_GDN_FP16_ACCUM_MMA"
+    }
+    assert "FLASHINFER_GDN_FP16_ACCUM_MMA" not in unforwarded
+    result, _, default_env, _ = launch(tmp_path, startup, env=unforwarded)
+    assert result.returncode == 0, result.stderr
+    assert default_env["gdn_fp16_accum_mma"] == "1", default_env
+    # Saved 0 and nothing saved are different representations of the recurrent
+    # prefill computation, so they must not land on one persisted NIXL root.
+    assert server_env["namespace"] != "unset", server_env
+    assert default_env["namespace"] != server_env["namespace"], (
+        default_env,
+        server_env,
+    )
+
+
+def test_native_recipes_take_the_same_disk_tier_switch(tmp_path):
+    # The native recipes carry the same on/off choice the mounted startup files
+    # do: off drops the three storage-backend arguments (and every NIXL
+    # requirement), and keeps the GPU radix cache, the host-RAM tier, the model
+    # and the speculation flags exactly as they were. No data is deleted: the
+    # namespace derivation simply never runs.
+    for recipe in ("serve-flash-next.sh", "serve-qwen38-27b-dflash2.sh"):
+        path = RECIPES / recipe
+        on_result, on_argv, on_env, _ = launch(tmp_path, path, through_entrypoint=False)
+        assert on_result.returncode == 0, (recipe, on_result.stderr)
+        assert "--hicache-storage-backend" in on_argv, recipe
+        assert on_env["namespace"] != "unset", recipe
+        off_result, off_argv, off_env, _ = launch(
+            tmp_path,
+            path,
+            through_entrypoint=False,
+            env={"NIXL": "off"},
+            nixl_root=tmp_path / "no nixl root here",
+        )
+        assert off_result.returncode == 0, (recipe, off_result.stderr)
+        for flag in STORAGE_FLAGS:
+            assert flag not in off_argv, (recipe, flag)
+        # Everything except those three arguments (and their values) is the
+        # same argv, and no NIXL path survived into it.
+        assert without_storage_args(on_argv) == off_argv, recipe
+        assert not [item for item in off_argv if "nixl" in item.lower()], recipe
+        assert "--enable-hierarchical-cache" in off_argv, recipe
+        assert off_env["namespace"] == "unset", recipe
+        assert off_env["cache"] == on_env["cache"], recipe
+
+    # A value that is neither on nor off is a mistake, not a new mode.
+    bogus, argv, _, _ = launch(
+        tmp_path,
+        RECIPES / "serve-flash-next.sh",
+        through_entrypoint=False,
+        env={"NIXL": "sometimes"},
+    )
+    assert bogus.returncode != 0 and argv is None
+    assert "NIXL must be on or off" in bogus.stderr
+
+
+def test_native_frspec_disk_tier_off_needs_no_nixl_root(tmp_path):
+    # The FR-Spec recipe reaches its pinned-tokenizer check instead of failing
+    # on a NIXL root, config or namespace helper it no longer needs -- and the
+    # root it does not need does not even have to exist.
+    result, argv, _, _ = launch(
+        tmp_path,
+        RECIPES / "serve-flash-next-frspec.sh",
+        through_entrypoint=False,
+        env={"NIXL": "off"},
+        nixl_root=tmp_path / "no nixl root here",
+    )
+    assert result.returncode != 0 and argv is None
+    assert "NIXL config missing" not in result.stderr
+    assert "Required executable missing" not in result.stderr
+    assert "tokenizer differs from the qualified FR-Spec tokenizer" in (result.stderr)
 
 
 if __name__ == "__main__":  # pytest is the real driver; this is a smoke check

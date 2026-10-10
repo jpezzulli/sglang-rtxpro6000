@@ -141,6 +141,10 @@ _qknorm_use_alt_stream = _is_cuda or (
     get_bool_env_var("SGLANG_QK_NORM_ALT_STREAM", "False") and _hip_use_alt_stream
 )
 _is_amx_available = cpu_has_amx_support()
+# The GDN gated-RMSNorm fold gate (donor ``qwen3_5.py:38`` @5105985116eb) is
+# resolved at call time through ``w8a16_gemv.norm_into_gemv_enabled`` -- one
+# tri-state shared with the GEMV's own guard, so import order never pins the
+# two gates apart.
 _is_xpu = is_xpu()
 
 # Head-group ratios (num_v_heads // num_k_heads) served by the fused
@@ -831,6 +835,10 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             core_attn_out_pad[: core_attn_out.shape[0], :] = core_attn_out
             core_attn_out = core_attn_out_pad
 
+        fused = self._norm_out_proj_fused(core_attn_out, z, z_shape_og)
+        if fused is not None:
+            return fused
+
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.reshape(
@@ -840,6 +848,65 @@ class Qwen3_5GatedDeltaNet(nn.Module):
 
         output, _ = self.out_proj(core_attn_out)
         return output
+
+    def _norm_out_proj_fused(self, core_attn_out, z, z_shape_og):
+        """out_proj with the gated RMSNorm folded into its A-load, or None.
+
+        Donor ``qwen3_5.py:1081`` (``_norm_out_proj_fused``)
+        @5105985116eb, verbatim contract. `core_attn_out` / `z` arrive as
+        [rows, head_v_dim] (the norm's own 2-D view, `rows = tokens *
+        num_v_heads`). The out_proj GEMV wants [tokens, num_v_heads *
+        head_v_dim]; since both tensors are row-major and contiguous, that is
+        the same bytes, and each contiguous `head_v_dim` slice of a GEMV row is
+        exactly one norm group. Every deviation from that exact contract --
+        TP2 (donor requires out_proj.tp_size == 1; the RowParallelLinear
+        reduction is never bypassed), a bias, a group/bias/weight mismatch on
+        the norm, a non-CUDA device, a padded/quantized quant method without
+        the scoped ``apply_norm_gated`` (e.g. the generic 27B FP8 methods) --
+        returns None and the caller keeps the original norm + out_proj path.
+        """
+        from sglang.srt.layers.quantization.w8a16_gemv import (
+            norm_into_gemv_enabled,
+        )
+
+        if not (norm_into_gemv_enabled() and _is_cuda) or len(z_shape_og) != 3:
+            return None
+        apply_norm = getattr(self.out_proj.quant_method, "apply_norm_gated", None)
+        if apply_norm is None:
+            return None
+        g = self.head_v_dim
+        if (
+            self.out_proj.tp_size != 1
+            or getattr(self.out_proj, "use_decode_attn_tp", False)
+            or self.out_proj.bias is not None
+            or self.norm.group_size is not None
+            or not self.norm.norm_before_gate
+            or self.norm.bias is not None
+            or self.norm.weight.shape != (g,)
+            or core_attn_out.dim() != 2
+            or core_attn_out.shape[1] != g
+            or core_attn_out.shape != z.shape
+            or not core_attn_out.is_contiguous()
+            or not z.is_contiguous()
+        ):
+            return None
+        act = getattr(self.norm, "activation", "swish")
+        if act not in ("swish", "silu", "sigmoid"):
+            return None
+        tokens = z_shape_og[0]
+        k = z_shape_og[1] * z_shape_og[2]
+        if core_attn_out.shape[0] != tokens * z_shape_og[1]:
+            return None
+        out = apply_norm(
+            self.out_proj,
+            core_attn_out.view(tokens, k),
+            z.view(tokens, k),
+            self.norm.weight,
+            g,
+            self.norm.eps,
+            act == "sigmoid",
+        )
+        return out
 
 
 class Qwen3_5LinearDecoderLayer(nn.Module):

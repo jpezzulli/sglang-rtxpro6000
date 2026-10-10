@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -147,6 +148,36 @@ def _split_hicache_size(
         hicache_size * size_bytes / total_device_pool_size
         for size_bytes in device_pool_sizes
     )
+
+
+def _bias_mamba_host_size(mamba_host_size: float) -> float:
+    """Move host gigabytes from the KV/QSA budget onto Mamba.
+
+    The proportional split follows GPU pool bytes and leaves about 110 host
+    Mamba slots. ``SGLANG_HICACHE_MAMBA_EXTRA_GB`` adds slots without growing
+    the hicache total or the GPU Mamba pool. KV+QSA keeps at least 16 GB.
+    """
+    raw = os.environ.get("SGLANG_HICACHE_MAMBA_EXTRA_GB", "")
+    if not raw:
+        return mamba_host_size
+    try:
+        extra = float(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid SGLANG_HICACHE_MAMBA_EXTRA_GB=%r", raw)
+        return mamba_host_size
+    if extra <= 0:
+        return mamba_host_size
+    budget = float(get_memory().hicache_size)
+    floor = 16.0
+    grown = min(mamba_host_size + extra, max(mamba_host_size, budget - floor))
+    if grown > mamba_host_size:
+        logger.info(
+            "Mamba host pool bias: %.2f GB -> %.2f GB (requested extra %.2f GB)",
+            mamba_host_size,
+            grown,
+            extra,
+        )
+    return grown
 
 
 def build_pool_entry(
@@ -728,6 +759,9 @@ def build_hybrid_mamba_stack(
             kv_host_size, mamba_host_size = _split_hicache_size(
                 get_memory().hicache_size, (kv_pool, mamba_pool)
             )
+            biased = _bias_mamba_host_size(mamba_host_size)
+            kv_host_size = max(0.0, kv_host_size - (biased - mamba_host_size))
+            mamba_host_size = biased
         else:
             qsa_pools = (qsa_pool, *mtp_qsa_device_pools)
             kv_device_bytes = sum(kv_pool.get_kv_size_bytes()) + sum(
@@ -739,14 +773,11 @@ def build_hybrid_mamba_stack(
                 for tensor in pool.qsa_compressed_k_buffer_pool
             )
             mamba_device_bytes = mamba_pool.get_kv_size_bytes()
-            total_device_bytes = (
-                kv_device_bytes + qsa_device_bytes + mamba_device_bytes
-            )
+            total_device_bytes = kv_device_bytes + qsa_device_bytes + mamba_device_bytes
             mamba_host_size = (
-                get_memory().hicache_size
-                * mamba_device_bytes
-                / total_device_bytes
+                get_memory().hicache_size * mamba_device_bytes / total_device_bytes
             )
+            mamba_host_size = _bias_mamba_host_size(mamba_host_size)
             kv_qsa_budget = get_memory().hicache_size - mamba_host_size
             kv_bytes_per_token = (
                 kv_pool.head_dim
@@ -758,13 +789,9 @@ def build_hybrid_mamba_stack(
                 * kv_pool.store_dtype.itemsize
                 * 2
             )
-            qsa_bytes_per_token = QSACompressedPoolHost.bytes_per_full_token(
-                qsa_pools
-            )
+            qsa_bytes_per_token = QSACompressedPoolHost.bytes_per_full_token(qsa_pools)
             host_tokens = int(
-                kv_qsa_budget
-                * 1e9
-                // (kv_bytes_per_token + qsa_bytes_per_token)
+                kv_qsa_budget * 1e9 // (kv_bytes_per_token + qsa_bytes_per_token)
             )
             kv_host_size = host_tokens * kv_bytes_per_token / 1e9
     kv_host_pool = build_kv_host_pool(
@@ -825,8 +852,7 @@ def build_hybrid_mamba_stack(
                 host_pool=qsa_host_pool,
                 device_pool=qsa_pool,
                 layer_mapping=full_layer_mapping,
-                transfer_layer_num=transfer_layer_num
-                + len(mtp_qsa_device_pools),
+                transfer_layer_num=transfer_layer_num + len(mtp_qsa_device_pools),
                 packed_draft_device_pools=mtp_qsa_device_pools,
             )
         )
@@ -1376,9 +1402,7 @@ class _MambaStrategy(StackStrategy):
             kv_pool=kvcache.full_kv_pool,
             mamba_pool=params.req_to_token_pool.mamba_pool,
             qsa_pool=(
-                kvcache
-                if hasattr(kvcache, "qsa_compressed_k_buffer_pool")
-                else None
+                kvcache if hasattr(kvcache, "qsa_compressed_k_buffer_pool") else None
             ),
             full_layer_mapping=full_layer_mapping,
             mamba_layer_mapping=mamba_layer_mapping,
@@ -1411,11 +1435,7 @@ class _MambaStrategy(StackStrategy):
             register_req_to_token_counter=True,
             sidecars=sidecars,
             transfer_layer_num=len(full_layer_mapping | mamba_layer_mapping),
-            pools_desc=(
-                "KV + MAMBA + QSA compressed"
-                if sidecars
-                else "KV + MAMBA"
-            ),
+            pools_desc=("KV + MAMBA + QSA compressed" if sidecars else "KV + MAMBA"),
         )
 
 

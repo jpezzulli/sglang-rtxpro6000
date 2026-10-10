@@ -9,15 +9,17 @@ the dispatch path.
 ## v2.5.0 optional Flash-Next paths
 
 The default Flash-Next backend resolution remains the v2.4.1 layout described
-below. Two independent options change bounded parts of that profile:
+below. The accepted online-FP8 path is now selected automatically for eligible
+Flash-Next SM120 launches, and one bounded placement option remains opt-in:
 
 | Option | Resolved implementation | What remains unchanged |
 |---|---|---|
-| `SGLANG_SM120_ONLINE_MXFP8=true` | Eligible otherwise-unquantized transformer projections use FlashInfer CUTLASS MXFP8 weights and dynamic activations. HyperConnection mix and `lm_head` use row-wise FP8 weights with per-output-row scales. | Checkpoint NVFP4 experts and routers, PLE, QSA, BF16 GDN/convolution state, FP8 KV, native NEXTN and FR-Spec mapping/scale alignment. QSA and GDN state formats stay unchanged. |
+| Online FP8 (automatic; private override `SGLANG_SM120_ONLINE_MXFP8=false/true`) | Eligible otherwise-unquantized transformer projections, HyperConnection mix and `lm_head` use row-wise weight-only FP8 with one FP32 scale per output row, plus the accepted low-row W8A16/GDN-fusion kernels within their contracts. | Checkpoint NVFP4 experts and routers, PLE, QSA, BF16 GDN/convolution state, FP8 KV, native NEXTN and FR-Spec mapping/scale alignment. QSA and GDN state formats stay unchanged. |
 | `PENNY_PLE_BACKEND=nvme` | The attributed SSD Stream reader and existing PLE graph adapter stage rows from a prepared immutable local-NVMe table. | PLE values and precision, hash calculation, QSA, native MTP, attention, MoE and recurrent-state backends. RAM PLE remains the default. |
 
-Online FP8 supports exact SM120 and recognized Flash-Next modules; other
-hardware and selected-module shapes fail at startup. NVMe PLE changes table
+Online FP8 engages automatically on exact SM120 with recognized Flash-Next
+modules; unsupported automatic configurations keep their original paths, while
+explicit requests for them fail at startup. NVMe PLE changes table
 placement while keeping the existing PLE values and math. Its plugin loads only
 when selected.
 See [FP8.md](FP8.md) and [NVME-PLE.md](NVME-PLE.md).
@@ -55,7 +57,7 @@ uses its own attention and feed-forward paths.
 | Target MoE | FlashInfer CUTLASS | Automatic | SM120 modelopt-FP4 resolution in startup log |
 | Native-MTP MoE | FlashInfer CUTLASS | Automatic | resolved speculative MoE backend |
 | HyperConnection Mix | persistent Triton Mix | Automatic fallback | FlashInfer/CuTe path remains SM100-only |
-| Optional online-FP8 projections | FlashInfer CUTLASS MXFP8 plus row-wise FP8 HC mix and output head | Exact-SM120 environment opt-in | real-kernel numerics, changed-input graph replay and live decode |
+| Online-FP8 projections (automatic when eligible) | Row-wise FP8 dense, HC mix and output head plus the accepted low-row kernels | Automatic on exact-SM120 Flash-Next; saved true/false is a private override | real-kernel numerics, changed-input graph replay and live decode |
 | HyperConnection Combine | fused SGLang CUDA | Model path | imported Qwen4 kernel tests |
 | Multimodal attention | `triton_attn` | Automatic | vision qualification |
 | Sampling | FlashInfer | Automatic | startup args |
@@ -145,7 +147,7 @@ listed in their own rows.
 | Target checkpoint | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) recipe reference; retained measurements used the [orcarouter derivative](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8) | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) |
 | Target weight format | block FP8 E4M3, 128x128 blocks | ModelOpt NVFP4, group size 16 on selected Linear modules |
 | Quantized-path activations | dynamic FP8 E4M3 | NVFP4 input activations on selected Linear modules |
-| Runtime dtype for unquantized tensors | BF16; includes excluded layers and BF16 `lm_head` | Default: BF16 for otherwise-unquantized tensors. Optional online FP8 converts eligible transformer linears, HC mix weights and `lm_head`; BF16 GDN state and the existing NVFP4 expert, router and FP8 PLE-table formats remain unchanged. |
+| Runtime dtype for unquantized tensors | BF16; includes excluded layers and BF16 `lm_head` | Default: BF16 for otherwise-unquantized tensors. On eligible SM120 launches, automatic online FP8 converts eligible transformer linears, HC mix weights and `lm_head` to row-wise FP8 (a saved `SGLANG_SM120_ONLINE_MXFP8=false` keeps this row BF16); BF16 GDN state and the existing NVFP4 expert, router and FP8 PLE-table formats remain unchanged. |
 | Target KV datatype | FP8 E4M3 | FP8 E4M3 |
 | Speculative KV datatype | DFlash2 draft: FP8 E4M3 | native-MTP: FP8 E4M3 |
 | Recurrent/GDN SSM state | FP32 | BF16 |
