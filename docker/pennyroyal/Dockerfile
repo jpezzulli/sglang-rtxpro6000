@@ -36,8 +36,8 @@ ARG SOURCE_REPOSITORY=https://github.com/jpezzulli/sglang-rtxpro6000.git
 # runtime libraries. These build-only tools are installed after the stage
 # split, so they never propagate into the final image: CMake, Meson and
 # pkg-config for the NIXL/PLE source builds, Rust and Cargo for the Rust
-# wheels and reader, uv to create the venv below, the protobuf compiler,
-# openssl development headers and findutils.
+# wheels and reader, uv to create the venv below, the protobuf compiler and
+# findutils. OpenSSL headers are also needed in the runtime for HiCache JIT.
 RUN dnf install -y --setopt=install_weak_deps=False --nodocs \
       cmake meson pkgconf-pkg-config openssl-devel protobuf-compiler \
       rust cargo uv findutils \
@@ -105,6 +105,10 @@ RUN bash docker/pennyroyal/build-nixl.sh \
 
 FROM base AS runtime
 ARG SOURCE_REVISION
+# HiCache compiles its native SHA helper on first use and links libcrypto.
+# Keeping only the shared library makes a fresh cache fail at its first insert.
+RUN dnf install -y --setopt=install_weak_deps=False --nodocs openssl-devel \
+    && dnf clean all
 LABEL org.opencontainers.image.title="Pennyroyal SGLang for RTX PRO 6000" \
       org.opencontainers.image.source="https://github.com/jpezzulli/sglang-rtxpro6000" \
       org.opencontainers.image.revision="${SOURCE_REVISION}" \
@@ -125,7 +129,10 @@ ENV CACHE_BASE=/cache NIXL_STORAGE_BASE=/nixl \
 WORKDIR /opt/pennyroyal
 USER penny
 RUN PENNY_EXPECTED_SOURCE_REVISION="$SOURCE_REVISION" pennyroyal --check \
-    && pennyroyal --help
+    && pennyroyal --help \
+    && TORCH_EXTENSIONS_DIR=/tmp/penny-hicache-check .venv/bin/python -c \
+      'from sglang.srt.mem_cache.cpp_utils.native_hash import get_native_hash; assert get_native_hash([1, 2, 3, 4], None, 4)' \
+    && rm -rf /tmp/penny-hicache-check
 EXPOSE 8001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20m --retries=3 \
   CMD ["/opt/pennyroyal/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3).close()"]
