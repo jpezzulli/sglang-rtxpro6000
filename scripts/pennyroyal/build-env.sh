@@ -7,12 +7,18 @@
 #
 #   source scripts/pennyroyal/build-env.sh
 #   export PENNY_BUILD_JOBS=8   # raise the job counts before sourcing to change them
+#
+# TORCH_CUDA_ARCH_LIST covers the generic builds of these instructions for the
+# three supported RTX families (SM86 Ampere, SM89 Ada, SM120 Blackwell), with
+# PTX kept so JIT stays available on newer chips. The accepted SM120 fused-MoE
+# module is not affected: the FlashInfer packaging step pins its own build to
+# 12.0f through FLASHINFER_CUDA_ARCH_LIST.
 : "${CUDA_HOME:=/usr/local/cuda}"
 : "${CUDACXX:=$CUDA_HOME/bin/nvcc}"
 : "${CC:=/usr/bin/gcc-15}"
 : "${CXX:=/usr/bin/g++-15}"
 : "${CUDAHOSTCXX:=$CXX}"
-: "${TORCH_CUDA_ARCH_LIST:=12.0}"
+: "${TORCH_CUDA_ARCH_LIST:=8.6 8.9 12.0+PTX}"
 : "${PENNY_BUILD_JOBS:=4}"
 : "${MAX_JOBS:=$PENNY_BUILD_JOBS}"
 : "${CMAKE_BUILD_PARALLEL_LEVEL:=$PENNY_BUILD_JOBS}"

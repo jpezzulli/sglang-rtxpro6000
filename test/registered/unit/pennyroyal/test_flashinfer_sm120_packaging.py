@@ -450,6 +450,9 @@ def test_installed_check_needs_the_accepted_source_and_the_package_local_module(
         == hashlib.sha256(b"built from patched bytes").hexdigest()
     )
     assert info["flashinfer"] == "9.9.9"
+    # The cubin payload invariant is reported with the rest of the check; a
+    # site without the optional flashinfer-cubin wheel is an accepted state.
+    assert info["cubin_payload"] == {"status": "absent"}
     assert info["accepted_source"] == [
         {
             "patch": str(tmp_path / "generated-source.patch"),

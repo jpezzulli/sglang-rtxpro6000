@@ -129,8 +129,9 @@ do not manually point it at an older namespace.
 ## NIXL POSIX
 
 The native NIXL build used upstream commit
-`aecbc3846d92c34c7507a58d776e1fda50ff4fba`, release mode, SM120, and the
-POSIX plugin. Fetch it separately from its upstream repository.
+`aecbc3846d92c34c7507a58d776e1fda50ff4fba`, release mode, the supported RTX
+SM86/89/120 targets, and the POSIX plugin. Fetch it separately from its
+upstream repository.
 
 Its source build requires Linux, a C++20 compiler, CMake, Meson, Ninja,
 `pkg-config`, and the POSIX plugin's Linux AIO development package
@@ -151,7 +152,7 @@ python -m pip install .
 ./contrib/tomlutil.py --wheel-name nixl-cu13 pyproject.toml
 meson setup build-posix --buildtype=release \
   --prefix="$NIXL_PREFIX" --libdir=lib64 \
-  -Denable_plugins=POSIX -Dnixl_cuda_arch_list=120
+  -Denable_plugins=POSIX -Dnixl_cuda_arch_list=86,89,120
 ninja -C build-posix -j "${PENNY_BUILD_JOBS:-4}" install
 python -m pip install build-posix/src/bindings/python/nixl-meta/nixl-*-py3-none-any.whl
 export LD_LIBRARY_PATH="$NIXL_PREFIX/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -248,10 +249,13 @@ gcc-15 --version
 .venv/bin/python scripts/pennyroyal/flashinfer/install.py --check
 ```
 
-The last command prints the accepted source commits and the installed SM120
-module path, size and SHA-256. It fails on a stock FlashInfer source tree, on an
-unexpected FlashInfer version, and on an environment where the module was never
-built.
+The last command prints the accepted source commits, the installed SM120
+module path, size and SHA-256, and the state of the optional flashinfer-cubin
+payload (pruned, or absent when the wheel is not installed). It fails on a
+stock FlashInfer source tree, on an unexpected FlashInfer version, on an
+environment where the module was never built, and on a cubin wheel that still
+carries the unsupported trtllm-gen payload the packaging step prunes; rerun
+the step itself to prune it.
 
 Then start a real profile with [RUN.md](RUN.md). Confirm the resolved backends,
 KV dtypes, state pools, and CUDA graphs before measuring. `/health` verifies the
@@ -349,6 +353,17 @@ is ignored here -- through the JIT spec's own Ninja build, and installed at
 first place FlashInfer looks. The stock provider wheels can stay for the other
 kernels; the loader prefers the package-local module. No kernel source is
 redesigned, and no host binary or private overlay is copied into the image.
+
+After the module is installed the same step prunes the optional
+`flashinfer-cubin` wheel through the sibling `prune_cubins.py`: it removes only
+the pinned 0.7.0.post1 trtllm-gen cubins whose pinned runners dispatch on SM100,
+SM103 or SM107 alone (`fmhaSm100a|fmhaSm100f|fmhaSm103a|fmhaSm107a...`,
+`..._sm100a|_sm100f|_sm103a|_sm107a.cubin`), which no SM86/89/120 target can
+load, and drops exactly those lines from the distribution RECORD; deep-gemm
+cubins, `checksums.txt`, metadata and licenses are retained untouched. A wheel
+at another version, a changed payload or an unexpected layout fails before the
+first deletion, a repeat run changes nothing, and `--check` verifies the result
+read-only (`prune_cubins.py --site DIR` runs the step on its own).
 
 The build keeps your job budget (`MAX_JOBS`) and your `CXX`, and it honours
 `CUDAHOSTCXX` for nvcc's host compiler. That honouring is a mapping, not a
