@@ -157,7 +157,18 @@ read -r TOKENIZER_SHA _ < <(sha256sum "$TARGET_MODEL/tokenizer.json")
   echo "Target tokenizer differs from the qualified FR-Spec tokenizer" >&2; exit 1;
 }
 SGLANG_REV="$(git -C "$REPO_ROOT" rev-parse --short=10 HEAD)"
-TORCH_VERSION="$("$PYTHON" -c 'import torch; from sglang.srt.utils import resolve_mm_preprocess_device; resolve_mm_preprocess_device(); print(torch.__version__)')"
+PENNY_IDENTITY_PROBE="$("$PYTHON" -c 'import sys; import torch; from sglang.srt.utils import resolve_mm_preprocess_device; resolve_mm_preprocess_device(); from sglang.kernels.ops.gemm.sm120_online_fp8 import launch_precision; print(torch.__version__); print(launch_precision(sys.argv[1]))' "$TARGET_MODEL")"
+TORCH_VERSION="$(printf '%s\n' "$PENNY_IDENTITY_PROBE" | sed -n 1p)"
+# The namespace must name the EFFECTIVE precision, resolved before derivation
+# through the same eligibility logic the runtime applies: automatic and
+# explicit-on share the rowwise_fp8 identity (the legacy "true" named the old
+# mixed-MXFP8 caches), while off and auto-off keep the untouched-weight
+# identity. A probe that cannot answer falls back to the saved explicit choice.
+ONLINE_FP8_PRECISION="$(printf '%s\n' "$PENNY_IDENTITY_PROBE" | sed -n 2p)"
+case "$ONLINE_FP8_PRECISION" in
+  rowwise_fp8|false) ;;
+  *) if [[ "${SGLANG_SM120_ONLINE_MXFP8:-}" == true ]]; then ONLINE_FP8_PRECISION=rowwise_fp8; else ONLINE_FP8_PRECISION=false; fi ;;
+esac
 echo "Media preprocessing: $SGLANG_MM_PREPROCESS_DEVICE ($IMAGE_PROCESSOR_BACKEND); model GPU: cuda:0"
 if [[ "$NIXL" != on ]]; then
   echo "NIXL disk tier: off; GPU radix cache and host-RAM HiCache only"
@@ -173,7 +184,7 @@ else
       --field "image_processor_backend=$IMAGE_PROCESSOR_BACKEND" \
       --field "mm_preprocess_device=$SGLANG_MM_PREPROCESS_DEVICE" \
       --field "draft_token_map_sha256=$TOKEN_MAP_SHA" \
-      --field "online_mxfp8=$SGLANG_SM120_ONLINE_MXFP8" \
+      --field "online_mxfp8=$ONLINE_FP8_PRECISION" \
       --field "context_length=$CONTEXT_LENGTH" \
       --field "tp_size=$TP_SIZE" \
       --field "page_size=$PAGE_SIZE" \

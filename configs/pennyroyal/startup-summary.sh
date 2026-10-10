@@ -20,7 +20,20 @@ pennyroyal_startup_summary() {
   case "${setting[--speculative-algorithm]:-none}" in
     NEXTN)
       profile='Qwen3.8 Flash-Next / native NEXTN MTP'
-      online="${SGLANG_SM120_ONLINE_MXFP8:-false}"
+      # Report the effective behavior, not a manufactured default: a saved
+      # explicit choice is named as such, otherwise the eligibility the
+      # recipes resolved before namespace derivation decides.
+      case "${SGLANG_SM120_ONLINE_MXFP8:-}" in
+        true) online='rowwise FP8 (explicit)' ;;
+        false) online='off (explicit opt-out)' ;;
+        *)
+          if [[ "${ONLINE_FP8_PRECISION:-false}" == rowwise_fp8 ]]; then
+            online='rowwise FP8 (automatic)'
+          else
+            online='off (automatic: eligibility not met)'
+          fi
+          ;;
+      esac
       if [[ ${setting[--ple-offload-embedding]:-false} == true ]]; then
         ple='host RAM'
       elif [[ ${PENNY_PLE_BACKEND:-} == nvme ]]; then

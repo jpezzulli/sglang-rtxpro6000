@@ -91,7 +91,7 @@ a checkpoint at `/srv/models/RadixArk-Qwen3.8-Flash-Next-NVFP4` is entered as
   index or UUID when no list is available.
 - **API port** and the two cache sizes below.
 - **Advanced settings**: offered at the end, and skipped by saying no. It
-  covers capacity overrides, online FP8, where the PLE table lives, and the
+  covers capacity overrides, where the PLE table lives, and the
   [WSL2 host-memory workaround](RUN.md#wsl2-host-memory-workaround).
   [RUN.md](RUN.md), [FP8.md](FP8.md), and [NVME-PLE.md](NVME-PLE.md) explain
   those; skipping them keeps the defaults.

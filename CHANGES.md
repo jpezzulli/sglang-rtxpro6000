@@ -20,6 +20,24 @@ automatic release-container builds on the same dependency stack.
 “Local” identifies changes maintained in this fork. Upstream status and PR
 heads are recorded with the release that used them.
 
+## Unreleased (source preparation) — accepted Flash-Next SM120 paths selected by default
+
+- **Automatic default (Local):** the accepted online rowwise-FP8 Flash-Next
+  dense format, HyperConnection mix and output-head conversion, and the
+  accepted low-row companion kernels (W8A16 GEMV, fused gated-RMSNorm GDN
+  out_proj, MTP entry GEMV, draft-MoE GEMV, packed-key softmax router) now
+  select themselves for eligible Flash-Next checkpoints on exact SM120 at
+  fresh or default launches, with no copied benchmark switch and no wizard
+  kernel question. Unset or blank means automatic; unsupported automatic
+  configurations keep their original paths; an explicit unsupported request
+  still fails boot. Saved explicit `true`/`false` values keep propagating
+  verbatim as private compatibility/debug escape hatches, now outside the
+  public setup surface. The NIXL namespace records the effective precision
+  (`rowwise_fp8` or `false`) resolved before startup instead of the requested
+  Boolean, so the accepted rowwise-FP8 caches cannot collide with the old
+  mixed-MXFP8 `online_mxfp8=true` namespaces and off runs keep their prior
+  identity. 27B/DFlash2 behavior is untouched; no kernel math changed.
+
 ## v2.5.3 — Agentic correctness and cache maintenance
 
 The main fixes in this release are the Flash-Next checkpoint error reported in
@@ -70,9 +88,11 @@ BF16 NVMe PLE staging fix previously supplied as an optional v2.5.2 patch.
   ignores `CUDAHOSTCXX`, so the value is mapped onto `CC` in the build subprocess
   environment alone, leaving the caller's `CC`, the C++/link `CXX`, the toolchain
   versions, the job budget and the source patches as they were. A build failure
-  names the host compiler that was actually used and keeps a bounded tail of the
-  compiler's own output, because Ninja's final line is only `build stopped:
-  subcommand failed` and the fatal diagnostic sits above it. The SM120 compile also carries one
+  names the host compiler that was actually used and keeps a bounded tail of each
+  stream the build wrote to, because Ninja's final line is only `build stopped:
+  subcommand failed`, the fatal diagnostic sits above it, and with
+  `FLASHINFER_JIT_VERBOSE=1` inherited FlashInfer puts that output on stdout and
+  raises with nothing embedded, so reading stderr alone would hide it. The SM120 compile also carries one
   build-only guard, `patches/asan-include-compat.patch`, because stock
   `memoryUtils.cu` asked for `<sanitizer/asan_interface.h>` unconditionally and the
   image's `gcc15` package does not install that header: a non-ASAN build now needs

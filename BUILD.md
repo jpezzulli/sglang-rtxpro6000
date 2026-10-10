@@ -358,9 +358,13 @@ nvcc would bind whatever `CC` the environment carried. The step sets `CC` from
 `CUDAHOSTCXX` in the build subprocess environment alone, which leaves your shell
 and the C++/link compiler as they were, and keeps FlashInfer's own `CC` behaviour
 when `CUDAHOSTCXX` is unset. A build failure names the host compiler that was
-really used and repeats the compiler's own output, trimmed to its last 40 lines so
-the fatal diagnostic survives underneath Ninja's `build stopped` summary. This is what lets `CC=/usr/bin/gcc CUDAHOSTCXX=/usr/bin/g++-15` mean
-what it says on a CUDA 13.3 host whose default GCC is too new for the toolkit.
+really used and repeats the build's own output, labelled `stdout`/`stderr` and
+trimmed to the last 40 lines of each, because FlashInfer merges the compiler log
+into stderr normally but leaves it on stdout, with only its own traceback on
+stderr, when `FLASHINFER_JIT_VERBOSE=1` is inherited; either way the fatal
+diagnostic survives underneath Ninja's `build stopped` summary. This is what lets
+`CC=/usr/bin/gcc CUDAHOSTCXX=/usr/bin/g++-15` mean what it says on a CUDA 13.3
+host whose default GCC is too new for the toolkit.
 
 The third input is not one of the fixes. Stock
 `flashinfer/data/csrc/nv_internal/cpp/common/memoryUtils.cu` asks for

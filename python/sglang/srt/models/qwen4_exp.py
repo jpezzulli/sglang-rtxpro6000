@@ -1487,8 +1487,9 @@ class Qwen4ExpLayerExtensionMixin:
                     """Whether ``apply`` would route this call through the GEMV.
 
                     Donor ``Fp8LinearMethod._w8a16_gemv_ok`` (fp8.py:986
-                    @5105985116eb) adapted to this fork's opt-in contract:
-                    the ``SGLANG_FP8_W8A16_GEMV`` switch and the
+                    @5105985116eb) adapted to this fork's selection contract:
+                    the ``SGLANG_FP8_W8A16_GEMV`` tri-state (automatic under
+                    the eligible default selection; saved true/false private) and the
                     ``SGLANG_FP8_W8A16_GEMV_MAX_M`` budget (which the kernel
                     module caps at the donor's M <= 16), and the exact-SM120
                     gate of the online-FP8 feature (installation already

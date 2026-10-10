@@ -322,6 +322,13 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(
             pc.validate_value(specs["SGLANG_SM120_ONLINE_MXFP8"], "YES", "t"), "true"
         )
+        # Blank/auto is the default now: the KeySpec must not materialize a
+        # false for operators who never chose anything (legacy saved true/false
+        # values keep the same Boolean normalization and validation).
+        self.assertEqual(specs["SGLANG_SM120_ONLINE_MXFP8"].default, "")
+        self.assertEqual(
+            pc.validate_value(specs["SGLANG_SM120_ONLINE_MXFP8"], "", "t"), ""
+        )
         self.assertEqual(
             pc.validate_value(specs["SGLANG_MM_PREPROCESS_DEVICE"], "cuda:1", "t"),
             "cuda:1",
@@ -753,6 +760,34 @@ class NativePlanTests(FixtureMixin):
         # Unset recipe-specific keys fall through to the inherited environment.
         self.assertEqual(plan.env["MAX_RUNNING_REQUESTS"], "9")
         self.assertEqual(plan.origins["MAX_RUNNING_REQUESTS"], "inherited environment")
+
+    def test_online_fp8_default_is_automatic_not_a_materialized_opt_out(self):
+        # Fresh/default launches save nothing about the kernel path: the plan
+        # must not manufacture an opt-out the operator never chose.
+        plan = self.native_plan(self.native_env())
+        self.assertNotIn("SGLANG_SM120_ONLINE_MXFP8", plan.env)
+        self.assertEqual(plan.origins["SGLANG_SM120_ONLINE_MXFP8"], "not set")
+        # Saved explicit values propagate unchanged (private escape hatch).
+        plan = self.native_plan(
+            {**self.native_env(), "SGLANG_SM120_ONLINE_MXFP8": "false"}
+        )
+        self.assertEqual(plan.env["SGLANG_SM120_ONLINE_MXFP8"], "false")
+        plan = self.native_plan(
+            {**self.native_env(), "SGLANG_SM120_ONLINE_MXFP8": "true"}
+        )
+        self.assertEqual(plan.env["SGLANG_SM120_ONLINE_MXFP8"], "true")
+        # A saved blank is a decision meaning automatic: it suppresses an
+        # inherited value and exports the empty string, never a false.
+        plan = self.native_plan(
+            {**self.native_env(), "SGLANG_SM120_ONLINE_MXFP8": ""},
+            environ={"SGLANG_SM120_ONLINE_MXFP8": "false"},
+        )
+        self.assertEqual(plan.env["SGLANG_SM120_ONLINE_MXFP8"], "")
+        # Unset with an inherited explicit choice still forwards that choice.
+        plan = self.native_plan(
+            self.native_env(), environ={"SGLANG_SM120_ONLINE_MXFP8": "false"}
+        )
+        self.assertEqual(plan.env["SGLANG_SM120_ONLINE_MXFP8"], "false")
 
     def test_saved_blank_quota_resets_to_the_documented_zero(self):
         # The runtime reads SGLANG_HICACHE_NIXL_MAX_CACHE_GB through an
@@ -1406,6 +1441,26 @@ class ContainerPlanTests(FixtureMixin):
         values = {**self.base_values(), "TARGET_MODEL": "/models/Qwen3.8-27B-FP8"}
         plan = self.container_plan(values, profile="next")
         self.assertEqual(plan.env["TARGET_MODEL"], "/models/Qwen3.8-27B-FP8")
+
+    def test_online_fp8_forwarding_only_carries_concrete_choices(self):
+        # Default: nothing saved, so the generated run.sh forwards no opt-out
+        # and the container starts with automatic selection.
+        plan = self.container_plan(self.base_values())
+        self.assertNotIn("SGLANG_SM120_ONLINE_MXFP8", plan.env)
+        run_text = self.generated(plan)[plan.launch_dir / "run.sh"]
+        self.assertNotIn("SGLANG_SM120_ONLINE_MXFP8", run_text)
+        # A saved explicit opt-out survives generated native and container
+        # launches unchanged.
+        values = {**self.base_values(), "SGLANG_SM120_ONLINE_MXFP8": "false"}
+        plan = self.container_plan(values)
+        self.assertEqual(plan.env["SGLANG_SM120_ONLINE_MXFP8"], "false")
+        run_text = self.generated(plan)[plan.launch_dir / "run.sh"]
+        self.assertIn("-e SGLANG_SM120_ONLINE_MXFP8=false", run_text)
+        plan = self.container_plan(
+            {**self.base_values(), "SGLANG_SM120_ONLINE_MXFP8": "true"}
+        )
+        run_text = self.generated(plan)[plan.launch_dir / "run.sh"]
+        self.assertIn("-e SGLANG_SM120_ONLINE_MXFP8=true", run_text)
 
     def test_paths_outside_the_models_mount_are_rejected(self):
         values = {**self.base_values(), "TARGET_MODEL": "/srv/elsewhere/model"}

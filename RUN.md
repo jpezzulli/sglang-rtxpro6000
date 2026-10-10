@@ -240,9 +240,10 @@ For Flash-Next, confirm:
 - recovery graphs for batch sizes 1-4 by default, or 1-6 with C6; and
 - attached KV, Mamba/PLE, and QSA HiCache pools.
 
-With online FP8, also confirm MXFP8 projection signatures and the row-wise HC
-mix and output-head weights. With NVMe PLE, confirm the prepared-table checksum,
-plugin registration, SSD reader, and separate NIXL namespace. An explicit
+With online FP8 active, also confirm the row-wise FP8 projection signatures
+and the row-wise HC mix and output-head weights. With NVMe PLE, confirm the
+prepared-table checksum, plugin registration, SSD reader, and separate NIXL
+namespace. An explicit
 `MAX_TOTAL_TOKENS` value is a request; the resolved KV capacity is the result.
 
 For 27B, confirm:
@@ -309,24 +310,21 @@ one of the NIXL namespace fields, so the two modes use separate persistent roots
 nothing is deleted, and the root you leave behind stays as ordinary user-owned
 cache.
 
-The two v2.5.0 options are independent. The default recipe uses the original
-checkpoint precision and RAM-backed PLE:
+Online FP8 is the automatic default of the Flash-Next recipes on exact SM120:
+a fresh or default launch needs no kernel switch. The saved private override
+`SGLANG_SM120_ONLINE_MXFP8=false` pins the original checkpoint path (and
+`=true` forces the conversion where eligibility would stay off); read
+[FP8.md](FP8.md) before using either. PLE placement stays a separate, explicit
+choice; the default recipe uses RAM-backed PLE:
 
 ```bash
-unset SGLANG_SM120_ONLINE_MXFP8
 export PENNY_PLE_BACKEND=ram
-```
-
-Enable exact-SM120 online FP8 with a literal `true`:
-
-```bash
-export SGLANG_SM120_ONLINE_MXFP8=true
 ```
 
 This converts eligible otherwise-BF16 transformer projections, HC mix weights,
 and the output head during loading. NVFP4 experts, routers, and PLE remain in
 their checkpoint formats; GDN state remains BF16, KV remains FP8, and FR-Spec
-alignment is unchanged. Read [FP8.md](FP8.md) before enabling it.
+alignment is unchanged.
 
 To stream the PLE table from a prepared local SSD overlay:
 
@@ -379,7 +377,6 @@ FR-Spec defaults remain four requests, 24 Mamba slots, and 824,384 KV tokens. Se
 C6 values before launching either Flash-Next recipe:
 
 ```bash
-export SGLANG_SM120_ONLINE_MXFP8=true
 export SGLANG_MM_PREPROCESS_DEVICE=cpu
 export MAX_RUNNING_REQUESTS=6
 export MAX_MAMBA_CACHE_SIZE=36

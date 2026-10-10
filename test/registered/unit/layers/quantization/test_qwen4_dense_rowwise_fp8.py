@@ -527,7 +527,7 @@ def test_apply_norm_gated_forwards_the_full_contract(
     loaded_layer, sm120_online, monkeypatch
 ):
     _gemv_env(monkeypatch, on=True)
-    monkeypatch.setattr(w8a16_gemv_module, "NORM_INTO_GEMV", True)
+    monkeypatch.setattr(w8a16_gemv_module, "norm_into_gemv_enabled", lambda: True)
     # the real support helper is CPU-declining (x.is_cuda); its full truth
     # table is donor-AST-identical and covered on-GPU -- forward it here.
     monkeypatch.setattr(
@@ -636,9 +636,9 @@ def test_fused_caller_requires_flag_device_and_method(monkeypatch):
     fused = Qwen3_5GatedDeltaNet._norm_out_proj_fused
 
     monkeypatch.setattr(qwen3_5_module, "_is_cuda", True)
-    monkeypatch.setattr(qwen3_5_module, "_NORM_INTO_GEMV", False)
+    monkeypatch.setattr(w8a16_gemv_module, "norm_into_gemv_enabled", lambda: False)
     assert fused(self, core, z, og) is None and rec.calls == []
-    monkeypatch.setattr(qwen3_5_module, "_NORM_INTO_GEMV", True)
+    monkeypatch.setattr(w8a16_gemv_module, "norm_into_gemv_enabled", lambda: True)
     monkeypatch.setattr(qwen3_5_module, "_is_cuda", False)
     assert fused(self, core, z, og) is None and rec.calls == []
 
@@ -651,9 +651,35 @@ def test_fused_caller_requires_flag_device_and_method(monkeypatch):
     assert fused(none_method, core, z, og) is None
 
 
+def test_norm_fusion_gate_tracks_default_selection_without_copied_flags(monkeypatch):
+    # The two gates (models/qwen3_5.py and w8a16_gemv) resolve through one
+    # call-time function: no import-order pinning, and an eligible automatic
+    # selection enables the fusion without any operator-copied switch, while a
+    # saved explicit false keeps the original separate norm + out_proj path.
+    from sglang.kernels.ops.gemm.sm120_online_fp8 import configure_online_fp8
+
+    monkeypatch.delenv("SGLANG_NORM_INTO_GEMV", raising=False)
+    configure_online_fp8(False, cuda_available=False, capability=None)
+    assert w8a16_gemv_module.norm_into_gemv_enabled() is False
+    configure_online_fp8(
+        None, cuda_available=True, capability=(12, 0), model_eligible=True
+    )
+    assert w8a16_gemv_module.norm_into_gemv_enabled() is True
+    monkeypatch.setenv("SGLANG_NORM_INTO_GEMV", "0")
+    assert w8a16_gemv_module.norm_into_gemv_enabled() is False
+    monkeypatch.delenv("SGLANG_NORM_INTO_GEMV")
+    configure_online_fp8(
+        False, cuda_available=True, capability=(12, 0), model_eligible=True
+    )
+    assert w8a16_gemv_module.norm_into_gemv_enabled() is False
+    monkeypatch.setenv("SGLANG_NORM_INTO_GEMV", "1")
+    assert w8a16_gemv_module.norm_into_gemv_enabled() is True
+    configure_online_fp8(False, cuda_available=False, capability=None)
+
+
 def test_fused_caller_contract_guards(monkeypatch):
     monkeypatch.setattr(qwen3_5_module, "_is_cuda", True)
-    monkeypatch.setattr(qwen3_5_module, "_NORM_INTO_GEMV", True)
+    monkeypatch.setattr(w8a16_gemv_module, "norm_into_gemv_enabled", lambda: True)
     fused = Qwen3_5GatedDeltaNet._norm_out_proj_fused
 
     ok = _RecordingNormMethod(result=torch.zeros(2, HIDDEN))

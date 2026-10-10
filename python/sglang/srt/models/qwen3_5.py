@@ -141,9 +141,10 @@ _qknorm_use_alt_stream = _is_cuda or (
     get_bool_env_var("SGLANG_QK_NORM_ALT_STREAM", "False") and _hip_use_alt_stream
 )
 _is_amx_available = cpu_has_amx_support()
-#: Donor ``qwen3_5.py:38`` @5105985116eb: opt-in gate for folding the GDN
-#: gated RMSNorm into the out_proj GEMV's A-load (``w8a16_gemv.py`` NORM_G).
-_NORM_INTO_GEMV = os.environ.get("SGLANG_NORM_INTO_GEMV", "0") == "1"
+# The GDN gated-RMSNorm fold gate (donor ``qwen3_5.py:38`` @5105985116eb) is
+# resolved at call time through ``w8a16_gemv.norm_into_gemv_enabled`` -- one
+# tri-state shared with the GEMV's own guard, so import order never pins the
+# two gates apart.
 _is_xpu = is_xpu()
 
 # Head-group ratios (num_v_heads // num_k_heads) served by the fused
@@ -864,7 +865,11 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         the scoped ``apply_norm_gated`` (e.g. the generic 27B FP8 methods) --
         returns None and the caller keeps the original norm + out_proj path.
         """
-        if not (_NORM_INTO_GEMV and _is_cuda) or len(z_shape_og) != 3:
+        from sglang.srt.layers.quantization.w8a16_gemv import (
+            norm_into_gemv_enabled,
+        )
+
+        if not (norm_into_gemv_enabled() and _is_cuda) or len(z_shape_og) != 3:
             return None
         apply_norm = getattr(self.out_proj.quant_method, "apply_norm_gated", None)
         if apply_norm is None:

@@ -440,7 +440,7 @@ def enable_draft_moe_gemv(experts: torch.nn.Module) -> bool:
     reason = _layer_unsupported_reason(experts)
     if reason is not None:
         logger.warning(
-            "SGLANG_OPT_DRAFT_MOE_GEMV ignored for layer %d: %s",
+            "draft MoE GEMV ignored for layer %d: %s",
             experts.layer_id,
             reason,
         )

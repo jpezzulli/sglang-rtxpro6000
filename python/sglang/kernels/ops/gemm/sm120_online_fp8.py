@@ -1,16 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded online-FP8 support for Qwen Flash-Next on exact SM120.
+"""Online-FP8 support for Qwen Flash-Next on exact SM120.
 
-Large eligible projections use SGLang's existing MXFP8 quantization method.
-This module owns the two weight-only exceptions: HyperConnection mix weights
-and the language-model head.  Those weights carry one FP32 scale per output
-row on the resident ``Parameter`` so target/draft sharing cannot separate the
-quantized values from their scales.
+Eligible Flash-Next launches select this path automatically: no launch flag
+and no kernel question. An unset or blank ``SGLANG_SM120_ONLINE_MXFP8``
+enables it only for a recognized Flash-Next (qwen4_exp) checkpoint on an
+exact-SM120 CUDA device; anything unsupported simply keeps the original
+paths. Saved explicit true/false values remain private compatibility/debug
+escape hatches, and an explicit unsupported request still fails boot.
+
+Large eligible projections carry one FP32 scale per output row (rowwise
+weight-only FP8, the donor-compatible format); the same rowwise
+representation covers HyperConnection mix weights and the language-model
+head, so target/draft sharing cannot separate the quantized values from
+their scales.
 """
 
 from __future__ import annotations
 
 import functools
+import json
+import os
 from collections.abc import Callable
 
 import torch
@@ -28,32 +37,226 @@ _MAX_KERNEL_ROWS = 32
 _DEQUANT_TARGET_BYTES = 64 * 1024 * 1024
 _SCALE_ATTR = "_sm120_rowwise_scale"
 _online_fp8_enabled = False
+_fast_paths_enabled = False
+
+#: Cache-identity marker for the effective rowwise-FP8 representation.  It is
+#: deliberately neither legacy Boolean: ``online_mxfp8=true`` named the old
+#: mixed-MXFP8 namespaces, while ``false`` names the untouched-BF16 ones that
+#: automatic-off and explicit-off still share.
+ROWWISE_FP8_PRECISION = "rowwise_fp8"
+_OFF_PRECISION = "false"
+
+#: Same checkpoint-metadata families penny_config.py's MODEL_METADATA names.
+_FLASH_NEXT_METADATA = (
+    "qwen4expforconditionalgeneration",
+    "qwen4_exp",
+    "qwen4_exp_text",
+)
 
 
-def configure_online_fp8(
-    requested: bool,
+def _resolve_switch(
+    requested: bool | None,
     *,
     cuda_available: bool,
     capability: tuple[int, int] | None,
+    model_eligible: bool,
+) -> tuple[bool, bool]:
+    """Return (online_fp8, shared fast paths) for one tri-state request.
+
+    ``None`` (unset/blank) selects automatically: accepted kernels on an exact
+    SM120 device for a recognized Flash-Next checkpoint, the original paths
+    otherwise. ``False`` propagates the saved opt-out silently. ``True`` keeps
+    the pre-existing fail-loud contract for explicit unsupported requests.
+    """
+    if requested is False:
+        return False, False
+    if requested is True:
+        if not cuda_available:
+            raise RuntimeError("SGLANG_SM120_ONLINE_MXFP8 requires CUDA")
+        if capability != (12, 0):
+            raise RuntimeError(
+                "SGLANG_SM120_ONLINE_MXFP8 requires exactly SM120; "
+                f"detected compute capability {capability}"
+            )
+        # The shared fast paths stay scoped to the Flash-Next family even
+        # under an explicit request, so a stray true cannot bleed them onto
+        # unrelated models (e.g. the generic 27B FP8 methods).
+        return True, bool(model_eligible)
+    automatic = bool(cuda_available and capability == (12, 0) and model_eligible)
+    return automatic, automatic
+
+
+def configure_online_fp8(
+    requested: bool | None,
+    *,
+    cuda_available: bool,
+    capability: tuple[int, int] | None,
+    model_eligible: bool = False,
 ) -> bool:
-    """Resolve the process switch, rejecting unsupported explicit requests."""
-    global _online_fp8_enabled
-    _online_fp8_enabled = False
-    if not requested:
-        return False
-    if not cuda_available:
-        raise RuntimeError("SGLANG_SM120_ONLINE_MXFP8 requires CUDA")
-    if capability != (12, 0):
-        raise RuntimeError(
-            "SGLANG_SM120_ONLINE_MXFP8 requires exactly SM120; "
-            f"detected compute capability {capability}"
-        )
-    _online_fp8_enabled = True
-    return True
+    """Resolve the process switches, rejecting unsupported explicit requests.
+
+    ``requested`` is the tri-state reading of SGLANG_SM120_ONLINE_MXFP8:
+    None means automatic default selection, True/False are saved explicit
+    choices.  Model eligibility comes from the loaded checkpoint metadata,
+    never from a directory name.
+    """
+    global _online_fp8_enabled, _fast_paths_enabled
+    _online_fp8_enabled, _fast_paths_enabled = _resolve_switch(
+        requested,
+        cuda_available=cuda_available,
+        capability=capability,
+        model_eligible=model_eligible,
+    )
+    return _online_fp8_enabled
 
 
 def online_fp8_enabled() -> bool:
     return _online_fp8_enabled
+
+
+def fast_paths_enabled() -> bool:
+    """Whether the accepted shared low-row kernels may engage automatically.
+
+    True exactly when the eligible Flash-Next/SM120 default selection (or an
+    explicit request on an eligible model) turned the rowwise-FP8 bundle on.
+    """
+    return _fast_paths_enabled
+
+
+def gated_by_fast_paths(explicit: bool | None) -> bool:
+    """Shared tri-state for the accepted companion kernels.
+
+    A saved explicit true/false wins verbatim (private escape hatch); unset or
+    blank follows the resolved default selection, so the whole accepted bundle
+    engages or retreats together and never leaks onto other models.
+    """
+    return _fast_paths_enabled if explicit is None else explicit
+
+
+def _metadata_names(node: object, depth: int, names: set[str]) -> None:
+    if node is None or depth > 1 or isinstance(node, (str, int, float, bool)):
+        return
+    if isinstance(node, dict):
+        architectures = node.get("architectures")
+        model_type = node.get("model_type")
+        text_config = node.get("text_config")
+    else:
+        architectures = getattr(node, "architectures", None)
+        model_type = getattr(node, "model_type", None)
+        text_config = getattr(node, "text_config", None)
+    for architecture in architectures or ():
+        names.add(str(architecture).lower())
+    if isinstance(model_type, str):
+        names.add(model_type.lower())
+    _metadata_names(text_config, depth + 1, names)
+
+
+def flash_next_metadata(config: object) -> bool:
+    """Whether checkpoint metadata names the Flash-Next (qwen4_exp) family.
+
+    Accepts the loaded hf config object or a raw config.json mapping -- the
+    actual model identity, never a filename.  Unknown architectures stay
+    ineligible: they keep their original paths instead of guessing.
+    """
+    names: set[str] = set()
+    _metadata_names(config, 0, names)
+    return bool(names & frozenset(_FLASH_NEXT_METADATA))
+
+
+def _metadata_flag_true(node: object, key: str, depth: int = 0) -> bool:
+    if node is None or depth > 1 or isinstance(node, (str, int, float, bool)):
+        return False
+    if isinstance(node, dict):
+        flagged = node.get(key)
+        text_config = node.get("text_config")
+    else:
+        flagged = getattr(node, key, None)
+        text_config = getattr(node, "text_config", None)
+    return bool(flagged is True) or _metadata_flag_true(text_config, key, depth + 1)
+
+
+def flash_next_eligible(model_config: object) -> bool:
+    """Whether the ACTUAL loaded configuration can run the accepted
+    rowwise-FP8 representation, reusing the accepted contracts verbatim -- no
+    new support invented here:
+
+    * Flash-Next (qwen4_exp) checkpoint metadata, the only family whose
+      modules consume the conversion;
+    * a BF16 compute dtype: ``replace_linear_weight_rowwise_fp8`` and the
+      accepted dense conversion quantize the resident BF16 checkpoint weight
+      and refuse any other dtype (float16 included), so automatic selection
+      stays off rather than booting into that rejection;
+    * untied input/lm_head weights: the accepted Qwen4Exp post-load contract
+      rejects ``tie_word_embeddings=True`` under online FP8.
+    """
+    hf_config = getattr(model_config, "hf_config", None)
+    if hf_config is None or not flash_next_metadata(hf_config):
+        return False
+    if getattr(model_config, "dtype", None) is not torch.bfloat16:
+        return False
+    return not _metadata_flag_true(hf_config, "tie_word_embeddings")
+
+
+def _read_checkpoint_metadata(model_path: str) -> dict | None:
+    try:
+        with open(os.path.join(model_path, "config.json"), encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def resolve_precision(
+    requested: bool | None,
+    *,
+    cuda_available: bool,
+    capability: tuple[int, int] | None,
+    model_eligible: bool,
+) -> str:
+    """Effective-precision cache identity, resolved before startup.
+
+    Automatic and explicit-on select the same accepted rowwise-FP8
+    representation and must agree on one identity the legacy
+    ``online_mxfp8=true`` mixed-MXFP8 namespaces cannot claim; automatic-off
+    and explicit-off keep the untouched-weight identity they already had.
+    An explicit request names the rowwise build even on hardware where the
+    runtime will fail boot before any cache is touched.
+    """
+    if requested is True:
+        return ROWWISE_FP8_PRECISION
+    if (
+        requested is None
+        and cuda_available
+        and capability == (12, 0)
+        and model_eligible
+    ):
+        return ROWWISE_FP8_PRECISION
+    return _OFF_PRECISION
+
+
+def launch_precision(
+    model_path: str, *, compute_dtype: torch.dtype = torch.bfloat16
+) -> str:
+    """Effective precision for one launch, from the same eligibility logic
+    ``configure_online_fp8`` applies -- shared by the runtime default and the
+    recipe/container identity probes, so public direct launches and recipe
+    launches cannot disagree about which cache a run may read.  The recipe
+    callers pin ``--dtype bfloat16`` in their own launch line, so the dtype
+    half of the accepted representation contract is the keyword default; the
+    tied-head half is read from the checkpoint's own config.json metadata."""
+    metadata = _read_checkpoint_metadata(model_path)
+    model_eligible = (
+        flash_next_metadata(metadata)
+        and compute_dtype is torch.bfloat16
+        and not _metadata_flag_true(metadata, "tie_word_embeddings")
+    )
+    available = torch.cuda.is_available()
+    return resolve_precision(
+        envs.SGLANG_SM120_ONLINE_MXFP8.get(),
+        cuda_available=available,
+        capability=torch.cuda.get_device_capability() if available else None,
+        model_eligible=model_eligible,
+    )
 
 
 def quantize_rowwise_fp8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -315,8 +518,12 @@ def _rowwise_fp8_gemv_kernel(
 
 
 def w8a16_gemv_enabled() -> bool:
-    """Whether the opt-in donor W8A16 output-head fast path may be considered."""
-    return bool(envs.SGLANG_FP8_W8A16_GEMV.get())
+    """Whether the accepted donor W8A16 output-head fast path may be considered.
+
+    The eligible default selection turns the whole bundle on; a saved explicit
+    true/false remains the private compatibility/debug override.  Larger rows
+    and unsupported layouts keep the original kernel regardless."""
+    return gated_by_fast_paths(envs.SGLANG_FP8_W8A16_GEMV.get())
 
 
 def _prealloc_w8a16_gemv_scratch(device: torch.device) -> None:
@@ -379,11 +586,13 @@ def rowwise_fp8_lm_head_logits(
             "SM120 online FP8 lm_head input width does not match its weight"
         )
     rows, columns = hidden_2d.shape[0], weight.shape[0]
-    # Opt-in candidate (SGLANG_FP8_W8A16_GEMV=1): the donor's low-row W8A16 GEMV
-    # on the resident weight/scale as they are, with no requantization and no
-    # second copy.  Everything outside its contract -- larger batches such as
-    # C6's 24-row verification and prefill, other dtypes or layouts -- keeps the
-    # original kernel and dequantizing fallback below, untouched for comparison.
+    # Accepted low-row candidate: the donor's W8A16 GEMV on the resident
+    # weight/scale as they are, with no requantization and no second copy --
+    # engaged automatically for the eligible default selection (or a saved
+    # explicit SGLANG_FP8_W8A16_GEMV=1).  Everything outside its contract --
+    # larger batches such as C6's 24-row verification and prefill, other
+    # dtypes or layouts -- keeps the original kernel and dequantizing
+    # fallback below, untouched for comparison.
     if w8a16_gemv_supported(hidden_2d, weight, scale):
         from sglang.srt.layers.quantization.w8a16_gemv import w8a16_gemv
 

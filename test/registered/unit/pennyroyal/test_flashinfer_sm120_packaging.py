@@ -514,8 +514,11 @@ def test_a_failed_build_keeps_the_compiler_diagnostic(tmp_path, monkeypatch):
     """Ninja's summary line is not the diagnostic, and the wrapper must not hide it.
 
     A real FlashInfer compile failure ends in "ninja: build stopped: subcommand
-    failed."; the fatal error an operator needs is further up. The report has to
-    carry that output and the effective host compiler together.
+    failed."; the fatal error an operator needs is further up. Which stream it is on
+    depends on FLASHINFER_JIT_VERBOSE, because run_ninja pipes the merged build
+    output into stderr normally but lets ninja write to the child's own stdout, and
+    raises with nothing embedded, when verbose. Both variants have to survive with
+    the effective host compiler next to them.
     """
     module = installer()
     source = synthetic_source(tmp_path)
@@ -545,27 +548,71 @@ def test_a_failed_build_keeps_the_compiler_diagnostic(tmp_path, monkeypatch):
         ]
     )
 
-    def failing_run(*args, **kwargs):
-        raise subprocess.CalledProcessError(1, args[0], output="", stderr=stderr)
-
-    monkeypatch.setattr(module.subprocess, "run", failing_run)
-    raises(
-        lambda: module.install_accepted_source(package, source),
-        "fatal error: sanitizer/asan_interface.h: No such file or directory",
+    fatal = (
+        "/usr/lib/python3.12/site-packages/flashinfer/data/csrc/nv_internal/"
+        "cpp/common/memoryUtils.cu:18:10: fatal error: "
+        "sanitizer/asan_interface.h: No such file or directory"
     )
-    # Both facts are in the one message: the output that matters, and the
-    # compiler that produced it. Truncation is bounded and says so.
-    try:
-        module.install_accepted_source(package, source)
-    except RuntimeError as error:
-        report = str(error)
-    assert "/usr/bin/g++-15 (CUDAHOSTCXX)" in report, report
-    assert "ninja: build stopped: subcommand failed." in report, report
-    assert "MAX_JOBS=24" in report, report
-    # The excerpt is the bounded tail, and it says how much came before it.
+    compiler_output = "\n".join(
+        lines
+        + [
+            fatal,
+            "   18 | #include <sanitizer/asan_interface.h>",
+            "compilation terminated.",
+        ]
+    )
+    summary = "ninja: build stopped: subcommand failed."
+    # FlashInfer's own traceback, with no build output embedded, is all verbose
+    # mode leaves on stderr.
+    traceback_only = "\n".join(
+        [
+            "Traceback (most recent call last):",
+            '  File "<string>", line 12, in <module>',
+            "  File .../flashinfer/jit/cpp_ext.py, line 415, in run_ninja",
+            "    raise RuntimeError(msg) from e",
+            'RuntimeError: Ninja build failed."',
+            summary,
+        ]
+    )
     tail = module.BUILD_ERROR_TAIL_LINES
-    assert f"[... {len(lines) + 5 - tail} earlier lines ...]" in report, report
-    assert report.splitlines()[-tail:] == stderr.splitlines()[-tail:], report
+
+    def report_for(output, stderr):
+        def failing_run(*args, **kwargs):
+            raise subprocess.CalledProcessError(
+                1, args[0], output=output, stderr=stderr
+            )
+
+        monkeypatch.setattr(module.subprocess, "run", failing_run)
+        try:
+            module.install_accepted_source(package, source)
+        except RuntimeError as error:
+            return str(error)
+        raise AssertionError("the build failure did not surface")
+
+    # The default shape: FlashInfer captures the merged build output into stderr.
+    merged = compiler_output + "\n" + summary
+    report = report_for("", merged)
+    assert fatal in report, report
+    assert summary in report, report
+    # Both facts are in the one message, and truncation is bounded and says so.
+    assert "/usr/bin/g++-15 (CUDAHOSTCXX)" in report, report
+    assert "MAX_JOBS=24" in report, report
+    assert "--- stderr ---" in report, report
+    assert f"[... {len(merged.splitlines()) - tail} earlier stderr lines ...]" in report
+    assert report.splitlines()[-tail:] == merged.splitlines()[-tail:], report
+
+    # The verbose shape: the build output went to the child's stdout, so stderr
+    # alone would show a traceback and a summary and hide the fatal error.
+    report = report_for(compiler_output + "\n" + summary, traceback_only)
+    assert fatal in report, report
+    assert "--- stdout ---" in report and "--- stderr ---" in report, report
+    assert "RuntimeError: Ninja build failed." in report, report
+    assert (
+        report.index("--- stdout ---")
+        < report.index(fatal)
+        < report.index("--- stderr ---")
+    )
+    assert "/usr/bin/g++-15 (CUDAHOSTCXX)" in report, report
     # An empty failure still says so instead of reporting an empty line.
     monkeypatch.setattr(
         module.subprocess,

@@ -146,7 +146,7 @@ class Prompt:
 # Prompt order for the wizard: basic section first, advanced on request.
 # The keys a normal first run should not have to think about (the sglang and
 # python programs, the image, the runtime identity, the NIXL prefix, the
-# capacity/FP8/PLE knobs) are all advanced=True in penny_config.py, so they
+# capacity and PLE knobs) are all advanced=True in penny_config.py, so they
 # only appear when the operator says yes to the advanced section.
 _BASIC_ORDER = (
     "REPO_ROOT",
@@ -172,7 +172,6 @@ _ADVANCED_ORDER = (
     "GROUP_ID",
     "PENNY_PLE_BACKEND",
     "PENNY_PLE_NVME_MODEL",
-    "SGLANG_SM120_ONLINE_MXFP8",
     "SGLANG_HICACHE_TORCH_PINNED_ALLOC",
     "SGLANG_MM_PREPROCESS_DEVICE",
     "SGLANG_FORWARD_UNKNOWN_TOOLS",
@@ -183,6 +182,11 @@ _ADVANCED_ORDER = (
     "PENNY_BUILD_JOBS",
     "NIXL_PREFIX",
 )
+# Private kernel-path escape hatches: still validated, adopted, forwarded and
+# re-saved verbatim (see the saved-key preservation pass below), but never
+# asked about -- eligible Flash-Next SM120 launches choose the accepted paths
+# automatically, so a normal setup has no kernel questions to answer.
+_PRIVATE_KEYS = frozenset({"SGLANG_SM120_ONLINE_MXFP8"})
 _ALWAYS_REQUIRED = (
     "TARGET_MODEL",
     "DRAFT_MODEL",
@@ -255,7 +259,6 @@ _EXPLANATIONS = {
     "RAM cache size above",
     "PENNY_PLE_NVME_MODEL": "the prepared NVMe snapshot folder, when PLE lives "
     "on NVMe",
-    "SGLANG_SM120_ONLINE_MXFP8": "read the FP8 guide before switching this on",
     "SGLANG_HICACHE_TORCH_PINNED_ALLOC": "allocate the RAM cache's host buffers "
     "as pinned host memory, the workaround "
     "for HiCache transfers under WSL2; "
@@ -303,12 +306,16 @@ def ordered_names(mode: str, advanced: bool = False) -> list[str]:
     names = [
         name
         for name in order
-        if name in specs and bool(specs[name].advanced) == advanced
+        if name in specs
+        and bool(specs[name].advanced) == advanced
+        and name not in _PRIVATE_KEYS
     ]
     names += [
         name
         for name in specs
-        if name not in order and bool(specs[name].advanced) == advanced
+        if name not in order
+        and name not in _PRIVATE_KEYS
+        and bool(specs[name].advanced) == advanced
     ]
     return names
 
@@ -595,14 +602,13 @@ def run_session(
         answers["DRAFT_MODEL"] = saved["DRAFT_MODEL"]
 
     if prompt.confirm(
-        "\nConfigure the advanced section (capacity, online FP8, "
-        "PLE placement, runtime identity, installation "
-        "overrides)?",
+        "\nConfigure the advanced section (capacity, PLE placement, runtime "
+        "identity, installation overrides)?",
         default=False,
     ):
         prompt.say(
             f"  The advanced section covers {_ADVANCED_NOTE}, plus the "
-            "capacity, FP8, and PLE knobs. Your saved overrides for "
+            "capacity and PLE knobs. Your saved overrides for "
             "them are offered as defaults, so Enter keeps what you "
             "already chose."
         )
@@ -680,6 +686,17 @@ def run_session(
             ),
             ("advanced (optional)", entries(ordered_names(mode, advanced=True))),
         ]
+        # Saved private kernel-path escape hatches (never asked: default
+        # selection owns those paths) re-save verbatim through this pass, the
+        # same way the wizard's own answers do.
+        asked_anywhere = {name for name, _ in sections[0][1]} | {
+            name for name, _ in sections[1][1]
+        }
+        private = entries(
+            [name for name in sorted(answers) if name not in asked_anywhere]
+        )
+        if private:
+            sections.append(("private overrides (kept as saved)", private))
         if preserved:
             sections.append(("kept from the previous file", sorted(preserved.items())))
         header = (

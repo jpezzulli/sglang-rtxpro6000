@@ -242,11 +242,11 @@ SHARED_KEYS: tuple[KeySpec, ...] = (
     ),
     KeySpec(
         "SGLANG_SM120_ONLINE_MXFP8",
-        "online FP8 for FP4 checkpoints",
+        "online FP8 kernel path (blank = automatic: eligible Flash-Next SM120 "
+        "launches use the accepted rowwise-FP8 paths on their own; a saved "
+        "true/false is the private compatibility escape hatch)",
         "bool",
-        default="false",
         advanced=True,
-        prompt="Online FP8 for FP4 checkpoints (true or false)",
     ),
     KeySpec(
         "SGLANG_MM_PREPROCESS_DEVICE",

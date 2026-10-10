@@ -67,7 +67,10 @@ class StartupSummaryTest(unittest.TestCase):
 
         self.assertIn("Profile: Qwen3.8 Flash-Next / native NEXTN MTP | TP: 2", output)
         self.assertIn("Model: /models/Flash Next [qualified]", output)
-        self.assertIn("FR-Spec: on | Online FP8: true | KV dtype: fp8_e4m3", output)
+        self.assertIn(
+            "FR-Spec: on | Online FP8: rowwise FP8 (explicit) | KV dtype: fp8_e4m3",
+            output,
+        )
         self.assertIn("Context: 524288 tokens | KV cap: 824384", output)
         self.assertIn("Max running requests: 4 | Mamba slots: 24", output)
         self.assertIn("PLE: host RAM | HiCache: true | Host tier: 32 GB", output)
@@ -92,6 +95,27 @@ class StartupSummaryTest(unittest.TestCase):
         self.assertIn(
             "Media preprocessing: secondary GPU (cuda:2) (transformers)", output
         )
+
+    def test_nextn_reports_the_automatic_rowwise_selection(self):
+        # No saved choice: the summary reports the effective behavior the
+        # recipes resolved before launching, not a manufactured opt-out.
+        output = self.summary(
+            "serve",
+            "--model-path=/models/next",
+            "--speculative-algorithm=NEXTN",
+            env={
+                "ONLINE_FP8_PRECISION": "rowwise_fp8",
+                "SGLANG_MM_PREPROCESS_DEVICE": "cpu",
+            },
+        )
+        self.assertIn("Online FP8: rowwise FP8 (automatic)", output)
+        output = self.summary(
+            "serve",
+            "--model-path=/models/next",
+            "--speculative-algorithm=NEXTN",
+            env={"SGLANG_MM_PREPROCESS_DEVICE": "cpu"},
+        )
+        self.assertIn("Online FP8: off (automatic: eligibility not met)", output)
 
     def test_nextn_nvme_ple_and_main_gpu(self):
         output = self.summary(

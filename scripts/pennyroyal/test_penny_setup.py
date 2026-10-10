@@ -543,7 +543,6 @@ class SetupSessionTests(FixtureMixin):
                 "y",  # yes to the advanced section
                 "",  # PLE placement menu: Enter keeps ram
                 "/nvme-unused-with-ram",  # free-text path stays free text
-                "true",  # online FP8 chosen from its menu
                 "",  # WSL2 host memory: Enter keeps false
                 "",  # forward tools: Enter keeps true
                 "",
@@ -566,9 +565,36 @@ class SetupSessionTests(FixtureMixin):
         self.assertIn("must be cpu or cuda:N, got 'cuda:junk'", output)
         saved = pc.read_env_file(path)
         self.assertEqual(saved["SGLANG_MM_PREPROCESS_DEVICE"], "cuda:1")
-        # A boolean advanced key is also a menu: [1]/'true' selected true.
-        self.assertEqual(saved["SGLANG_SM120_ONLINE_MXFP8"], "true")
+        # A boolean advanced key is also a menu (WSL2 host memory row).
         self.assertIn("[1] true\n  [2] false", output)
+        # The kernel path is chosen automatically now: the wizard never asks,
+        # nothing is saved, and no option was manufactured.
+        self.assertNotIn("Online FP8", output)
+        self.assertNotIn("SGLANG_SM120_ONLINE_MXFP8", saved)
+
+    def test_saved_online_fp8_opt_out_survives_reruns_without_being_asked(self):
+        base = self.basics(str(self.next_model))
+        code, output, path = self.run_setup(["next"] + base + ["n", "y"])
+        self.assertEqual(code, 0, output)
+        saved = pc.read_env_file(path)
+        self.assertNotIn("SGLANG_SM120_ONLINE_MXFP8", saved)
+        # A private escape hatch in the file is kept verbatim through a rerun
+        # and never re-asked.
+        existing = (
+            f"{pc.PROFILE_KEY}=next\n"
+            + "\n".join(
+                f"{key}={pc.quote_value(value)}"
+                for key, value in sorted(saved.items())
+                if key != pc.PROFILE_KEY
+            )
+            + "\nSGLANG_SM120_ONLINE_MXFP8=false\n"
+        )
+        code, output, path = self.run_setup(
+            ["next"] + base + ["n", "y"], existing=existing
+        )
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("Online FP8", output)
+        self.assertEqual(pc.read_env_file(path)["SGLANG_SM120_ONLINE_MXFP8"], "false")
 
     def test_wsl2_host_memory_workaround_lives_in_the_advanced_section(self):
         # Declined advanced section: the question is never asked and nothing is
@@ -584,7 +610,6 @@ class SetupSessionTests(FixtureMixin):
         advanced = [
             "",
             str(self.base / "ple-snap"),
-            "",
             "yes",  # WSL2 host-memory workaround
             "",
             "",
@@ -620,9 +645,9 @@ class SetupSessionTests(FixtureMixin):
             [""]
             + self.basics(str(self.next_model))
             + ["y"]
-            + advanced[:3]
+            + advanced[:2]
             + ["no"]
-            + advanced[4:]
+            + advanced[3:]
             + ["y"],
             config_path=self.base / "wsl2-off.env",
         )

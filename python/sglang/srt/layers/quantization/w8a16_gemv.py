@@ -21,7 +21,10 @@
 #     qwen4_exp_mtp.py:32/280/331 @5105985).
 #   * `_workspace_slot` raises instead of silently allocating during a capture;
 #   * `prealloc`'s documented caller is this fork's rowwise-FP8 output heads
-#     (`sglang.kernels.ops.gemm.sm120_online_fp8`), not `Fp8LinearMethod`.
+#     (`sglang.kernels.ops.gemm.sm120_online_fp8`), not `Fp8LinearMethod`;
+#   * the fused-norm gate is `norm_into_gemv_enabled()`, a call-time tri-state
+#     resolution (saved explicit SGLANG_NORM_INTO_GEMV wins; unset follows the
+#     Flash-Next/SM120 default selection), not a raw import-time env read.
 """Triton W8A16 skinny GEMM: y[M,N] = x[M,K](bf16) @ W[N,K](fp8 e4m3)^T * scale[N] (fp32).
 Targets decode/verify shapes (M <= 16). Weight-only FP8: no activation quantization.
 
@@ -59,6 +62,7 @@ import triton
 import triton.language as tl
 
 from sglang.kernels.triton_pdl import PDL, pdl_trigger, pdl_wait
+from sglang.srt.environ import envs
 
 
 def _env_flag(name: str, default: str = "0") -> bool:
@@ -728,7 +732,23 @@ def w8a16_gemv(
 # `silu` form, the bf16 rounding before the dot) is reproduced exactly.
 # ---------------------------------------------------------------------------
 
-NORM_INTO_GEMV = _env_flag("SGLANG_NORM_INTO_GEMV")
+
+def norm_into_gemv_enabled() -> bool:
+    """Gate for the fused gated-RMSNorm prologue.
+
+    One call-time resolution shared by both callers (``models/qwen3_5.py`` and
+    ``w8a16_gemv_norm_gated_supported`` below), so import order can never pin
+    one gate and not the other.  A saved explicit true/false is honored
+    verbatim as the private escape hatch it always was; unset or blank follows
+    the accepted Flash-Next/SM120 default selection
+    (``sglang.kernels.ops.gemm.sm120_online_fp8.fast_paths_enabled``).
+    """
+    explicit = envs.SGLANG_NORM_INTO_GEMV.get()
+    if explicit is None:
+        from sglang.kernels.ops.gemm.sm120_online_fp8 import fast_paths_enabled
+
+        return fast_paths_enabled()
+    return explicit
 
 
 # Tiles for the fused-norm variant, keyed (M bucket, N, K, group size). A CTA
@@ -796,7 +816,7 @@ def w8a16_gemv_norm_gated_supported(
     """Whether this call can take the fused gated-RMSNorm + GEMV path."""
     K = x.shape[-1] if x.dim() == 2 else -1
     return bool(
-        NORM_INTO_GEMV
+        norm_into_gemv_enabled()
         and x.is_cuda
         and x.dim() == 2
         and x.dtype == torch.bfloat16

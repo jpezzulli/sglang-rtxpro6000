@@ -342,10 +342,18 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             num_fused_shared_experts=self.num_fused_shared_experts,
             inplace=not _needs_hidden_after_experts,
         )
-        if is_nextn and envs.SGLANG_OPT_DRAFT_MOE_GEMV.get():
-            from sglang.srt.layers.moe.draft_moe_gemv import enable_draft_moe_gemv
+        if is_nextn:
+            # Tri-state: a saved explicit SGLANG_OPT_DRAFT_MOE_GEMV wins; unset
+            # follows the Flash-Next/SM120 default selection, so 27B drafts and
+            # every unsupported automatic case keep the original runner.
+            from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+                gated_by_fast_paths,
+            )
 
-            enable_draft_moe_gemv(self.experts)
+            if gated_by_fast_paths(envs.SGLANG_OPT_DRAFT_MOE_GEMV.get()):
+                from sglang.srt.layers.moe.draft_moe_gemv import enable_draft_moe_gemv
+
+                enable_draft_moe_gemv(self.experts)
 
         self.gate = ReplicatedLinear(
             config.hidden_size,

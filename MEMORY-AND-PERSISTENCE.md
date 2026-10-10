@@ -22,7 +22,7 @@ The two v2.5.0 options affect different memory surfaces:
 
 | Option | GPU effect | Host/storage effect | Cache identity |
 |---|---|---|---|
-| Online FP8 | Selected otherwise-BF16 transformer projections, HyperConnection mix weights and `lm_head` occupy less resident GPU memory. A measured boot left 7.52 GiB available after graphs versus 3.66 GiB in the earlier matching option-off boot. | PLE placement and HiCache are unchanged. | `online_mxfp8` is part of the NIXL namespace. |
+| Online FP8 | On eligible Flash-Next SM120 launches, otherwise-BF16 transformer projections, HyperConnection mix weights and `lm_head` occupy less resident GPU memory. A measured boot left 7.52 GiB available after graphs versus 3.66 GiB in the earlier matching option-off boot. | PLE placement and HiCache are unchanged. | `online_mxfp8` is part of the NIXL namespace and records the EFFECTIVE precision (rowwise-FP8 runs carry the `rowwise_fp8` identity, never the legacy mixed-MXFP8 `true`; off stays `false`). |
 | NVMe PLE | The qualified 824,384-token KV pool and CUDA graphs were retained. | The 47.68 GiB FP8 PLE table lives in a prepared immutable SSD overlay, with bounded staging buffers and reclaimable filesystem cache. | Backend and overlay-manifest identity select a separate NIXL namespace. |
 
 The online-FP8 difference is about 3.86 GiB of post-graph available VRAM; the

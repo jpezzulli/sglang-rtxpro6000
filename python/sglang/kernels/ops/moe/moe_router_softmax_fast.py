@@ -1,4 +1,6 @@
-"""Softmax top-k router on 32-bit packed keys (SGLANG_ROUTER_FAST_TOPK=1).
+"""Softmax top-k router on 32-bit packed keys (selected automatically for
+eligible Flash-Next SM120 launches; SGLANG_ROUTER_FAST_TOPK stays the private
+override).
 
 Same weights and ids as the Triton router (``moe_fused_gate(..., scoring_func="softmax")``), bit for
 bit, for the call ``fused_topk`` makes on CUDA: bf16 logits, the fp32 zero bias, no shared experts /

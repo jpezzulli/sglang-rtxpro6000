@@ -158,9 +158,20 @@ def _get_zero_bias(num_experts: int, device: torch.device) -> torch.Tensor:
 # an accuracy run before becoming the default.
 _skip_hip_pad_mask = get_bool_env_var("SGLANG_MORI_NO_PAD_MASK", "False")
 
-# Packed-key softmax router for bf16 logits (moe_router_softmax_fast.py): the Triton
-# router's weights and ids bit for bit, one warp reduction per pick. Default off.
-_router_fast_topk = get_bool_env_var("SGLANG_ROUTER_FAST_TOPK", "False")
+
+# Packed-key softmax router for bf16 logits (moe_router_softmax_fast.py): the
+# Triton router's weights and ids bit for bit, one warp reduction per pick.
+# Eligible Flash-Next SM120 launches select it through the accepted default
+# selection; elsewhere it stays off unless explicitly requested, and a saved
+# explicit true/false remains the private escape hatch. Resolved per call, so
+# module import order can never pin the decision before model eligibility.
+def _router_fast_topk_enabled() -> bool:
+    explicit = envs.SGLANG_ROUTER_FAST_TOPK.get()
+    if explicit is None:
+        from sglang.kernels.ops.gemm.sm120_online_fp8 import fast_paths_enabled
+
+        return fast_paths_enabled()
+    return explicit
 
 
 if _is_cuda:
@@ -901,7 +912,9 @@ def fused_topk(
             )
 
             zero_bias = _get_zero_bias(gating_output.shape[1], gating_output.device)
-            if _router_fast_topk and _rfast.covered(gating_output, zero_bias, topk):
+            if _router_fast_topk_enabled() and _rfast.covered(
+                gating_output, zero_bias, topk
+            ):
                 topk_weights, topk_ids = _rfast.route_softmax_fast(
                     gating_output, zero_bias, topk, renormalize=renormalize
                 )

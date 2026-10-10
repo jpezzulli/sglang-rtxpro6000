@@ -235,8 +235,10 @@ change to a running deployment, update `.env`, then recreate the container:
 docker compose up -d --force-recreate
 ```
 
-Online FP8 is off by default. Read [`FP8.md`](../../FP8.md), then set
-`SGLANG_SM120_ONLINE_MXFP8=true` to opt in. RAM-backed PLE is the default. The
+Online FP8 is selected automatically for eligible Flash-Next launches on
+exact SM120 — no menu and no copied benchmark switch. Read
+[`FP8.md`](../../FP8.md) for the private `SGLANG_SM120_ONLINE_MXFP8=false`
+opt-out. RAM-backed PLE is the default. The
 Next startup files run the patched FlashInfer GDN prefill kernels in
 FP16-accumulate MMA mode; change the exported value to `0` in the startup file,
 or set `FLASHINFER_GDN_FP16_ACCUM_MMA=0` in `.env` (or pass it with `-e`), to
@@ -291,7 +293,6 @@ For the optional six-request Flash-Next profile, keep preprocessing on the CPU
 and set these values in `.env`:
 
 ```dotenv
-SGLANG_SM120_ONLINE_MXFP8=true
 SGLANG_MM_PREPROCESS_DEVICE=cpu
 MAX_RUNNING_REQUESTS=6
 MAX_MAMBA_CACHE_SIZE=36

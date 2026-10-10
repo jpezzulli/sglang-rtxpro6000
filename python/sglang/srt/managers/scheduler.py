@@ -923,7 +923,15 @@ class Scheduler(
         # Initialize GEMM-related configuration for FP8 and FP4 backends.
         initialize_fp8_gemm_config()
         initialize_fp4_gemm_config()
-        initialize_bf16_gemm_config(self.server_args)
+        # The online-FP8 default selection needs the actual loaded model
+        # configuration (metadata, resolved dtype, head tying) and this
+        # scheduler's assigned device, not a filename or a GPU0 probe.
+        initialize_bf16_gemm_config(
+            self.server_args,
+            model_config=self.model_config,
+            device=get_device().device,
+            gpu_id=self.ps.gpu_id,
+        )
 
         # This must be called after initialize_moe_config
         self.require_mlp_sync = require_mlp_sync()

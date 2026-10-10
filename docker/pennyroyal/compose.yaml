@@ -30,7 +30,11 @@ services:
       SGLANG_HICACHE_TORCH_PINNED_ALLOC: ${SGLANG_HICACHE_TORCH_PINNED_ALLOC:-false}
       PENNY_PLE_BACKEND: ${PENNY_PLE_BACKEND:-ram}
       PENNY_PLE_NVME_MODEL: ${PENNY_PLE_NVME_MODEL:-/models/flash-next-ple}
-      SGLANG_SM120_ONLINE_MXFP8: ${SGLANG_SM120_ONLINE_MXFP8:-false}
+      # Online-FP8 kernel path: empty/unset is automatic (eligible Flash-Next
+      # SM120 launches use the accepted rowwise-FP8 paths on their own); a
+      # saved explicit false/true propagates unchanged as the private escape
+      # hatch. The 27b profile is unaffected (Triton GDN, no Next conversion).
+      SGLANG_SM120_ONLINE_MXFP8: ${SGLANG_SM120_ONLINE_MXFP8:-}
       SGLANG_MM_PREPROCESS_DEVICE: ${SGLANG_MM_PREPROCESS_DEVICE:-cpu}
       SGLANG_FORWARD_UNKNOWN_TOOLS: ${SGLANG_FORWARD_UNKNOWN_TOOLS:-true}
       # Optional launcher-level reasoning-effort default (unset keeps the

@@ -70,7 +70,12 @@ def _mtp_fc_gemv_supported(
     == 1`` lives in ``_plan``'s tile choice; the caller contract this gate
     pins is ``stride(1) == 1`` on every weight and activation.
     """
-    if not envs.SGLANG_MTP_FC_GEMV.get():
+    from sglang.kernels.ops.gemm.sm120_online_fp8 import gated_by_fast_paths
+
+    if not gated_by_fast_paths(envs.SGLANG_MTP_FC_GEMV.get()):
+        # Unset follows the Flash-Next/SM120 default selection (this file's
+        # entry fusion is Flash-Next-draft-only by construction); a saved
+        # explicit true/false remains the private hatch.
         return False
     for tensor in (normed_embeds, hidden_rows):
         if (

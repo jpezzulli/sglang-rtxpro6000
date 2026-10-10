@@ -300,9 +300,9 @@ def test_graph_replay_uses_preallocated_scratch_and_tracks_inputs(dense_layers):
 
 @pytest.fixture
 def norm_flag(monkeypatch):
-    """``NORM_INTO_GEMV`` is an import-time env read; flip the live gate too."""
+    """Force the fused-norm gate on for this kernel check (call-time read)."""
     monkeypatch.setenv(NORM_ENV, "1")
-    monkeypatch.setattr(w8a16_gemv_module, "NORM_INTO_GEMV", True)
+    monkeypatch.setattr(w8a16_gemv_module, "norm_into_gemv_enabled", lambda: True)
 
 
 def test_fused_norm_out_proj_matches_standalone_norm_and_projection(
@@ -372,7 +372,7 @@ def test_fused_norm_out_proj_matches_standalone_norm_and_projection(
     _assert_normalized_error(actual_sig, ref_sig, max_nrmse=0.0125, min_cosine=0.9999)
 
     # flag off -> decline to None (caller keeps the original norm + out_proj)
-    monkeypatch.setattr(w8a16_gemv_module, "NORM_INTO_GEMV", False)
+    monkeypatch.setattr(w8a16_gemv_module, "norm_into_gemv_enabled", lambda: False)
     assert (
         method.apply_norm_gated(
             layer,
@@ -384,7 +384,7 @@ def test_fused_norm_out_proj_matches_standalone_norm_and_projection(
         )
         is None
     )
-    monkeypatch.setattr(w8a16_gemv_module, "NORM_INTO_GEMV", True)
+    monkeypatch.setattr(w8a16_gemv_module, "norm_into_gemv_enabled", lambda: True)
     # larger than the donor budget -> None, and the row still computes via
     # the apply_fp8_linear fallback of apply().
     big = _randn((24 * NUM_V_HEADS, HEAD_V_DIM), seed=403, scale=0.5)

@@ -32,8 +32,10 @@ job-count controls (MAX_JOBS, FLASHINFER_NVCC_THREADS) and the caller's CXX.  Fo
 nvcc's host compiler it honours CUDAHOSTCXX by handing FlashInfer that value as
 CC, because FlashInfer reads CC for -ccbin and ignores CUDAHOSTCXX; without the
 override its existing CC behaviour stands.  A failed build reports that effective
-host compiler along with a bounded tail of the compiler's own output, because
-Ninja's final line is only a summary and the fatal diagnostic sits above it.
+host compiler along with a bounded tail of each stream the build wrote to -- Ninja
+merges the compiler output into stderr, and with FLASHINFER_JIT_VERBOSE=1
+FlashInfer puts it on stdout and keeps only its traceback on stderr -- because
+Ninja's final line is a summary and the fatal diagnostic sits above it.
 FLASHINFER_CUDA_ARCH_LIST is set to the accepted SM120 family target for this
 build because FlashInfer ignores TORCH_CUDA_ARCH_LIST here.  Set
 FLASHINFER_WORKSPACE_BASE to keep the ninja objects between runs.
@@ -253,6 +255,36 @@ def nvcc_host_compiler(env: dict) -> str:
     return f"{cc} (CUDAHOSTCXX)" if env.get("CUDAHOSTCXX") == cc else f"{cc} (CC)"
 
 
+def _build_failure_message(
+    source: dict, env: dict, error: subprocess.CalledProcessError
+) -> str:
+    """Say which compiler ran and keep its own output, bounded per stream.
+
+    Ninja's final line is only a summary, so the tail of the real output is what
+    matters.  Which stream holds it depends on FlashInfer: run_ninja pipes the
+    merged build output into stderr normally, but with FLASHINFER_JIT_VERBOSE=1 it
+    lets ninja write to the child's own stdout and raises with no output embedded,
+    so the diagnostic is in stdout and only the FlashInfer traceback is left on
+    stderr.  Both captured streams are therefore reported, each trimmed to the same
+    tail bound.
+    """
+    parts = []
+    for label, stream in (("stdout", error.output), ("stderr", error.stderr)):
+        lines = str(stream or "").strip().splitlines()
+        if not lines:
+            continue
+        kept = lines[-BUILD_ERROR_TAIL_LINES:]
+        if len(lines) > len(kept):
+            kept = [f"[... {len(lines) - len(kept)} earlier {label} lines ...]", *kept]
+        parts.append(f"--- {label} ---\n" + "\n".join(kept))
+    return (
+        f"the {source['aot_module']} build failed with nvcc host compiler "
+        f"{nvcc_host_compiler(env)}, MAX_JOBS="
+        f"{env.get('MAX_JOBS', 'ninja default')}:\n"
+        + ("\n".join(parts) if parts else "no compiler output")
+    )
+
+
 def install_accepted_source(package: Path, source: dict) -> tuple[Path, str]:
     """Build the patched SM120 module and put it where the loader prefers it.
 
@@ -281,19 +313,7 @@ def install_accepted_source(package: Path, source: dict) -> tuple[Path, str]:
                 text=True,
             )
         except subprocess.CalledProcessError as error:
-            # Ninja's last line is only "build stopped: subcommand failed"; the
-            # compiler diagnostic that matters sits above it, so a bounded tail of
-            # the real output is reported rather than the final summary alone.
-            lines = str(error.stderr or "").strip().splitlines()
-            kept = lines[-BUILD_ERROR_TAIL_LINES:]
-            excerpt = "\n".join(kept) if kept else "no compiler output"
-            if len(lines) > len(kept):
-                excerpt = f"[... {len(lines) - len(kept)} earlier lines ...]\n{excerpt}"
-            raise fail(
-                f"the {source['aot_module']} build failed with nvcc host compiler "
-                f"{nvcc_host_compiler(env)}, MAX_JOBS="
-                f"{env.get('MAX_JOBS', 'ninja default')}:\n{excerpt}"
-            ) from error
+            raise fail(_build_failure_message(source, env, error)) from error
         built = Path(result.stdout.strip().splitlines()[-1])
         module = source["aot_module"]
         if built.parent.name != module or built.name != f"{module}.so":
