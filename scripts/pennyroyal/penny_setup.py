@@ -5,9 +5,14 @@ Stdlib-only terminal wizard. It produces exactly the same validated files as
 the non-interactive path because it shares penny_config.py for the .env-style
 format, validation, and command generation. Rerunning loads existing choices;
 unrecognized advanced keys are preserved; cancelling, EOF, or a declined
-confirmation writes nothing; an existing file is never replaced without consent.
+confirmation writes nothing. Every save is a NEW timestamped settings file (and
+for --container a new timestamped launch folder); a previous file is never
+replaced, renamed, removed or backed up - the operator renames or moves what
+they like and starts the printed command with the exact new outputs.
 
-This utility only writes configuration and prints the next command. It does not
+This utility only writes configuration, and for --container the ordinary
+launch files those settings describe (see the generated run.sh contract in
+scripts/pennyroyal/penny_config.py), then prints the next command. It does not
 download models, install packages, start or restart anything, load a model,
 delete caches, change ownership, run sudo, or touch the network.
 """
@@ -32,9 +37,12 @@ class Cancelled(Exception):
 class Prompt:
     """Small stdin/stdout helper. Empty stdin (EOF) and 'q' always cancel."""
 
-    def __init__(self, stdin: Optional[TextIO] = None,
-                 stdout: Optional[TextIO] = None,
-                 assume_yes: bool = False) -> None:
+    def __init__(
+        self,
+        stdin: Optional[TextIO] = None,
+        stdout: Optional[TextIO] = None,
+        assume_yes: bool = False,
+    ) -> None:
         self.stdin = stdin or sys.stdin
         self.stdout = stdout or sys.stdout
         self.assume_yes = assume_yes
@@ -55,8 +63,7 @@ class Prompt:
         return answer
 
     def ask(self, label: str, default: str = "", allow_empty: bool = False) -> str:
-        suffix = f" [{default}]" if default else (" [optional]" if allow_empty
-                                                  else "")
+        suffix = f" [{default}]" if default else (" [optional]" if allow_empty else "")
         while True:
             answer = self._read(f"{label}{suffix}: ")
             if answer:
@@ -67,8 +74,9 @@ class Prompt:
                 return ""
             self.say("  Enter a value, or 'q' to cancel without saving.")
 
-    def ask_validated(self, label: str, spec: pc.KeySpec, default: str = "",
-                      allow_empty: bool = False) -> str:
+    def ask_validated(
+        self, label: str, spec: pc.KeySpec, default: str = "", allow_empty: bool = False
+    ) -> str:
         # Re-ask on an invalid answer; EOF always raises Cancelled, so the loop
         # cannot trap a piped session.
         while True:
@@ -78,9 +86,14 @@ class Prompt:
             except pc.ConfigError as exc:
                 self.say(f"  {exc}")
 
-    def choose(self, label: str, options: list[tuple[str, str]],
-               default: str = "", accept: Optional[dict[str, str]] = None,
-               manual: Optional[tuple[str, str]] = None) -> str:
+    def choose(
+        self,
+        label: str,
+        options: list[tuple[str, str]],
+        default: str = "",
+        accept: Optional[dict[str, str]] = None,
+        manual: Optional[tuple[str, str]] = None,
+    ) -> str:
         """Numbered menu, printed BEFORE the question.
 
         options are (value, display); manual is one more (value, display) the
@@ -112,39 +125,80 @@ class Prompt:
             hit = (accept or {}).get(answer)
             if hit is not None:
                 return hit
-            self.say("  Pick one of the listed numbers, or Enter for the "
-                     "default; 'q' cancels without saving.")
+            self.say(
+                "  Pick one of the listed numbers, or Enter for the "
+                "default; 'q' cancels without saving."
+            )
 
     def confirm(self, label: str, default: bool = True) -> bool:
         if self.assume_yes:
             return True
         answer = self.choose(
-            label, [("yes", "yes"), ("no", "no")],
+            label,
+            [("yes", "yes"), ("no", "no")],
             default="yes" if default else "no",
             accept={word: "yes" for word in pc.TRUE_VALUES + ("y", "yes")}
-                   | {word: "no" for word in pc.FALSE_VALUES + ("n", "no")})
+            | {word: "no" for word in pc.FALSE_VALUES + ("n", "no")},
+        )
         return answer == "yes"
 
 
 # Prompt order for the wizard: basic section first, advanced on request.
 # The keys a normal first run should not have to think about (the sglang and
 # python programs, the image, the runtime identity, the NIXL prefix, the
-# capacity/FP8/PLE knobs) are all advanced=True in penny_config.py, so they
+# capacity and PLE knobs) are all advanced=True in penny_config.py, so they
 # only appear when the operator says yes to the advanced section.
-_BASIC_ORDER = ("REPO_ROOT", "VENV_PATH", "COMPOSE_FILE", "PENNYROYAL_IMAGE",
-                "HOST_MODELS_ROOT", "TARGET_MODEL", "DRAFT_MODEL",
-                "HOST_CACHE_BASE", "HOST_NIXL_STORAGE_BASE", "CACHE_BASE",
-                "NIXL_STORAGE_BASE", "GPU", "NVIDIA_GPU", "PENNYROYAL_PORT",
-                "SGLANG_HICACHE_NIXL_MAX_CACHE_GB", "PENNY_HICACHE_SIZE_GB")
-_ADVANCED_ORDER = ("USER_ID", "GROUP_ID", "PENNY_PLE_BACKEND",
-                   "PENNY_PLE_NVME_MODEL", "SGLANG_SM120_ONLINE_MXFP8",
-                   "SGLANG_HICACHE_TORCH_PINNED_ALLOC",
-                   "SGLANG_MM_PREPROCESS_DEVICE", "SGLANG_FORWARD_UNKNOWN_TOOLS",
-                   "MAX_RUNNING_REQUESTS", "MAX_MAMBA_CACHE_SIZE",
-                   "MAX_TOTAL_TOKENS", "PENNY_BUILD_JOBS", "NIXL_PREFIX")
-_ALWAYS_REQUIRED = ("TARGET_MODEL", "DRAFT_MODEL", "REPO_ROOT", "VENV_PATH",
-                    "CACHE_BASE", "NIXL_STORAGE_BASE", "HOST_MODELS_ROOT",
-                    "HOST_CACHE_BASE", "HOST_NIXL_STORAGE_BASE", "COMPOSE_FILE")
+_BASIC_ORDER = (
+    "REPO_ROOT",
+    "VENV_PATH",
+    "LAUNCH_DIR",
+    "PENNYROYAL_IMAGE",
+    "HOST_MODELS_ROOT",
+    "TARGET_MODEL",
+    "DRAFT_MODEL",
+    "NIXL",
+    "HOST_CACHE_BASE",
+    "HOST_NIXL_STORAGE_BASE",
+    "CACHE_BASE",
+    "NIXL_STORAGE_BASE",
+    "GPU",
+    "NVIDIA_GPU",
+    "PENNYROYAL_PORT",
+    "SGLANG_HICACHE_NIXL_MAX_CACHE_GB",
+    "PENNY_HICACHE_SIZE_GB",
+)
+_ADVANCED_ORDER = (
+    "USER_ID",
+    "GROUP_ID",
+    "PENNY_PLE_BACKEND",
+    "PENNY_PLE_NVME_MODEL",
+    "SGLANG_HICACHE_TORCH_PINNED_ALLOC",
+    "SGLANG_MM_PREPROCESS_DEVICE",
+    "SGLANG_FORWARD_UNKNOWN_TOOLS",
+    "MAX_RUNNING_REQUESTS",
+    "MAX_MAMBA_CACHE_SIZE",
+    "MAX_TOTAL_TOKENS",
+    "TP_SIZE",
+    "PENNY_BUILD_JOBS",
+    "NIXL_PREFIX",
+)
+# Private kernel-path escape hatches: still validated, adopted, forwarded and
+# re-saved verbatim (see the saved-key preservation pass below), but never
+# asked about -- eligible Flash-Next SM120 launches choose the accepted paths
+# automatically, so a normal setup has no kernel questions to answer.
+_PRIVATE_KEYS = frozenset({"SGLANG_SM120_ONLINE_MXFP8"})
+_ALWAYS_REQUIRED = (
+    "TARGET_MODEL",
+    "DRAFT_MODEL",
+    "REPO_ROOT",
+    "VENV_PATH",
+    "CACHE_BASE",
+    "NIXL_STORAGE_BASE",
+    "HOST_MODELS_ROOT",
+    "HOST_CACHE_BASE",
+    "HOST_NIXL_STORAGE_BASE",
+    "LAUNCH_DIR",
+)
 
 
 # One short plain-English line per question, printed before it. The technical
@@ -152,68 +206,77 @@ _ALWAYS_REQUIRED = ("TARGET_MODEL", "DRAFT_MODEL", "REPO_ROOT", "VENV_PATH",
 # asks about what the thing is for instead of its exported spelling.
 _EXPLANATIONS = {
     "REPO_ROOT": "the folder you unpacked Pennyroyal into; a first run keeps "
-                 "the suggested path",
+    "the suggested path",
     "VENV_PATH": "the Python environment folder holding the sglang command; a "
-                 "first run keeps the suggested path",
+    "first run keeps the suggested path",
     "SGLANG_EXE": "the sglang program itself, only worth changing when that "
-                  "folder layout is unusual",
+    "folder layout is unusual",
     "PYTHON": "the python interpreter that starts the server, only worth "
-              "changing for an unusual layout",
+    "changing for an unusual layout",
     "TARGET_MODEL": "the folder of the downloaded model you want to serve",
     "DRAFT_MODEL": "the smaller model the 27b profile drafts tokens with",
-    "COMPOSE_FILE": "the compose file to run; the shipped one is suggested, so "
-                    "a first run keeps it",
+    "LAUNCH_DIR": "the folder this setup writes your container files into: "
+    "run.sh plus the config folder it mounts; save here, and "
+    "afterwards ./run.sh runs those files with no Python, "
+    "Compose or checkout involved",
     "PENNYROYAL_IMAGE": "which container image to start; change it only to pin "
-                        "a different published tag",
+    "a different published tag",
     "PENNYROYAL_PORT": "the port on this machine the API listens on",
+    "NIXL": "the persistent disk cache tier (the NIXL FILE backend). on is the "
+    "qualified default; off simply drops the disk tier: the GPU radix "
+    "cache, the RAM cache, the model and the speculation settings all "
+    "stay as they are, and nothing on disk is deleted. A 0 budget below "
+    "is an uncapped cache, not this switch",
+    "TP_SIZE": "how many GPUs one model is split across; blank keeps the "
+    "profile's qualified TP1 (TP2 also needs run.sh --gpu 0,1)",
     "CACHE_BASE": "the folder for compiled kernels and runtime files. That is "
-                  "not the RAM model cache and nothing here deletes it",
-    "NIXL_STORAGE_BASE": "the folder the persistent NIXL cache writes to on "
-                         "disk",
+    "not the RAM model cache and nothing here deletes it",
+    "NIXL_STORAGE_BASE": "the folder the persistent NIXL cache writes to on " "disk",
     "HOST_MODELS_ROOT": "the folder on this machine that the container sees as "
-                        "its read-only models folder",
+    "its read-only models folder",
     "HOST_CACHE_BASE": "the folder on this machine that the container uses for "
-                       "compiled kernels and runtime files",
+    "compiled kernels and runtime files",
     "HOST_NIXL_STORAGE_BASE": "the folder on this machine the container uses "
-                              "for its persistent NIXL cache on disk",
+    "for its persistent NIXL cache on disk; not "
+    "mounted, and not asked about again, when the "
+    "disk tier is off",
     "GPU": "which physical graphics card the model gets; the menu lists what "
-           "the machine reported",
+    "the machine reported",
     "NVIDIA_GPU": "which physical graphics card the container may use",
     "SGLANG_MM_PREPROCESS_DEVICE": "where image and audio input is prepared; "
-                                   "the CPU is the qualified default",
+    "the CPU is the qualified default",
     "PENNY_HICACHE_SIZE_GB": "how much system RAM the KV cache's RAM tier may "
-                             "use, in decimal GB (1 GB = 1e9 bytes, not GiB). "
-                             "This is separate from the PLE embedding table, "
-                             "which has its own RAM or NVMe placement, and "
-                             "separate from the compiled cache folder above",
+    "use, in decimal GB (1 GB = 1e9 bytes, not GiB). "
+    "This is separate from the PLE embedding table, "
+    "which has its own RAM or NVMe placement, and "
+    "separate from the compiled cache folder above",
     "SGLANG_HICACHE_NIXL_MAX_CACHE_GB": "a cap in GiB on the persistent NIXL "
-                                        "cache folder on disk. 0 means no cap: "
-                                        "the NIXL cache stays enabled and is "
-                                        "not turned off",
+    "cache folder on disk. 0 means no cap: "
+    "the NIXL cache stays enabled and is "
+    "not turned off",
     "PENNY_PLE_BACKEND": "where the PLE embedding table lives (RAM by default, "
-                         "or a prepared NVMe snapshot); it is unrelated to the "
-                         "RAM cache size above",
+    "or a prepared NVMe snapshot); it is unrelated to the "
+    "RAM cache size above",
     "PENNY_PLE_NVME_MODEL": "the prepared NVMe snapshot folder, when PLE lives "
-                            "on NVMe",
-    "SGLANG_SM120_ONLINE_MXFP8": "read the FP8 guide before switching this on",
+    "on NVMe",
     "SGLANG_HICACHE_TORCH_PINNED_ALLOC": "allocate the RAM cache's host buffers "
-                                         "as pinned host memory, the workaround "
-                                         "for HiCache transfers under WSL2; "
-                                         "leave it off on native Linux",
+    "as pinned host memory, the workaround "
+    "for HiCache transfers under WSL2; "
+    "leave it off on native Linux",
     "SGLANG_FORWARD_UNKNOWN_TOOLS": "pass tool names this build does not know "
-                                    "through to the model",
+    "through to the model",
     "MAX_RUNNING_REQUESTS": "how many requests are admitted at once; leaving "
-                            "it blank uses the recipe default",
+    "it blank uses the recipe default",
     "MAX_MAMBA_CACHE_SIZE": "how many recurrent-state slots are kept; blank "
-                            "uses the recipe default",
+    "uses the recipe default",
     "MAX_TOTAL_TOKENS": "the shared token cap for the KV pool; blank uses the "
-                        "recipe default",
+    "recipe default",
     "PENNY_BUILD_JOBS": "how many compile jobs the first start may run; blank "
-                        "uses the recipe default",
+    "uses the recipe default",
     "NIXL_PREFIX": "where NIXL is installed when that is outside the normal "
-                   "linker path",
+    "linker path",
     "USER_ID": "the numeric user that owns the writable folders inside the "
-               "container",
+    "container",
     "GROUP_ID": "the numeric group that owns those folders",
     "PENNYROYAL_PROFILE": "which model recipe the saved file runs",
 }
@@ -221,9 +284,11 @@ _EXPLANATIONS = {
 # Installer plumbing that only matters when the shipped layout is not the one
 # on this machine, so it waits for the advanced section instead of interrupting
 # a first run.
-_ADVANCED_NOTE = ("the paths of the sglang and python programs, the "
-                  "container image, the runtime user and group, the NIXL "
-                  "install prefix, and the first-start compile jobs")
+_ADVANCED_NOTE = (
+    "the paths of the sglang and python programs, the "
+    "container image, the runtime user and group, the NIXL "
+    "install prefix, and the first-start compile jobs"
+)
 
 
 def _explain(prompt: Prompt, name: str, extra: str = "") -> None:
@@ -238,10 +303,20 @@ def _explain(prompt: Prompt, name: str, extra: str = "") -> None:
 def ordered_names(mode: str, advanced: bool = False) -> list[str]:
     specs = pc.specs_for(mode)
     order = _ADVANCED_ORDER if advanced else _BASIC_ORDER
-    names = [name for name in order
-             if name in specs and bool(specs[name].advanced) == advanced]
-    names += [name for name in specs
-              if name not in order and bool(specs[name].advanced) == advanced]
+    names = [
+        name
+        for name in order
+        if name in specs
+        and bool(specs[name].advanced) == advanced
+        and name not in _PRIVATE_KEYS
+    ]
+    names += [
+        name
+        for name in specs
+        if name not in order
+        and name not in _PRIVATE_KEYS
+        and bool(specs[name].advanced) == advanced
+    ]
     return names
 
 
@@ -263,9 +338,10 @@ def _ask_cuda_id(prompt: Prompt, spec: pc.KeySpec, default: str) -> str:
         answer = prompt.ask(
             "  logical CUDA index of that GPU (a number, e.g. 1 — NOT the "
             "host GPU index; this setup does not map between them)",
-            default=shown)
+            default=shown,
+        )
         text = answer.strip().lower()
-        number = (text[5:] if text.startswith("cuda:") else text)
+        number = text[5:] if text.startswith("cuda:") else text
         try:
             return pc.validate_value(spec, f"cuda:{number}", "your answer")
         except pc.ConfigError as exc:
@@ -288,21 +364,30 @@ def _ask_fixed(prompt: Prompt, spec: pc.KeySpec, default: str) -> str:
     accept = None
     if spec.kind == "bool":
         rows = [("true", "true"), ("false", "false")]
-        accept = ({word: "true" for word in pc.TRUE_VALUES}
-                  | {word: "false" for word in pc.FALSE_VALUES})
+        accept = {word: "true" for word in pc.TRUE_VALUES} | {
+            word: "false" for word in pc.FALSE_VALUES
+        }
     elif spec.kind == "mm-device":
-        rows = [("cpu", "cpu — media preprocessing on the CPU"),
-                ("cuda:0", "cuda:0 — GPU 0, the model's GPU")]
+        rows = [
+            ("cpu", "cpu — media preprocessing on the CPU"),
+            ("cuda:0", "cuda:0 — GPU 0, the model's GPU"),
+        ]
         if default.startswith("cuda:") and default != "cuda:0":
             rows.append((default, f"{default} — the device saved in this file"))
-        rows.append((_MANUAL, "another GPU — type its logical CUDA index "
-                             "(a number; the setup never maps the host GPU "
-                             "index to a CUDA id)"))
+        rows.append(
+            (
+                _MANUAL,
+                "another GPU — type its logical CUDA index "
+                "(a number; the setup never maps the host GPU "
+                "index to a CUDA id)",
+            )
+        )
     else:
         rows = [(c, c) for c in spec.choices]
     while True:
-        answer = prompt.choose(spec.prompt or spec.name, rows,
-                               default=default, accept=accept)
+        answer = prompt.choose(
+            spec.prompt or spec.name, rows, default=default, accept=accept
+        )
         if answer == _MANUAL:
             return _ask_cuda_id(prompt, spec, default)
         if not answer and default == "":
@@ -318,34 +403,46 @@ def _ask_fixed(prompt: Prompt, spec: pc.KeySpec, default: str) -> str:
             default = ""
 
 
-def _prompt_gpu(prompt: Prompt, answers: dict[str, str], name: str, spec,
-                default: str, gpus: list[pc.Gpu], note: str) -> None:
+def _prompt_gpu(
+    prompt: Prompt,
+    answers: dict[str, str],
+    name: str,
+    spec,
+    default: str,
+    gpus: list[pc.Gpu],
+    note: str,
+) -> None:
     _explain(prompt, name, extra=f"variable {name}")
     # A saved file may hold anything under this key (age, hand edits), so the
     # shared validator decides whether the saved value may act as the menu's
     # Enter default or be assigned from it at all. An invalid one is named and
     # dropped — Enter then keeps the documented default instead of crashing the
-    # later _candidate_config validation with an uncaught ConfigError. A valid
+    # later proposal validation (pc.config_from_text) with an uncaught
+    # ConfigError. A valid
     # off-list value (e.g. a UUID of an unlisted device) is still preserved.
     if default:
         try:
             pc.validate_value(spec, default, "saved file")
         except pc.ConfigError as exc:
             prompt.say(f"  {exc}")
-            prompt.say("  Enter will use the default instead; pick another "
-                       "row or type a value to override it.")
+            prompt.say(
+                "  Enter will use the default instead; pick another "
+                "row or type a value to override it."
+            )
             default = ""
     if gpus:
         # Menu numbers are UI positions; each row names the device index it
         # actually selects, so choice [1] can clearly mean GPU 0.
-        prompt.say("  Multi-GPU Compose topology overrides stay an advanced "
-                   "manual edit; this setup does not generate them.")
+        prompt.say(
+            "  Multi-GPU topology overrides stay an advanced manual "
+            "edit; this setup does not generate them."
+        )
         answer = prompt.choose(
             "GPU index or UUID to use",
-            [(gpu.index, f"GPU index {gpu.index} — {gpu.name}")
-             for gpu in gpus],
+            [(gpu.index, f"GPU index {gpu.index} — {gpu.name}") for gpu in gpus],
             default=default or "0",  # the documented default is GPU 0
-            manual=(_MANUAL, "type another index or UUID"))
+            manual=(_MANUAL, "type another index or UUID"),
+        )
         if answer != _MANUAL:
             # The menu can only return a listed index or the Enter default;
             # validate anyway so no path can bypass the shared rules.
@@ -363,9 +460,14 @@ def _prompt_gpu(prompt: Prompt, answers: dict[str, str], name: str, spec,
     answers[name] = prompt.ask_validated(label, spec, default=default or "0")
 
 
-def run_session(mode: str, config_path: Path, environ: dict[str, str],
-                prompt: Prompt, repo_root: Optional[Path] = None,
-                home: Optional[Path] = None) -> int:
+def run_session(
+    mode: str,
+    config_path: Path,
+    environ: dict[str, str],
+    prompt: Prompt,
+    repo_root: Optional[Path] = None,
+    home: Optional[Path] = None,
+) -> int:
     repo_root = repo_root or pc.discover_repo_root()
     home = home or Path.home()
     # Resolve the chosen path once: the save target, the review messages, and
@@ -383,22 +485,25 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
             return 2
         existing_profile = saved.pop(pc.PROFILE_KEY, "")
         specs = pc.specs_for(mode)
-        preserved = {key: value for key, value in saved.items()
-                     if key not in specs}
+        preserved = {key: value for key, value in saved.items() if key not in specs}
         saved = {key: value for key, value in saved.items() if key in specs}
         prompt.say(f"Existing configuration: {config_path}")
     else:
         prompt.say(f"No saved configuration yet: {config_path}")
 
     prompt.say("")
-    prompt.say("Pennyroyal setup (BETA) writes one plain text file and starts "
-               "nothing.")
+    prompt.say(
+        "Pennyroyal setup (BETA) writes one plain text file and starts " "nothing."
+    )
     prompt.say("It will not download, install, start, or delete anything.")
-    prompt.say("The PLE embedding table has its own placement, chosen in the "
-               "advanced section; it is separate from the RAM (HiCache) cache "
-               "size asked below, and from the compiled-cache folders.")
-    prompt.say("Typing 'q' (or end of input) cancels; nothing is written until "
-               "you confirm.")
+    prompt.say(
+        "The PLE embedding table has its own placement, chosen in the "
+        "advanced section; it is separate from the RAM (HiCache) cache "
+        "size asked below, and from the compiled-cache folders."
+    )
+    prompt.say(
+        "Typing 'q' (or end of input) cancels; nothing is written until " "you confirm."
+    )
 
     specs = pc.specs_for(mode)
     # A saved profile is normalized through the shared validator BEFORE it
@@ -418,13 +523,12 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
         # Enter is allowed only once a valid row is the stated default; an
         # unusable saved profile forces an explicit valid choice (choose()
         # has no empty-default problem because the loop always re-asks).
-        _explain(prompt, pc.PROFILE_KEY,
-                 extra=f"variable {pc.PROFILE_KEY}")
+        _explain(prompt, pc.PROFILE_KEY, extra=f"variable {pc.PROFILE_KEY}")
         candidate = prompt.choose(
             "Model profile",
-            [(name, f"{name} — {pc.PROFILE_LABEL[name]}")
-             for name in pc.PROFILES],
-            default=menu_default or pc.PROFILES[0])
+            [(name, f"{name} — {pc.PROFILE_LABEL[name]}") for name in pc.PROFILES],
+            default=menu_default or pc.PROFILES[0],
+        )
         try:
             profile = pc.validate_profile(candidate, mode)
             break
@@ -437,61 +541,84 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
 
     prompt.say("")
     prompt.say("Downloaded model locations, caches, and GPU")
-    prompt.say("  Anything Pennyroyal can infer for a normal first run — the "
-               "repository folder, the Python environment folder, the compose "
-               "file, the cache folders, the graphics card, and the API port — "
-               "is offered with that value already typed in; press Enter to "
-               "keep it. A value already in this file wins over the "
-               "suggestion. The remaining plumbing stays in the advanced "
-               f"section: {_ADVANCED_NOTE}.")
+    prompt.say(
+        "  Anything Pennyroyal can infer for a normal first run — the "
+        "repository folder, the Python environment folder, the folder "
+        "the container launch files go in, the cache folders, the "
+        "graphics card, and the API port — is offered with that value "
+        "already typed in; press Enter to keep it. A value already in "
+        "this file wins over the suggestion. The remaining plumbing "
+        f"stays in the advanced section: {_ADVANCED_NOTE}."
+    )
     for name in ordered_names(mode):
         spec = specs[name]
         if spec.kind in ("bool", "choice", "mm-device"):
-            answers[name] = _ask_fixed(prompt, spec,
-                                       saved.get(name, "") or spec.default)
+            answers[name] = _ask_fixed(
+                prompt, spec, saved.get(name, "") or spec.default
+            )
             continue
         default = saved.get(name, "")
+        if name in ("HOST_NIXL_STORAGE_BASE", "NIXL_STORAGE_BASE"):
+            # The disk tier is off, so this root is neither mounted nor
+            # written: never make an operator name a path nothing uses.
+            if answers.get("NIXL", "on") == "off" and not default:
+                continue
         if name in ("GPU", "NVIDIA_GPU"):
             _prompt_gpu(prompt, answers, name, spec, default, gpus, gpu_note)
             continue
         if name == "TARGET_MODEL" and not default:
-            default = (pc.CONTAINER_DEFAULT_TARGET[profile] if mode == "container"
-                       else "")
+            default = (
+                pc.CONTAINER_DEFAULT_TARGET[profile] if mode == "container" else ""
+            )
         if name == "REPO_ROOT" and not default:
             default = str(repo_root)
         if name == "VENV_PATH" and not default:
             default = str(repo_root / ".venv")
         if name == "DRAFT_MODEL" and profile != "27b":
             continue  # this profile does not use a draft; the value is preserved
-        if name == "COMPOSE_FILE" and not default:
-            default = str(repo_root / pc.COMPOSE_RELPATH)
         if name == "NIXL_STORAGE_BASE" and not default and mode == "native":
             default = str(home / pc.DEFAULT_NATIVE_NIXL_BASE.removeprefix("~/"))
+        if name == "LAUNCH_DIR" and not default:
+            # The shipped default is ~/, resolved here through the caller's home
+            # so a scripted run never lands in the real account.
+            default = str(home / pc.DEFAULT_CONTAINER_LAUNCH_DIR.removeprefix("~/"))
         if name == "CACHE_BASE" and not default and mode == "native":
             default = str(home / pc.DEFAULT_NATIVE_CACHE_BASE.removeprefix("~/"))
         label = spec.prompt or f"{name} ({spec.description})"
         extra = ""
         if name == "PENNY_HICACHE_SIZE_GB":
-            extra = (f"blank keeps this profile's qualified default "
-                     f"{pc.PROFILE_HICACHE_SIZE_GB[profile]} GB; anything from "
-                     f"1 GB up is honored")
+            extra = (
+                f"blank keeps this profile's qualified default "
+                f"{pc.PROFILE_HICACHE_SIZE_GB[profile]} GB; anything from "
+                f"1 GB up is honored"
+            )
         _explain(prompt, name, extra=f"variable {name}{'; ' + extra if extra else ''}")
         default = default or spec.default
         allow_empty = bool(default) or name not in _ALWAYS_REQUIRED
-        answers[name] = prompt.ask_validated(label, spec, default=default,
-                                             allow_empty=allow_empty)
+        answers[name] = prompt.ask_validated(
+            label, spec, default=default, allow_empty=allow_empty
+        )
     if profile != "27b" and "DRAFT_MODEL" in saved:
         answers["DRAFT_MODEL"] = saved["DRAFT_MODEL"]
 
-    if prompt.confirm("\nConfigure the advanced section (capacity, online FP8, "
-                      "PLE placement, runtime identity, installation "
-                      "overrides)?", default=False):
-        prompt.say(f"  The advanced section covers {_ADVANCED_NOTE}, plus the "
-                   "capacity, FP8, and PLE knobs. Your saved overrides for "
-                   "them are offered as defaults, so Enter keeps what you "
-                   "already chose.")
+    if prompt.confirm(
+        "\nConfigure the advanced section (capacity, PLE placement, runtime "
+        "identity, installation overrides)?",
+        default=False,
+    ):
+        prompt.say(
+            f"  The advanced section covers {_ADVANCED_NOTE}, plus the "
+            "capacity and PLE knobs. Your saved overrides for "
+            "them are offered as defaults, so Enter keeps what you "
+            "already chose."
+        )
         for name in ordered_names(mode, advanced=True):
             if name in answers:
+                continue
+            if pc.profile_unavailable(profile, name):
+                # The recipe for this profile has no such knob (27b capacity,
+                # TP, PLE placement); asking would offer tuning that cannot
+                # reach the server. A saved value still comes through below.
                 continue
             spec = specs[name]
             default = saved.get(name, "") or spec.default
@@ -501,8 +628,11 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
             label = spec.prompt or f"{name} ({spec.description})"
             _explain(prompt, name, extra=f"variable {name}")
             answers[name] = prompt.ask_validated(
-                label, spec, default=default,
-                allow_empty=bool(default) or spec.kind == "positive-int")
+                label,
+                spec,
+                default=default,
+                allow_empty=bool(default) or spec.kind == "positive-int",
+            )
 
     # Keys the wizard never asked about (the declined advanced section) stay
     # exactly as saved, so rerunning cannot quietly drop them.
@@ -511,8 +641,9 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
         if name not in asked:
             answers[name] = value
 
-    changed = {name: value for name, value in answers.items()
-               if saved.get(name, "") != value}
+    changed = {
+        name: value for name, value in answers.items() if saved.get(name, "") != value
+    }
     prompt.say("")
     prompt.say("Review")
     for name in sorted(answers):
@@ -520,15 +651,71 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
         prompt.say(f"  {marker} {name}={pc.quote_value(answers[name])}")
     for name, value in sorted(preserved.items()):
         prompt.say(f"    {name}={pc.quote_value(value)}  (unrecognized key kept)")
-    prompt.say(f"  {len(answers) - len(changed)} value(s) unchanged; 'q' "
-               "cancels without writing.")
+    prompt.say(
+        f"  {len(answers) - len(changed)} value(s) unchanged; 'q' "
+        "cancels without writing."
+    )
 
     # Validate the proposal in memory before touching anything: an invalid path
     # must not overwrite a good file or claim success. The user may correct the
     # named key, cancel, or explicitly save a not-ready-but-valid state.
+    def entries(names: list[str]) -> list[tuple[str, str]]:
+        # A blank saved on purpose (a deliberate suppression) must survive the
+        # rerun as an explicit blank line; new optional blanks that were never
+        # in the file stay omitted, so absence keeps meaning 'inherited'.
+        return [
+            (name, answers[name])
+            for name in names
+            if name in answers and (answers[name] != "" or name in saved)
+        ]
+
+    def proposed_text() -> str:
+        """The file body this save would write, as one canonical value.
+
+        The proposal below is parsed back out of these bytes instead of the raw
+        answer dict, so a knob left on Enter is simply absent from both the
+        generated launch and the saved file: what the wizard validated, what it
+        generated and what run-penny later reloads cannot drift apart.
+        """
+        sections = [
+            (
+                "basic",
+                entries(
+                    [name for name in ordered_names(mode) if not specs[name].advanced]
+                ),
+            ),
+            ("advanced (optional)", entries(ordered_names(mode, advanced=True))),
+        ]
+        # Saved private kernel-path escape hatches (never asked: default
+        # selection owns those paths) re-save verbatim through this pass, the
+        # same way the wizard's own answers do.
+        asked_anywhere = {name for name, _ in sections[0][1]} | {
+            name for name, _ in sections[1][1]
+        }
+        private = entries(
+            [name for name in sorted(answers) if name not in asked_anywhere]
+        )
+        if private:
+            sections.append(("private overrides (kept as saved)", private))
+        if preserved:
+            sections.append(("kept from the previous file", sorted(preserved.items())))
+        header = (
+            "# Pennyroyal saved configuration "
+            f"({mode}); written by ./configure-penny.",
+            "# Plain KEY=value lines. This file is never shell-sourced or eval'd.",
+            "# Saved values win over the inherited environment; unset keys keep the",
+            "# recipe defaults documented in the Pennyroyal guides.",
+            f"{pc.PROFILE_KEY}={pc.quote_value(profile)}",
+        )
+        return pc.serialize_env(sections, header=header)
+
     attempt = 0
+    body = ""
     while True:
-        config = _candidate_config(mode, profile, answers, preserved, config_path)
+        body = proposed_text()
+        config = pc.config_from_text(
+            mode, body, config_path, "proposed answers (not saved yet)"
+        )
         plan = pc.build_plan(mode, config, environ, repo_root=repo_root)
         if not plan.errors:
             break
@@ -538,137 +725,223 @@ def run_session(mode: str, config_path: Path, environ: dict[str, str],
             prompt.say(f"  ERROR: {issue.message}")
         attempt += 1
         if attempt >= 4:
-            prompt.say("Too many failed attempts; the existing file was left "
-                       "untouched.")
+            prompt.say(
+                "Too many failed attempts; the existing file was left " "untouched."
+            )
             return 4
-        correctable = [issue for issue in plan.errors if issue.key
-                       and issue.key in specs
-                       and (issue.key in answers or issue.key in preserved)]
+        correctable = [
+            issue
+            for issue in plan.errors
+            if issue.key
+            and issue.key in specs
+            and (issue.key in answers or issue.key in preserved)
+        ]
         choices = sorted({issue.key for issue in correctable})
         options = [(key, f"re-enter {key}") for key in choices]
-        options.append(("s", "save despite these errors (--check keeps "
-                             "reporting them)"))
+        options.append(
+            ("s", "save despite these errors (--check keeps " "reporting them)")
+        )
         options.append(("c", "cancel; nothing is written"))
-        choice = prompt.choose("Fix one setting, save anyway, or cancel",
-                               options, default="c")
+        choice = prompt.choose(
+            "Fix one setting, save anyway, or cancel", options, default="c"
+        )
         if choice == "s":
-            prompt.say("Saving despite the errors; --check will keep reporting "
-                       "them.")
+            prompt.say(
+                "Saving despite the errors; --check will keep reporting " "them."
+            )
             break
-        match = next((issue for issue in correctable
-                      if issue.key == choice), None)
+        match = next((issue for issue in correctable if issue.key == choice), None)
         if match is None:
             prompt.say("Cancelled; nothing was written.")
             return 3
         spec = specs[match.key]
         current = answers.get(match.key, preserved.get(match.key, ""))
         if spec.kind in ("bool", "choice", "mm-device"):
-            answers[match.key] = _ask_fixed(
-                prompt, spec, current)
+            answers[match.key] = _ask_fixed(prompt, spec, current)
         else:
             answers[match.key] = prompt.ask_validated(
-                f"  new value for {match.key}", spec, default=current,
-                allow_empty=spec.kind == "positive-int")
+                f"  new value for {match.key}",
+                spec,
+                default=current,
+                allow_empty=spec.kind == "positive-int",
+            )
 
-    verb = "Replace" if config_path.exists() else "Save"
-    if not prompt.confirm(f"\n{verb} {config_path}?", default=True):
+    # Every save is a set of brand-new ordinary files. The existing settings
+    # file is this session's input, never its target: nothing here overwrites,
+    # renames, removes or backs up a previous file. The fresh names are chosen
+    # BEFORE the consent gate so the question, the write and the printed
+    # commands all name the identical new outputs - and a save that cannot
+    # complete never advertises a launch it did not fully write.
+    stamp = pc.save_stamp()
+    new_config = pc.timestamped_new_path(config_path, stamp)
+    if mode == "container":
+        # The saved settings and the generated launch belong to one set: the
+        # new output directory is recorded in the new file, so a later
+        # --check --config <that file> resolves exactly this launch.
+        answers["LAUNCH_DIR"] = str(
+            pc.timestamped_new_path(plan.launch_dir, stamp, directory=True)
+        )
+        body = proposed_text()
+        config = pc.config_from_text(mode, body, new_config, "this save")
+        plan = pc.build_plan(mode, config, environ, repo_root=repo_root)
+    generated = []
+    try:
+        generated = _generated_container_files(mode, plan)
+    except pc.ConfigError as exc:
+        # Nothing in this save can be written, so nothing is: a broken template
+        # is named instead of leaving the settings next to old launch files.
+        prompt.say(f"\nCannot write the container launch files: {exc}")
+        prompt.say(
+            "Nothing was written; correct the template folder and save " "again."
+        )
+        return 4
+    question = f"\nSave a new settings file as {new_config}?"
+    if generated:
+        question += f"\nWrite the generated launch files in {plan.launch_dir}?"
+    if not prompt.confirm(question, default=True):
         prompt.say("Cancelled; nothing was written.")
         return 3
 
-    def entries(names: list[str]) -> list[tuple[str, str]]:
-        # A blank saved on purpose (a deliberate suppression) must survive the
-        # rerun as an explicit blank line; new optional blanks that were never
-        # in the file stay omitted, so absence keeps meaning 'inherited'.
-        return [(name, answers[name]) for name in names
-                if name in answers
-                and (answers[name] != "" or name in saved)]
-
-    sections = [("basic", entries([name for name in ordered_names(mode)
-                                   if not specs[name].advanced])),
-                ("advanced (optional)",
-                 entries(ordered_names(mode, advanced=True)))]
-    if preserved:
-        sections.append(("kept from the previous file", sorted(preserved.items())))
-    header = (
-        "# Pennyroyal saved configuration "
-        f"({mode}); written by ./configure-penny.",
-        "# Plain KEY=value lines. This file is never shell-sourced or eval'd.",
-        "# Saved values win over the inherited environment; unset keys keep the",
-        "# recipe defaults documented in the Pennyroyal guides.",
-        f"{pc.PROFILE_KEY}={pc.quote_value(profile)}",
+    # One exclusive-create call for the whole set: exactly the bytes the
+    # proposal above was validated and generated from. A destination that
+    # already exists is refused (never replaced), and on any failure the new
+    # files and folders this save made are deleted again; every earlier file
+    # stays exactly as it was, byte for byte and mode for mode.
+    try:
+        written = pc.create_new_files(
+            [(new_config, body), *generated], private=(new_config,)
+        )
+    except pc.ConfigError as exc:
+        prompt.say(f"\nCannot save: {exc}")
+        prompt.say(
+            "Nothing was written; this save's new files were removed again "
+            "and every earlier file is untouched."
+        )
+        return 4
+    prompt.say(f"Saved {new_config}")
+    # Rebuild from the file that was just written: the plan printed below is then
+    # the plan run-penny (or the generated run.sh) will build from it, and its
+    # notes speak about the state after the save, not before it.
+    plan = pc.build_plan(
+        mode,
+        pc.load_config(mode, new_config, environ, repo_root),
+        environ,
+        repo_root=repo_root,
     )
-    pc.write_env_file(config_path, pc.serialize_env(sections, header=header))
-    prompt.say(f"Saved {config_path}")
+    if mode == "container":
+        # Generation belongs to the save, never to the launch: the operator
+        # edits run.sh and the startup script by hand afterwards, and nothing
+        # here rewrites them when the container starts. Only a set that is
+        # fully on disk gets its start command printed above the plan.
+        prompt.say("")
+        prompt.say(f"Launch files written in {plan.launch_dir}")
+        for path in written:
+            if path != new_config:
+                prompt.say(f"  {path}")
+        prompt.say(
+            f"Start it with: cd "
+            f"{pc.quote_command_arg(str(plan.launch_dir))}"
+            " && ./run.sh"
+        )
     prompt.say("")
     prompt.say(pc.format_plan(plan))
     return 0
 
 
-def _candidate_config(mode: str, profile: str, answers: dict[str, str],
-                      preserved: dict[str, str],
-                      config_path: Path) -> pc.Config:
-    """A Config for the in-memory proposal, using the same shared validator."""
-    specs = pc.specs_for(mode)
-    values: dict[str, str] = {}
-    unknown: dict[str, str] = {}
-    merged = {**preserved, **answers}
-    for name, value in merged.items():
-        spec = specs.get(name)
-        if spec is None:
-            unknown[name] = value
-            continue
-        values[name] = pc.validate_value(spec, value, "proposed answers")
-    config = pc.Config(mode=mode, profile=pc.validate_profile(profile, mode),
-                       values=values, unknown=unknown, path=config_path,
-                       source="proposed answers (not saved yet)",
-                       file_profile=profile, profile_origin="setup answers")
-    return config
+def _generated_container_files(mode: str, plan: pc.Plan) -> list[tuple[Path, str]]:
+    """The launch files this save would write, or [] when it writes none.
+
+    Reading them here (not inside the writer) is what lets one confirmation name
+    every file the save touches before a single byte changes. A broken template
+    is a ConfigError, which the caller already surfaces as a failure to save.
+    """
+    if mode != "container":
+        return []
+    return pc.container_launch_files(plan)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="configure-penny",
         description="Interactively write the saved Pennyroyal configuration.",
-        epilog=pc.HELP_EPILOG)
+        epilog=pc.HELP_EPILOG,
+    )
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--native", action="store_const", const="native",
-                       dest="mode", help="configure the native launcher (default)")
-    group.add_argument("--container", action="store_const", const="container",
-                       dest="mode", help="configure the Compose service")
-    parser.add_argument("--config", type=Path, default=None,
-                        help="explicit config path instead of the default one")
-    parser.add_argument("--yes", action="store_true",
-                        help="accept the save confirmation (scripted runs)")
-    parser.add_argument("--check", action="store_true",
-                        help="validate the saved file and exit; writes nothing")
-    parser.add_argument("--show-config", action="store_true",
-                        help="show the resolved configuration and exit")
-    parser.add_argument("--print-env", action="store_true",
-                        help="print the saved file as .env body text and exit")
-    parser.add_argument("--json", action="store_true",
-                        help="machine-readable output between JSON markers")
+    group.add_argument(
+        "--native",
+        action="store_const",
+        const="native",
+        dest="mode",
+        help="configure the native launcher (default)",
+    )
+    group.add_argument(
+        "--container",
+        action="store_const",
+        const="container",
+        dest="mode",
+        help="configure the prebuilt container "
+        "launch files (run.sh + startup "
+        "script)",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="explicit config path instead of the default one",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="accept the save confirmation (scripted runs)",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="validate the saved file and exit; writes nothing",
+    )
+    parser.add_argument(
+        "--show-config",
+        action="store_true",
+        help="show the resolved configuration and exit",
+    )
+    parser.add_argument(
+        "--print-env",
+        action="store_true",
+        help="print the saved file as .env body text and exit",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="machine-readable output between JSON markers",
+    )
     parser.set_defaults(mode="native")
     args = parser.parse_args(argv)
 
     environ = dict(os.environ)
-    report = [option for option in ("--check", "--show-config", "--print-env",
-                                   "--json")
-              if getattr(args, option.lstrip("-").replace("-", "_"))]
+    report = [
+        option
+        for option in ("--check", "--show-config", "--print-env", "--json")
+        if getattr(args, option.lstrip("-").replace("-", "_"))
+    ]
     if report:
         argv = ["--mode", args.mode]
         if args.config is not None:
             argv += ["--config", str(args.config)]
         return pc.main(argv + report)
     repo_root = pc.discover_repo_root()
-    config_path = (Path(args.config) if args.config is not None
-                   else pc.discover_config_path(args.mode, environ, repo_root)[0])
+    config_path = (
+        Path(args.config)
+        if args.config is not None
+        else pc.discover_config_path(args.mode, environ, repo_root)[0]
+    )
     prompt = Prompt(assume_yes=args.yes)
     # Tests and scripted runs can isolate the home-directory defaults without
     # touching the real account.
     home = Path(environ.get("PENNYROYAL_TEST_HOME") or Path.home())
     try:
-        return run_session(args.mode, config_path, environ, prompt, repo_root,
-                           home=home)
+        return run_session(
+            args.mode, config_path, environ, prompt, repo_root, home=home
+        )
     except Cancelled:
         prompt.say("\nCancelled; nothing was written.")
         return 130

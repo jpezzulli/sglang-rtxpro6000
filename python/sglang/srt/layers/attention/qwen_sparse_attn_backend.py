@@ -23,11 +23,6 @@ from sglang.srt.layers.attention.qsa.config import (
     is_qwen_qsa,
     parse_qsa_profile,
 )
-from sglang.srt.layers.attention.qsa.decode_attn import (
-    QSADecodeAttnWorkspace,
-    qsa_decode_attention,
-    qsa_decode_attention_supported,
-)
 from sglang.srt.layers.attention.qsa.kernel import (
     QSA_PREFILL_ALL_VISIBLE_MAX_BATCH,
     qsa_sparse_attention,
@@ -51,7 +46,6 @@ from sglang.srt.layers.attention.qsa.sparse_attn import (
 )
 from sglang.srt.layers.attention.qsa.stall_diagnostics import QSAStallDiagnostics
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
-from sglang.srt.utils import print_warning_once
 
 logger = logging.getLogger(__name__)
 
@@ -159,15 +153,6 @@ class QSAMTPSharedSparseIndices:
     ) -> None:
         self.layer_slots = {int(l): i for i, l in enumerate(sorted(layer_ids))}
         self.tail_width = tail_width
-        # The split-KV decode kernel may stop scanning at seq_lens, which is only
-        # sound when nothing valid sits behind a -1 hole; that gate therefore also
-        # selects this layout instead of a second, mismatch-prone flag.
-        self.shared_tail_prefix = envs.SGLANG_OPT_TRITON_DECODE_ATTN.get()
-        if self.shared_tail_prefix:
-            logger.info(
-                "QSA MTP shared indices: drafted tail after the valid prefix "
-                "(SGLANG_OPT_TRITON_DECODE_ATTN)"
-            )
         self.trash_row = num_requests
         # Logical index 0 keeps never-captured rows (graph warmup dummies)
         # attending exactly the first token instead of an empty/invalid set.
@@ -242,26 +227,10 @@ class QSAMTPSharedSparseIndices:
         The tail columns append exactly ``[captured_len, current_position]``
         -- disjoint from the frozen set by construction, -1 (dropped
         downstream) where the gap is shorter than the tail width.
-
-        Two layouts of that one attention set.  Default: the frozen rows stay
-        as captured and the tail occupies the last ``tail_width`` columns, so a
-        short (``-1``-padded) frozen row leaves holes the packed paths -- which
-        read the row as a valid prefix -- cannot see past.  Shared-tail-prefix
-        mode compacts the frozen selection to the front and puts the drafted
-        tail immediately behind it, which is what the split-KV decode kernel
-        needs to bound its scan at ``seq_lens``.  Same columns, same causal
-        bound and order, and every op below has a static shape (``num_frozen``
-        is a device tensor), so both layouts record into the decode graphs.
         """
         slot = self.layer_slots[int(layer_id)]
         rows = req_pool_indices.to(torch.long)
         out = self.indices[slot, rows]
-        if self.shared_tail_prefix:
-            return self._lookup_valid_prefix(
-                out=out,
-                base=self.captured_len[slot, rows].to(torch.int64),
-                current_positions=current_positions,
-            )
         base = self.captured_len[slot, rows].to(torch.int64)
         tail = base.unsqueeze(1) + self._tail_offsets.unsqueeze(0)
         valid = tail <= current_positions.to(torch.int64).unsqueeze(1)
@@ -269,33 +238,6 @@ class QSAMTPSharedSparseIndices:
             out.dtype
         )
         return out
-
-    def _lookup_valid_prefix(
-        self, *, out: torch.Tensor, base: torch.Tensor, current_positions: torch.Tensor
-    ) -> torch.Tensor:
-        num_columns = out.shape[1]
-        frozen_width = num_columns - self.tail_width
-        frozen = out[:, :frozen_width]
-        valid = frozen >= 0
-        # Valid columns keep their relative order and the -1 padding goes last:
-        # a stable sort of the (valid ? rank : rank + frozen_width) keys is the
-        # cumsum compaction, without a data-dependent shape.
-        ranks = torch.arange(frozen_width, device=out.device).unsqueeze(0)
-        keys = torch.where(valid, ranks, ranks + frozen_width)
-        out[:, :frozen_width] = frozen.gather(
-            1, torch.argsort(keys, dim=1, stable=True)
-        )
-        num_frozen = valid.sum(dim=1, keepdim=True)
-        # The tail follows the prefix, so the row is valid up to
-        # ``num_frozen + tail_width`` and -1 (dropped downstream) after that.
-        columns = torch.arange(num_columns, device=out.device).unsqueeze(0)
-        tail_offset = columns - num_frozen
-        tail = base.unsqueeze(1) + tail_offset
-        tail_valid = (tail_offset < self.tail_width) & (
-            tail <= current_positions.to(torch.int64).unsqueeze(1)
-        )
-        tail = torch.where(tail_valid, tail, -1).to(out.dtype)
-        return torch.where(columns < num_frozen, out, tail)
 
 
 class QwenSparseAttnBackend(AttentionBackend):
@@ -360,8 +302,6 @@ class QwenSparseAttnBackend(AttentionBackend):
         self._trtllm_sparse_tables = {}
         self._mtp_shared_sparse_indices = None
         self._trtllm_workspace = None
-        self._triton_decode_attn = envs.SGLANG_OPT_TRITON_DECODE_ATTN.get()
-        self._decode_attn_workspace: Optional[QSADecodeAttnWorkspace] = None
         self._graph_extend_lens = None
         self._graph_extend_lens_pin = None
         self.qsa_stall_diagnostics = (
@@ -1977,53 +1917,6 @@ class QwenSparseAttnBackend(AttentionBackend):
         )
         return output.reshape(q.shape[0], -1)
 
-    def _forward_triton_decode(
-        self,
-        *,
-        q: torch.Tensor,
-        k_buffer: torch.Tensor,
-        v_buffer: torch.Tensor,
-        layer,
-        forward_batch,
-        metadata,
-        topk_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        if self._decode_attn_workspace is None:
-            # The arrival counters are zeroed eagerly at construction, never
-            # inside a capture: CUDA graph capture only runs after the eager
-            # warmup forwards, and the workspace address is baked into every
-            # graph recorded from here on.
-            if torch.cuda.is_current_stream_capturing():
-                raise RuntimeError("QSA decode attention workspace not allocated")
-            self._decode_attn_workspace = QSADecodeAttnWorkspace(
-                num_kv_heads=k_buffer.shape[1],
-                head_dim=k_buffer.shape[2],
-                device=q.device,
-            )
-        return qsa_decode_attention(
-            q=q,
-            k_buffer=k_buffer,
-            v_buffer=v_buffer,
-            req_to_token=self.req_to_token_pool.req_to_token,
-            row_req_pool_indices=(
-                metadata.row_req_pool_indices
-                if metadata.row_req_pool_indices is not None
-                else forward_batch.req_pool_indices
-            ),
-            topk_indices=topk_indices,
-            seq_lens=metadata.sequence_lengths,
-            sm_scale=layer.scaling,
-            workspace=self._decode_attn_workspace,
-            # Draft decode rows reuse the draft-extend selection, which leaves -1
-            # holes before the drafted tail unless the tail follows the valid
-            # prefix -- and the shared state reads the same gate as this path,
-            # so a full scan is the fallback, never a mismatched pairing.
-            prefix_valid=(
-                not self.should_reuse_mtp_sparse_indices(forward_batch)
-                or self._mtp_shared_sparse_indices.shared_tail_prefix
-            ),
-        ).reshape(q.shape[0], -1)
-
     def forward_decode(
         self,
         q: torch.Tensor,
@@ -2062,23 +1955,6 @@ class QwenSparseAttnBackend(AttentionBackend):
 
         metadata = self._resolve_metadata(forward_batch)
         topk_indices = topk_indices.to(torch.int32).contiguous()
-        if self._triton_decode_attn:
-            if qsa_decode_attention_supported(
-                q=q, k_buffer=k_buffer, v_buffer=v_buffer, topk_indices=topk_indices
-            ):
-                return self._forward_triton_decode(
-                    q=q,
-                    k_buffer=k_buffer,
-                    v_buffer=v_buffer,
-                    layer=layer,
-                    forward_batch=forward_batch,
-                    metadata=metadata,
-                    topk_indices=topk_indices,
-                )
-            print_warning_once(
-                "SGLANG_OPT_TRITON_DECODE_ATTN: unsupported QSA attention shape, "
-                "falling back to the packed path"
-            )
         trtllm_decode = _resolve_trtllm_sparse_decode()
         if trtllm_decode is not None:
             return self._forward_trtllm_sparse(
@@ -2173,9 +2049,6 @@ class QwenSparseMultiStepDraftBackend:
             QwenSparseAttnBackend(model_runner)
             for _ in range(speculative_num_steps - 1)
         ]
-        # [steps, 1] int32 addend reused across draft steps (see
-        # _all_step_seq_lens); rebuilt only for a new device or width.
-        self._step_offsets = None
 
     @staticmethod
     def _as_cpu_lengths(seq_lens_cpu, seq_lens: torch.Tensor) -> torch.Tensor:
@@ -2219,68 +2092,20 @@ class QwenSparseMultiStepDraftBackend:
             .reshape(steps, -1)[step]
         )
 
-    def _all_step_seq_lens(self, forward_batch):
-        """Decode lengths for every draft step at once, in two kernels.
-
-        ``(seq_lens + step + 1).to(int32)`` per step costs three eager launches
-        per step (two adds and a cast) on the GPU-idle critical path in front of
-        the draft graph; one ``[steps, bs]`` int32 table replaces them and every
-        step takes its row as a view. Returns ``(gpu_table, cpu_base)`` or None
-        when there is no per-step backend to feed. ``cpu_base`` is None for
-        GPU-only serving, where no host lengths exist and no per-step D2H may be
-        forced.
-
-        The host lengths are derived once (``cpu_base``) and offset per step,
-        which keeps the CPU/GPU pair for one step consistent: both sides are the
-        same base plus ``step + 1``, and the padded replay path clones before
-        writing so the shared table rows of the other steps stay intact.
-        """
-        if not self.attn_backends:
-            return None
-        steps = len(self.attn_backends)
-        seq_lens = forward_batch.seq_lens
-        offsets = self._step_offsets
-        if (
-            offsets is None
-            or offsets.device != seq_lens.device
-            or offsets.shape[0] != steps
-        ):
-            offsets = torch.arange(
-                1, steps + 1, dtype=torch.int32, device=seq_lens.device
-            ).unsqueeze(1)
-            self._step_offsets = offsets
-        gpu_table = seq_lens.to(torch.int32).unsqueeze(0) + offsets
-        cpu_base = (
-            None
-            if forward_batch.seq_lens_cpu is None
-            else self._as_cpu_lengths(forward_batch.seq_lens_cpu, seq_lens)
-        )
-        return gpu_table, cpu_base
-
-    def _make_step_forward_batch(
-        self, forward_batch, step: int, num_padding: int = 0, step_lens=None
-    ):
+    def _make_step_forward_batch(self, forward_batch, step: int, num_padding: int = 0):
         step_forward_batch = copy(forward_batch)
         step_forward_batch.forward_mode = ForwardMode.DECODE
-        if step_lens is not None:
-            gpu_table, cpu_base = step_lens
-            # A table row is a contiguous [bs] view; the padding below clones.
-            step_forward_batch.seq_lens = gpu_table[step]
-            step_forward_batch.seq_lens_cpu = (
-                None if cpu_base is None else cpu_base + (step + 1)
-            )
+        step_forward_batch.seq_lens = (forward_batch.seq_lens + step + 1).to(
+            torch.int32
+        )
+        if forward_batch.seq_lens_cpu is None:
+            # GPU-only serving: downstream metadata paths derive host bounds
+            # from batch shape; do not force a per-step D2H here.
+            step_forward_batch.seq_lens_cpu = None
         else:
-            step_forward_batch.seq_lens = (forward_batch.seq_lens + step + 1).to(
-                torch.int32
-            )
-            if forward_batch.seq_lens_cpu is None:
-                # GPU-only serving: downstream metadata paths derive host bounds
-                # from batch shape; do not force a per-step D2H here.
-                step_forward_batch.seq_lens_cpu = None
-            else:
-                step_forward_batch.seq_lens_cpu = self._as_cpu_lengths(
-                    forward_batch.seq_lens_cpu, forward_batch.seq_lens
-                ) + (step + 1)
+            step_forward_batch.seq_lens_cpu = self._as_cpu_lengths(
+                forward_batch.seq_lens_cpu, forward_batch.seq_lens
+            ) + (step + 1)
         num_padding = max(
             0,
             min(int(num_padding), int(step_forward_batch.seq_lens.numel())),
@@ -2302,10 +2127,9 @@ class QwenSparseMultiStepDraftBackend:
             backend.set_mtp_shared_sparse_indices(state)
 
     def init_forward_metadata(self, forward_batch):
-        step_lens = self._all_step_seq_lens(forward_batch)
         for step, backend in enumerate(self.attn_backends):
             backend.init_forward_metadata(
-                self._make_step_forward_batch(forward_batch, step, step_lens=step_lens)
+                self._make_step_forward_batch(forward_batch, step)
             )
 
     def init_cuda_graph_state(self, max_bs: int, max_num_tokens: int):
@@ -2336,10 +2160,9 @@ class QwenSparseMultiStepDraftBackend:
 
         num_padding = getattr(forward_batch, "num_padding", None)
         num_padding = num_padding if num_padding is not None else 0
-        step_lens = self._all_step_seq_lens(forward_batch)
         for step, backend in enumerate(self.attn_backends):
             step_batch = self._make_step_forward_batch(
-                forward_batch, step, num_padding=num_padding, step_lens=step_lens
+                forward_batch, step, num_padding=num_padding
             )
             backend._replay_cuda_graph_metadata(
                 bs=step_batch.batch_size,

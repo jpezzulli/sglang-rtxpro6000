@@ -21,6 +21,8 @@ inside the function body to preserve that invariant.
 """
 
 import argparse
+import contextlib
+import copy
 import dataclasses
 import json
 from dataclasses import dataclass, field
@@ -204,6 +206,98 @@ def cuda_graph_fully_disabled() -> bool:
     return check_cuda_graph_backend(
         Phase.DECODE, Backend.DISABLED
     ) and check_cuda_graph_backend(Phase.PREFILL, Backend.DISABLED)
+
+
+def scoped_capture_cuda_graph_config(cuda_graph_bs: List[int]) -> CudaGraphConfig:
+    """The canonical graph config for one adaptive-capture window.
+
+    Adaptive speculative decoding builds one state per candidate width and
+    prunes the decode capture buckets to the batch sizes that width can reach
+    (possibly to the empty list = no graphs for that width). The capture-list
+    consumers -- ``get_batch_sizes_to_capture`` and ``check_cuda_graph_backend``
+    -- read ``cuda_graph_config[decode].bs`` / ``.backend``, so that is the leaf
+    the scoped override carries; the legacy ``cuda_graph_bs_decode`` /
+    ``disable_cuda_graph`` leaves are folded into this config once at startup
+    and ``RuntimeContext.override`` does not synchronize them, so writing those
+    renames the knob without moving the value.
+
+    Fresh copies at the top level and for the decode phase (never mutate the
+    published config in place -- it is the global resolved state every other
+    width and every later reader shares); ``prefill`` is carried by reference
+    and never touched here. An empty bucket list disables the decode phase the
+    way the runner asks about it -- ``backend=disabled`` -- because dropping
+    only ``bs`` would leave ``FULL`` advertised and a caller reading
+    ``check_cuda_graph_backend(Phase.DECODE, Backend.DISABLED)`` would still
+    build a graph runner against an empty capture list.
+    """
+    from sglang.srt.runtime_context import get_exec
+
+    base = get_exec().graph.cuda_graph_config or default_cuda_graph_config()
+    scoped = copy.copy(base)
+    decode = copy.copy(base.decode)
+    decode.bs = list(cuda_graph_bs)
+    if not cuda_graph_bs:
+        decode.backend = Backend.DISABLED
+    scoped.decode = decode
+    return scoped
+
+
+# One-shot startup handoff for the adaptive launch-width capture scope: the
+# worker plans it before the scheduler begins the start-up captures, and the
+# actual decode-capture boundaries consume it. A module global (not a context
+# wrapping whole workers) because the process-shared logits buffer, the
+# EagerRunner fixed-max buffers and the prefill capture inside
+# cuda_graph_setup.capture_cuda_graphs MUST be provisioned from the FULL
+# canonical bucket list: GraphSharedOutput.create_for_model_runner sizes
+# max_decode_logits_rows off the decode buckets before EagerRunner allocation,
+# and the shared buffer can never be resized after captured graphs point at
+# it. Pruning the whole startup window under-sized it for every bucket and
+# width the run later serves.
+_adaptive_launch_capture_scope: Optional[CudaGraphConfig] = None
+
+
+def set_adaptive_launch_capture_scope(cfg: CudaGraphConfig) -> None:
+    """Queue the scoped config for the start-up decode-capture boundaries."""
+    global _adaptive_launch_capture_scope
+    if _adaptive_launch_capture_scope is not None:
+        raise RuntimeError(
+            "adaptive launch capture scope already pending: a previous "
+            "startup-capture planning was never cleared (fail loud rather "
+            "than leak a pruned config into the next capture)"
+        )
+    _adaptive_launch_capture_scope = cfg
+
+
+def clear_adaptive_launch_capture_scope() -> None:
+    global _adaptive_launch_capture_scope
+    _adaptive_launch_capture_scope = None
+
+
+@contextlib.contextmanager
+def adaptive_launch_capture_scope():
+    """Enter the queued launch-width capture scope for one capture boundary.
+
+    Used by the target verify boundary in cuda_graph_setup.capture_cuda_graphs
+    and by the initial EagleDraftWorker draft decode / draft-extend capture.
+    The published config is restored when the boundary exits, so the next
+    provisioning step and AdaptiveController.init_states both see the FULL
+    canonical buckets again. No scope queued (fixed width, graphs disabled,
+    another speculative algorithm): an ordinary no-op window.
+    """
+    cfg = _adaptive_launch_capture_scope
+    if cfg is None:
+        yield
+        return
+    from sglang.srt.runtime_context import get_context, get_exec
+
+    original = get_exec().graph.cuda_graph_config
+    get_context().override("adaptive_spec.launch_capture", cuda_graph_config=cfg)
+    try:
+        yield
+    finally:
+        get_context().override(
+            "adaptive_spec.launch_capture_restore", cuda_graph_config=original
+        )
 
 
 def parse_cuda_graph_config_arg(raw: str) -> Dict[str, Dict[str, Any]]:

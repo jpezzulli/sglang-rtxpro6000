@@ -1323,7 +1323,7 @@ class Qwen4ExpPLELayer(nn.Module):
         return _pad_token_rows(output, batch.physical_tokens)
 
 
-_ONLINE_MXFP8_LOGGED_SIGNATURES = set()
+_ONLINE_ROWWISE_FP8_LOGGED_SIGNATURES = set()
 
 
 class Qwen4ExpLayerExtensionMixin:
@@ -1385,10 +1385,19 @@ class Qwen4ExpLayerExtensionMixin:
         self._maybe_convert_linears_to_mxfp8()
 
     def _maybe_convert_linears_to_mxfp8(self) -> None:
-        """Convert only Flash-Next's eligible, otherwise-unquantized linears."""
+        """Convert only Flash-Next's eligible, otherwise-unquantized linears.
+
+        Selected representation: donor-compatible weight-only FP8 -- E4M3
+        weights with one FP32 scale per output channel, quantized once from
+        the original BF16 checkpoint values during the standard
+        ``Fp8LinearMethod`` (non-serialized) load lifecycle. No BF16 resident
+        copy, no second format, no requantization of other formats.
+        """
         from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+            _W8A16_GEMV_DONOR_MAX_M,
             convert_eligible_linears_to_mxfp8,
             online_fp8_enabled,
+            w8a16_gemv_enabled,
         )
 
         if not online_fp8_enabled():
@@ -1399,45 +1408,187 @@ class Qwen4ExpLayerExtensionMixin:
         from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 
         def build_method():
-            class CheckedOnlineMxfp8LinearMethod(Fp8LinearMethod):
+            class CheckedOnlineRowwiseFp8LinearMethod(Fp8LinearMethod):
+                """Rowwise (per-output-channel) online FP8 for this candidate.
+
+                Deliberately NOT ``block_quant``/MXFP8: the config leaves
+                ``weight_block_size=None``/``use_mxfp8=False``, so the existing
+                non-serialized ``Fp8LinearMethod`` postprocess quantizes the
+                loaded BF16 weight with ``per_token_group_quant_fp8`` over the
+                whole row -- one FP32 scale per output channel -- and stores
+                the standard resident ``weight`` [K, N] (transposed view of the
+                [N, K] FP8 storage) plus ``weight_scale`` [N]. GEMMs keep the
+                tested ``apply_fp8_linear`` dispatch. On top of that base this
+                subclass binds the donor W8A16 GEMV + gated-norm fusion to
+                *these* modules only, so generic (e.g. 27B FP8-checkpoint)
+                ``Fp8LinearMethod`` users are untouched.
+                """
+
                 def process_weights_after_loading(self, module) -> None:
+                    # Fail loud BEFORE the base postprocess mutates anything:
+                    # this candidate quantizes the original checkpoint BF16
+                    # exactly once per load. A repeat postprocess would feed
+                    # the resident FP8 back through the quantizer (silently
+                    # requantizing it and re-interpreting the [K, N] stored
+                    # view as [N, K]), and a non-BF16 weight never came from
+                    # the checkpoint load this conversion is scoped to.
+                    weight = getattr(module, "weight", None)
+                    if (
+                        not isinstance(weight, torch.Tensor)
+                        or weight.dim() != 2
+                        or weight.dtype != torch.bfloat16
+                    ):
+                        raise RuntimeError(
+                            "Flash-Next online rowwise FP8 expects the original "
+                            "2-D BF16 checkpoint weight before post-processing; "
+                            f"got dtype={getattr(weight, 'dtype', None)} "
+                            f"shape={tuple(getattr(weight, 'shape', ()))} for "
+                            f"{type(module).__name__} (already quantized, or an "
+                            "unexpected load path -- refusing to requantize)"
+                        )
                     super().process_weights_after_loading(module)
-                    scale = getattr(module, "weight_scale_inv", None)
+                    scale = getattr(module, "weight_scale", None)
                     if (
                         module.weight.dtype != torch.float8_e4m3fn
                         or scale is None
-                        or scale.dtype != torch.uint8
-                        or not getattr(scale, "format_ue8m0", False)
+                        or scale.dtype != torch.float32
+                        # weight is stored [K, N]; per-channel == one scale
+                        # per output channel.
+                        or scale.numel() != module.weight.shape[1]
                     ):
                         raise RuntimeError(
-                            "Flash-Next online MXFP8 post-processing produced "
-                            f"invalid weight/scale state for {type(module).__name__}"
+                            "Flash-Next online rowwise-FP8 post-processing "
+                            f"produced invalid weight/scale state for "
+                            f"{type(module).__name__}"
                         )
+                    if w8a16_gemv_enabled():
+                        # Materialize the GEMV's split-K scratch now, before
+                        # any CUDA graph is captured (donor fp8.py:969-979).
+                        from sglang.srt.layers.quantization.w8a16_gemv import (
+                            prealloc,
+                        )
+
+                        prealloc(module.weight.device)
                     signature = (
                         type(module).__name__,
                         tuple(module.weight.shape),
-                        str(self.mxfp8_dense_backend),
+                        module.weight.dtype,
                     )
-                    if signature not in _ONLINE_MXFP8_LOGGED_SIGNATURES:
-                        _ONLINE_MXFP8_LOGGED_SIGNATURES.add(signature)
+                    if signature not in _ONLINE_ROWWISE_FP8_LOGGED_SIGNATURES:
+                        _ONLINE_ROWWISE_FP8_LOGGED_SIGNATURES.add(signature)
                         logger.info(
-                            "Flash-Next online MXFP8 projection ready: "
-                            "module=%s shape=%s backend=%s scale=UE8M0",
+                            "Flash-Next online rowwise FP8 projection ready: "
+                            "module=%s weight(K,N)=%s dtype=%s "
+                            "scale=per-output-channel-fp32",
                             *signature,
                         )
 
-            method = CheckedOnlineMxfp8LinearMethod(
+                def _w8a16_gemv_ok(self, layer, x) -> bool:
+                    """Whether ``apply`` would route this call through the GEMV.
+
+                    Donor ``Fp8LinearMethod._w8a16_gemv_ok`` (fp8.py:986
+                    @5105985116eb) adapted to this fork's selection contract:
+                    the ``SGLANG_FP8_W8A16_GEMV`` tri-state (automatic under
+                    the eligible default selection; saved true/false private) and the
+                    ``SGLANG_FP8_W8A16_GEMV_MAX_M`` budget (which the kernel
+                    module caps at the donor's M <= 16), and the exact-SM120
+                    gate of the online-FP8 feature (installation already
+                    requires it; tensors must be on the weight's device).
+                    """
+                    return (
+                        w8a16_gemv_enabled()
+                        and online_fp8_enabled()
+                        and not self.use_marlin
+                        and not self.block_quant
+                        and not self.use_mxfp8
+                        # this fork can hand apply() a (fp8, scale) tuple from
+                        # a fused quant producer; the donor runtime never did.
+                        and isinstance(x, torch.Tensor)
+                        and x.dim() == 2
+                        and 1
+                        <= x.shape[0]
+                        <= min(
+                            envs.SGLANG_FP8_W8A16_GEMV_MAX_M.get(),
+                            _W8A16_GEMV_DONOR_MAX_M,
+                        )
+                        and x.dtype == torch.bfloat16
+                        and x.device == layer.weight.device
+                        and layer.weight.dtype == torch.float8_e4m3fn
+                        and layer.weight_scale.numel() == layer.weight.shape[1]
+                    )
+
+                def apply(self, layer, x, bias=None):
+                    if self._w8a16_gemv_ok(layer, x):
+                        from sglang.srt.layers.quantization.w8a16_gemv import (
+                            w8a16_gemv,
+                        )
+
+                        y = w8a16_gemv(x, layer.weight.t(), layer.weight_scale)
+                        if bias is not None:
+                            y = y + bias
+                        return y
+                    # Larger M (e.g. the C6 target's 24-row verification),
+                    # non-bf16/tuple activations and any other contract miss:
+                    # the resident rowwise FP8 weight through the standard
+                    # apply_fp8_linear dispatch -- never a GEMV past its row
+                    # budget, never a BF16 dequantization cache.
+                    return super().apply(layer, x, bias=bias)
+
+                def apply_norm_gated(
+                    self,
+                    layer,
+                    x,
+                    z,
+                    norm_weight,
+                    group_size,
+                    eps,
+                    sigmoid_gate=False,
+                    bias=None,
+                ):
+                    """``apply`` with a gated RMSNorm over ``x`` folded into the
+                    GEMV's A-load, or None when the call cannot take that path.
+
+                    Donor ``Fp8LinearMethod.apply_norm_gated`` (fp8.py:1031
+                    @5105985116eb), verbatim contract: computes
+                    ``apply(layer, rms_norm_gated(x, z))`` -- each contiguous
+                    ``group_size`` slice of an ``x`` row is one RMS group,
+                    normalised, scaled by ``norm_weight``, gated by
+                    ``silu(z)`` (or ``sigmoid(z)``) and rounded to bf16 before
+                    the same k-loop consumes it. Numerics: the fp32 sum of
+                    squares is re-associated into the GEMV tile's thread
+                    layout, so the pre-round value can differ in the last fp32
+                    bit; after the bf16 round the result is within 1 ulp.
+                    """
+                    if bias is not None or not self._w8a16_gemv_ok(layer, x):
+                        return None
+                    from sglang.srt.layers.quantization.w8a16_gemv import (
+                        w8a16_gemv_norm_gated,
+                        w8a16_gemv_norm_gated_supported,
+                    )
+
+                    w = layer.weight.t()
+                    if not w8a16_gemv_norm_gated_supported(
+                        x, w, layer.weight_scale, z, norm_weight, group_size
+                    ):
+                        return None
+                    return w8a16_gemv_norm_gated(
+                        x,
+                        w,
+                        layer.weight_scale,
+                        z,
+                        norm_weight,
+                        group_size,
+                        eps,
+                        sigmoid_gate,
+                    )
+
+            method = CheckedOnlineRowwiseFp8LinearMethod(
                 Fp8Config(
                     is_checkpoint_fp8_serialized=False,
                     activation_scheme="dynamic",
-                    use_mxfp8=True,
                 )
             )
-            if method.mxfp8_dense_backend.is_unsupported():
-                raise RuntimeError(
-                    "SGLANG_SM120_ONLINE_MXFP8 was selected but no MXFP8 dense "
-                    "kernel is available"
-                )
+            assert not method.block_quant and not method.use_mxfp8
             return method
 
         self._online_mxfp8_linears = convert_eligible_linears_to_mxfp8(

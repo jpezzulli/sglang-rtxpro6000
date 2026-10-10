@@ -51,6 +51,39 @@ class UnifiedSessionRefTracker:
             session_id = req.session.session_id
         return session_id
 
+    def current_pin_session_id(self, req: Req) -> Optional[str]:
+        """Session id allowed to take a resume pin, otherwise None.
+
+        Pins follow the same enabled, streaming, closed, and generation rules
+        as ``register_session_ref``. A finish after close, or a request left
+        over from an older incarnation of this id, does not pin.
+        """
+        if not self.enable_session_radix_cache or req is None:
+            return None
+        session = getattr(req, "session", None)
+        if session is not None and getattr(session, "streaming", False):
+            return None
+        session_id = self.session_id_for_req(req)
+        if not session_id or session_id in self._closed_session_ids:
+            return None
+        current_generation = self._session_generations.get(session_id)
+        if (
+            current_generation is None
+            or getattr(req, "session_generation", None) != current_generation
+        ):
+            return None
+        return session_id
+
+    def pin_still_current(
+        self, session_id: Optional[str], generation: Optional[int]
+    ) -> bool:
+        """True when a host backup may still pin this session incarnation."""
+        if not self.enable_session_radix_cache or not session_id or generation is None:
+            return False
+        if session_id in self._closed_session_ids:
+            return False
+        return self._session_generations.get(session_id) == generation
+
     def register_session_ref(self, req: Req) -> None:
         """Register a non-streaming request's reusable leaves with each component."""
         if not self.enable_session_radix_cache:

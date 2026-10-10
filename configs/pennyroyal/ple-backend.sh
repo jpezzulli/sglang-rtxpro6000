@@ -24,11 +24,15 @@ configure_max_total_tokens() {
   TOKEN_CAP_ARGS=(--max-total-tokens "$token_cap")
 }
 
-SGLANG_SM120_ONLINE_MXFP8="${SGLANG_SM120_ONLINE_MXFP8:-false}"
-case "$SGLANG_SM120_ONLINE_MXFP8" in
+# Online-FP8 kernel path: unset/blank is automatic -- the runtime enables the
+# accepted Flash-Next rowwise-FP8 paths on eligible SM120 installs without any
+# copied launch flag. A saved explicit false/true propagates unchanged as the
+# private compatibility/debug escape hatch; anything else is a user error.
+case "${SGLANG_SM120_ONLINE_MXFP8:-}" in
+  "") SGLANG_SM120_ONLINE_MXFP8=""; export SGLANG_SM120_ONLINE_MXFP8 ;;
   false|true) export SGLANG_SM120_ONLINE_MXFP8 ;;
   *)
-    echo "SGLANG_SM120_ONLINE_MXFP8 must be true or false" >&2
+    echo "SGLANG_SM120_ONLINE_MXFP8 must be true or false (unset or blank = automatic)" >&2
     exit 1
     ;;
 esac

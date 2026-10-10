@@ -4,6 +4,7 @@ Multi-modality utils
 
 import copy
 import hashlib
+import logging
 import os
 import pickle
 import sys
@@ -36,6 +37,7 @@ from sglang.srt.managers.schedule_batch import (
     CudaIpcTensorTransportProxy,
     Modality,
     MultimodalInputs,
+    MultimodalProcessorOutput,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.multimodal.transport import (
@@ -50,6 +52,9 @@ from sglang.srt.runtime_context import (
 from sglang.srt.utils import flatten_nested_list, print_warning_once
 from sglang.srt.utils.stale_shm_cleanup import make_shm_name
 from sglang.utils import logger
+
+logger = logging.getLogger(__name__)
+
 
 # NOTE: Using the shared logger from sglang.utils instead of creating a module-specific logger
 # to ensure consistent logging behavior across the codebase. This prevents issues with log
@@ -1271,9 +1276,19 @@ class ShmPointerMMData:
     """
     Wraps a tensor to be sent via a shared memory handle.
     This acts as a "pointer" to the tensor data across process boundaries.
+
+    Deserialization never raises. A receiver whose segment is already gone
+    (another consumer unlinked it first, or it was never created) records the
+    failure in ``_materialization_error``; ``materialize()`` then raises a
+    RuntimeError that the scheduler's request receiver turns into a rejected
+    request on every rank, instead of a FileNotFoundError escaping from
+    ``recv_pyobj`` and killing the scheduler process.
     """
 
     def __init__(self, tensor: torch.Tensor, precomputed_hash: Optional[int] = None):
+        self._shm_handle = None
+        self.tensor = None
+        self._materialization_error = None
         if not tensor.is_cpu:
             tensor = tensor.cpu()
         if not tensor.is_contiguous():
@@ -1300,7 +1315,6 @@ class ShmPointerMMData:
             raise
         self.shm_name = shm.name
         shm.close()
-        self._shm_handle = None
 
     def __getstate__(self):
         return {
@@ -1315,27 +1329,90 @@ class ShmPointerMMData:
         self.shape = state["shape"]
         self.dtype = state["dtype"]
         self.precomputed_hash = state.get("precomputed_hash")
-        self._shm_handle = shared_memory.SharedMemory(name=self.shm_name)
-        # Zero-copy view into shared memory (no clone, no unlink)
-        self.tensor = torch.frombuffer(self._shm_handle.buf, dtype=self.dtype).reshape(
-            self.shape
-        )
+        self._shm_handle = None
+        self.tensor = None
+        self._materialization_error = None
+
+        handle = None
+        try:
+            handle = shared_memory.SharedMemory(name=self.shm_name)
+            # Zero-copy view into shared memory (no clone, no unlink)
+            self.tensor = torch.frombuffer(handle.buf, dtype=self.dtype).reshape(
+                self.shape
+            )
+            self._shm_handle = handle
+        except Exception as error:
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    logger.warning(
+                        "Failed to close a malformed multimodal SHM handle",
+                        exc_info=True,
+                    )
+            self._materialization_error = f"{type(error).__name__}: {error}"
+            logger.warning(
+                "ShmPointerMMData: cannot attach multimodal SHM segment %s in pid %d "
+                "(%s); the request carrying it will be rejected",
+                self.shm_name,
+                os.getpid(),
+                self._materialization_error,
+            )
 
     def materialize(self) -> torch.Tensor:
-        """Clone tensor from shm to owned memory, then release shm handle."""
-        tensor = self.tensor.clone()
-        if self._shm_handle is not None:
-            self._shm_handle.close()
+        """Clone tensor from shm to owned memory, then release and unlink the segment."""
+        try:
+            if self._materialization_error is not None:
+                raise RuntimeError(
+                    f"multimodal SHM segment {self.shm_name} is unavailable on "
+                    f"pid {os.getpid()}: {self._materialization_error}"
+                )
+            return self.tensor.clone()
+        finally:
+            self.close_and_unlink()
+
+    def close_and_unlink(self) -> None:
+        """Release this rank's view and unlink the shared feature segment."""
+        handle = self._shm_handle
+        self._shm_handle = None
+        self.tensor = None
+        if handle is None:
             try:
-                self._shm_handle.unlink()
+                handle = shared_memory.SharedMemory(name=self.shm_name)
+            except FileNotFoundError:
+                return  # Another rank already unlinked
+            except OSError:
+                logger.warning(
+                    "Failed to reopen multimodal SHM segment %s for cleanup",
+                    self.shm_name,
+                    exc_info=True,
+                )
+                return
+        try:
+            try:
+                handle.unlink()
             except FileNotFoundError:
                 pass  # Another rank already unlinked
-            self._shm_handle = None
-        return tensor
+            except OSError:
+                logger.warning(
+                    "Failed to unlink multimodal SHM segment %s",
+                    self.shm_name,
+                    exc_info=True,
+                )
+        finally:
+            try:
+                handle.close()
+            except Exception:
+                logger.warning(
+                    "Failed to close multimodal SHM handle %s",
+                    self.shm_name,
+                    exc_info=True,
+                )
 
     def __del__(self):
         # Only close; never unlink. Unlinking is materialize()'s job.
         if getattr(self, "_shm_handle", None) is not None:
+            self.tensor = None
             self._shm_handle.close()
             self._shm_handle = None
 
@@ -1410,22 +1487,73 @@ def _feature_has_shm(feat) -> bool:
     return False
 
 
+def _mm_items_of(obj):
+    """The request's mm_items, or None when it carries no multimodal input.
+
+    ``mm_inputs`` is a MultimodalProcessorOutput (fresh from the tokenizer), a
+    MultimodalInputs (after ingest), None, or an MMInputsProcessError marker for
+    a request whose features were lost in transport. The marker has no items
+    and must pass through every SHM helper untouched — it may still be
+    forwarded to the next pipeline stage, which rejects it the same way.
+    """
+    if not isinstance(obj, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput)):
+        return None
+    mm_inputs = obj.mm_inputs
+    if isinstance(mm_inputs, (MultimodalProcessorOutput, MultimodalInputs)):
+        return mm_inputs.mm_items
+    return None
+
+
 def has_shm_features(recv_reqs):
     """Return True if any request in the list contains ShmPointerMMData."""
     for req in recv_reqs:
         if isinstance(req, BaseBatchReq):
             if has_shm_features(req.batch):
                 return True
-        elif (
-            isinstance(req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput))
-            and req.mm_inputs
-        ):
-            for item in req.mm_inputs.mm_items:
-                if _feature_has_shm(item.feature):
-                    return True
-                if _feature_has_shm(item.precomputed_embeddings):
-                    return True
+            continue
+        for item in _mm_items_of(req) or ():
+            if _feature_has_shm(item.feature):
+                return True
+            if _feature_has_shm(item.precomputed_embeddings):
+                return True
     return False
+
+
+def _discard_tensor_or_list(value) -> None:
+    """Release SHM wrappers (and their segments) without materializing them."""
+    if isinstance(value, ShmPointerMMData):
+        value.close_and_unlink()
+    elif isinstance(value, (list, tuple)):
+        for t in value:
+            if isinstance(t, ShmPointerMMData):
+                t.close_and_unlink()
+
+
+def discard_shm_features(obj) -> None:
+    """Release every feature transport of a request that will not be consumed.
+
+    Called on each rank for a request the receiver rejects (a shared-memory
+    feature segment was gone). A request can mix transports: one image as a
+    CUDA VMM/IPC pool slice, another as the CPU->SHM fallback when the pool
+    could not fit every field. SHM handles are closed and unlinked; pool
+    slices are acknowledged for this rank so the producer's recycler can free
+    them (otherwise repeated rejections would strand pool capacity). The
+    caller replaces mm_inputs with the error marker afterwards.
+    """
+    if isinstance(obj, BaseBatchReq):
+        for sub_obj in obj.batch:
+            discard_shm_features(sub_obj)
+        return
+    for item in _mm_items_of(obj) or ():
+        _discard_tensor_or_list(item.feature)
+        _discard_tensor_or_list(item.precomputed_embeddings)
+        try:
+            item.release_transport_proxies()
+        except Exception:
+            logger.exception(
+                "Failed to release a CUDA feature-pool slice of a rejected request (rid=%s)",
+                getattr(obj, "rid", None),
+            )
 
 
 def _unwrap_tensor_or_list(value):
@@ -1452,16 +1580,12 @@ def unwrap_shm_features(obj):
         for sub_obj in obj.batch:
             unwrap_shm_features(sub_obj)
         return obj
-    # Handle single requests
-    if (
-        isinstance(obj, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput))
-        and obj.mm_inputs
-    ):
-        for item in obj.mm_inputs.mm_items:
-            if item.feature is not None:
-                item.feature = _unwrap_tensor_or_list(item.feature)
-            if item.precomputed_embeddings is not None:
-                item.precomputed_embeddings = _unwrap_tensor_or_list(
-                    item.precomputed_embeddings
-                )
+    # Handle single requests (an MMInputsProcessError marker has no items)
+    for item in _mm_items_of(obj) or ():
+        if item.feature is not None:
+            item.feature = _unwrap_tensor_or_list(item.feature)
+        if item.precomputed_embeddings is not None:
+            item.precomputed_embeddings = _unwrap_tensor_or_list(
+                item.precomputed_embeddings
+            )
     return obj

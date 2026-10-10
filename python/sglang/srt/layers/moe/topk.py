@@ -137,12 +137,41 @@ _is_musa = is_musa()
 # computes the whole gate in fp32); the epsilon underflows to zero in float16.
 _RENORMALIZE_SUM_EPSILON = 1e-20
 
+# The softmax router treats this as a read-only correction bias. Reuse one
+# device allocation instead of launching torch.zeros for every MoE layer.
+_ZERO_BIAS_CACHE: dict[tuple[int, torch.device], torch.Tensor] = {}
+
+
+def _get_zero_bias(num_experts: int, device: torch.device) -> torch.Tensor:
+    key = (num_experts, device)
+    zero_bias = _ZERO_BIAS_CACHE.get(key)
+    if zero_bias is None:
+        zero_bias = torch.zeros(num_experts, dtype=torch.float32, device=device)
+        _ZERO_BIAS_CACHE[key] = zero_bias
+    return zero_bias
+
+
 # Experimental: skip the HIP padded-token routing-weight masking entirely.
 # Padded (CUDA-graph) rows are discarded downstream and the MoE combine is
 # per-token, so zeroing their weights is in principle unnecessary. Gated off by
 # default because it is a numerics-affecting change that must be validated with
 # an accuracy run before becoming the default.
 _skip_hip_pad_mask = get_bool_env_var("SGLANG_MORI_NO_PAD_MASK", "False")
+
+
+# Packed-key softmax router for bf16 logits (moe_router_softmax_fast.py): the
+# Triton router's weights and ids bit for bit, one warp reduction per pick.
+# Eligible Flash-Next SM120 launches select it through the accepted default
+# selection; elsewhere it stays off unless explicitly requested, and a saved
+# explicit true/false remains the private escape hatch. Resolved per call, so
+# module import order can never pin the decision before model eligibility.
+def _router_fast_topk_enabled() -> bool:
+    explicit = envs.SGLANG_ROUTER_FAST_TOPK.get()
+    if explicit is None:
+        from sglang.kernels.ops.gemm.sm120_online_fp8 import fast_paths_enabled
+
+        return fast_paths_enabled()
+    return explicit
 
 
 if _is_cuda:
@@ -877,17 +906,26 @@ def fused_topk(
         # ===== END TO BE REFACTORED ====
         elif _is_cuda:
             # Unified Triton router (subsumes the AOT topk_softmax CUDA kernel).
+            from sglang.kernels.ops.moe import moe_router_softmax_fast as _rfast
             from sglang.kernels.ops.moe.moe_fused_gate import (
                 moe_fused_gate as _jit_moe_fused_gate,
             )
 
-            topk_weights, topk_ids = _jit_moe_fused_gate(
-                gating_output,
-                None,
-                topk,
-                scoring_func="softmax",
-                renormalize=renormalize,
-            )
+            zero_bias = _get_zero_bias(gating_output.shape[1], gating_output.device)
+            if _router_fast_topk_enabled() and _rfast.covered(
+                gating_output, zero_bias, topk
+            ):
+                topk_weights, topk_ids = _rfast.route_softmax_fast(
+                    gating_output, zero_bias, topk, renormalize=renormalize
+                )
+            else:
+                topk_weights, topk_ids = _jit_moe_fused_gate(
+                    gating_output,
+                    zero_bias,
+                    topk,
+                    scoring_func="softmax",
+                    renormalize=renormalize,
+                )
         else:
             topk_softmax(
                 topk_weights,

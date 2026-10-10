@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -22,8 +21,6 @@ if TYPE_CHECKING:
     from sglang.srt.managers.tp_worker import TpModelWorker
     from sglang.srt.model_executor.model_runner import ModelRunner
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
-
-logger = logging.getLogger(__name__)
 
 
 class HiCacheDraftMode(str, Enum):
@@ -61,11 +58,6 @@ class EagleDraftWorkerBase(ABC):
     # topk=1 chain constants for draft_forward's fast path; None when topk > 1.
     _topk1_parents_prealloc: Optional[torch.Tensor] = None
     _topk1_score_indices_prealloc: Optional[torch.Tensor] = None
-    # Async device->host staging of the draft's own top-1 probabilities, for the
-    # opt-in confidence step policy (adaptive_confidence). None unless
-    # SGLANG_ADAPTIVE_POLICY=confidence (or _TRACE) is set.
-    _chain_conf_buf: Optional[torch.Tensor] = None
-    _conf_channel = None
 
     def __init__(self) -> None:
         self._specialized_graph_memory_usage: dict[str, float] = {}
@@ -150,36 +142,6 @@ class EagleDraftWorkerBase(ABC):
         self._topk1_score_indices_prealloc = torch.arange(
             num_steps, dtype=torch.long, device=self.device
         ).repeat(max_bs, 1)
-        self._init_confidence_channel(max_bs, num_steps)
-
-    def _init_confidence_channel(self, max_bs: int, num_steps: int) -> None:
-        """Size the confidence side channel once, for the widest chain. Donor
-        (flash-next-fast @ 5105985) builds it here because this is the one place
-        that knows both the serving batch ceiling and the step count; adaptive
-        decoding re-enters on every width switch, and the ring keeps the launch
-        (widest) sizing rather than the current candidate's.
-        """
-        from sglang.srt.speculative.adaptive_confidence import (
-            ConfidenceChannel,
-            chain_trace_enabled,
-            confidence_enabled,
-        )
-
-        if not confidence_enabled() or self._conf_channel is not None:
-            return
-        if chain_trace_enabled():
-            self._chain_conf_buf = torch.zeros(
-                (max_bs, max(num_steps, 1)), dtype=torch.float32, device=self.device
-            )
-        self._conf_channel = ConfidenceChannel(
-            device=self.device, max_bs=max_bs, max_steps=max(num_steps, 1)
-        )
-        logger.info(
-            "C1 draft-confidence channel enabled (max_bs=%d, steps=%d, chain_trace=%s)",
-            max_bs,
-            num_steps,
-            chain_trace_enabled(),
-        )
 
 
 class BaseSpecWorker(ABC):

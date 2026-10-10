@@ -12,7 +12,6 @@ import torch.nn.functional as F
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
-from sglang.kernels.ops.gemm import sm120_w8a16_gemv
 from sglang.kernels.ops.quantization.fp8_kernel import (
     fp8_dtype,
     is_fp8_fnuz,
@@ -845,12 +844,6 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if self.block_quant:
-            if self.use_mxfp8 and sm120_w8a16_gemv.mxfp8_gemv_enabled():
-                # Weight post-processing is the last hook before warm-up and graph
-                # capture, and the candidate's split-K scratch must not be
-                # allocated inside a capture (it would land in that graph's
-                # private memory pool).
-                sm120_w8a16_gemv.prealloc(layer.weight.device)
             self.process_weights_after_loading_block_quant(layer)
         else:
             layer.weight = Parameter(layer.weight.data, requires_grad=False)
@@ -980,27 +973,6 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if self.use_mxfp8:
             backend = self.mxfp8_dense_backend
-            # Opt-in candidate (SGLANG_FP8_MXFP8_W8A16_GEMV=1, default OFF): the
-            # low-row W8A16 GEMV reads the stored block-MXFP8 weight and its
-            # UE8M0 [1, 32] scales directly, with the BF16 activation untouched.
-            # Nothing is requantized and no second weight format is created; the
-            # arithmetic is x(bf16) @ dequant(w, ue8m0)(bf16)^T accumulated in
-            # fp32, so it is NOT bitwise identity with the activation-quantized
-            # W8A8 result below, just the same stored weight.  Every call the
-            # contract does not cover -- a bias, a pre-quantized (input, scale)
-            # tuple, more than 16 rows, an unusual layout/stride, a TRT-LLM row
-            # permutation, or a part that is not exactly SM120 -- returns None
-            # and takes the untouched dispatch under this branch, unchanged.
-            if (
-                bias is None
-                and not isinstance(x, tuple)
-                and not backend.is_flashinfer_trtllm()
-            ):
-                gemv_out = sm120_w8a16_gemv.lowrow_mxfp8_gemv(
-                    x, layer.weight, getattr(layer, "weight_scale_inv", None), layer
-                )
-                if gemv_out is not None:
-                    return gemv_out
             extra_kwargs = {}
             if backend.is_flashinfer_cutlass() or backend.is_flashinfer_cutedsl():
                 weight_scale = layer.weight_scale_inv_swizzled

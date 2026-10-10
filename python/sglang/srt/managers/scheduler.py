@@ -148,6 +148,7 @@ from sglang.srt.managers.io_struct import (
     LoadLoRAAdapterFromTensorsReqOutput,
     LoadLoRAAdapterReqInput,
     LoadLoRAAdapterReqOutput,
+    MMInputsProcessError,
     OpenSessionReqInput,
     PauseGenerationReqInput,
     ProfileReq,
@@ -265,6 +266,7 @@ from sglang.srt.managers.scheduler_pp_mixin import SchedulerPPMixin
 from sglang.srt.managers.utils import (
     EmbeddingBatchResult,
     GenerationBatchResult,
+    compute_spec_context_reserve,
     is_health_check_generate_req,
     validate_input_length,
 )
@@ -273,6 +275,9 @@ from sglang.srt.mem_cache.common import (
     maybe_cache_unfinished_req,
     release_kv_cache,
     retraction_discard,
+)
+from sglang.srt.model_executor.cuda_graph_config import (
+    clear_adaptive_launch_capture_scope,
 )
 from sglang.srt.model_executor.forward_batch_info import PPProxyTensors
 from sglang.srt.model_loader.utils import get_resolved_model_impl
@@ -346,6 +351,10 @@ else:
 logger = logging.getLogger(__name__)
 
 
+class _MultimodalInputProcessingError(RuntimeError):
+    """A rank could not build MultimodalInputs for a request (features lost in transport)."""
+
+
 def _prewarm_hccl_group(device, group, device_module):
     warmup_tensor = torch.zeros(1, dtype=torch.int32, device=device)
     torch.distributed.all_reduce(warmup_tensor, group=group)
@@ -393,6 +402,10 @@ class Scheduler(
     SchedulerMlxOverlapMixin,
 ):
     """A scheduler that manages a tensor parallel GPU worker."""
+
+    # Context kept free past each request's length cap for speculative
+    # lookahead (see compute_spec_context_reserve); 0 when spec is off.
+    spec_context_reserve: int = 0
 
     def __init__(
         self,
@@ -913,7 +926,15 @@ class Scheduler(
         # Initialize GEMM-related configuration for FP8 and FP4 backends.
         initialize_fp8_gemm_config()
         initialize_fp4_gemm_config()
-        initialize_bf16_gemm_config(self.server_args)
+        # The online-FP8 default selection needs the actual loaded model
+        # configuration (metadata, resolved dtype, head tying) and this
+        # scheduler's assigned device, not a filename or a GPU0 probe.
+        initialize_bf16_gemm_config(
+            self.server_args,
+            model_config=self.model_config,
+            device=get_device().device,
+            gpu_id=self.ps.gpu_id,
+        )
 
         # This must be called after initialize_moe_config
         self.require_mlp_sync = require_mlp_sync()
@@ -1001,10 +1022,27 @@ class Scheduler(
             self.draft_worker.init_attention_backends()
 
     def init_all_cuda_graphs(self):
-        """Capture cuda graphs for all workers."""
-        self.tp_worker.init_cuda_graphs()
-        if self.draft_worker is not None:
-            self.draft_worker.init_cuda_graphs()
+        """Capture cuda graphs for all workers.
+
+        An adaptive EAGLE worker first plans the launch width's capture prune;
+        the scoped config is applied only AT the decode-capture boundaries
+        (the target verify graphs inside capture_cuda_graphs, then the draft
+        decode / draft-extend graphs), never around the whole workers: the
+        process-shared logits buffer and the eager fixed-max buffers must be
+        provisioned off the FULL canonical bucket list to serve every bucket
+        and width the run can reach. The queue is cleared on every exit path.
+        Every other draft worker -- fixed-width, DFLASH, Frozen-KV MTP --
+        queues nothing and captures the published buckets exactly as before.
+        """
+        prepare = getattr(self.draft_worker, "prepare_adaptive_launch_capture", None)
+        try:
+            if prepare is not None:
+                prepare()
+            self.tp_worker.init_cuda_graphs()
+            if self.draft_worker is not None:
+                self.draft_worker.init_cuda_graphs()
+        finally:
+            clear_adaptive_launch_capture_scope()
 
     def init_model_worker(self):
         # Load model weights.
@@ -1057,6 +1095,7 @@ class Scheduler(
             _,
             _,
         ) = self.tp_worker.get_worker_info()
+        self.spec_context_reserve = compute_spec_context_reserve(self.enable_overlap)
         # DFlash auto-enables the legacy formula; other workloads opt in via
         # --min-free-slots-delay. Built independently of the prefill delayer.
         self.min_free_slots_delayer: Optional[MinFreeSlotsDelayer] = None
@@ -1969,7 +2008,7 @@ class Scheduler(
 
         for tokenized_req in tokenized_reqs:
             if tokenized_req.mm_inputs is not None and not isinstance(
-                tokenized_req.mm_inputs, MultimodalInputs
+                tokenized_req.mm_inputs, (MultimodalInputs, MMInputsProcessError)
             ):
                 tokenized_req.mm_inputs = MultimodalInputs.from_processor_output(
                     tokenized_req.mm_inputs
@@ -2259,7 +2298,7 @@ class Scheduler(
             0,
             min(
                 max_new_tokens,
-                self.max_req_len - input_len - 1,
+                self.max_req_len - input_len - 1 - self.spec_context_reserve,
                 self.max_total_num_tokens * get_parallel().attn_dcp_size
                 - paged_input_len
                 - self.page_size
@@ -2340,6 +2379,8 @@ class Scheduler(
         return image_inputs
 
     def _get_multimodal_inputs(self, mm_inputs):
+        if isinstance(mm_inputs, MMInputsProcessError):
+            raise _MultimodalInputProcessingError(mm_inputs.message)
         if isinstance(mm_inputs, MultimodalInputs):
             return mm_inputs
 
@@ -2425,10 +2466,63 @@ class Scheduler(
             mm_inputs.release_features()
             req.multimodal_inputs = None
 
+    def _reject_mm_transport_failure(self, recv_req, *, generate: bool = True) -> bool:
+        """Abort a request whose multimodal features were lost in transport.
+
+        The request receiver replaces ``mm_inputs`` with an MMInputsProcessError
+        marker on every rank when a shared-memory feature segment could not be
+        materialized. Such a request must never reach session handling (which
+        dereferences mm_items while stripping a BOS and mutates session state)
+        nor the model; it is answered with a retryable 500 here, first thing.
+        """
+        marker = recv_req.mm_inputs
+        if not isinstance(marker, MMInputsProcessError):
+            return False
+        # Keep the bootstrap coordinates and the disaggregation mode: the Req's
+        # time stats and any later bookkeeping are shaped by them, and dropping
+        # them is what made the decode prealloc queue dereference None.
+        req = Req(
+            recv_req.rid,
+            recv_req.input_text,
+            recv_req.input_ids,
+            recv_req.sampling_params,
+            vocab_size=self.model_config.vocab_size,
+            http_worker_ipc=recv_req.http_worker_ipc,
+            bootstrap_host=getattr(recv_req, "bootstrap_host", None),
+            bootstrap_port=getattr(recv_req, "bootstrap_port", None),
+            bootstrap_room=getattr(recv_req, "bootstrap_room", None),
+            disagg_mode=self.disaggregation_mode,
+        )
+        req.tokenizer = self.tokenizer
+        if self.disaggregation_mode == DisaggregationMode.NULL:
+            # Unified serving: the waiting queue finishes an aborted request on
+            # the next scheduler step, like every other early rejection here.
+            req.set_finish_with_abort(
+                marker.message,
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                err_type="InternalServerError",
+            )
+            if generate:
+                self.init_req_max_new_tokens(req)
+            self._add_request_to_queue(req)
+            return True
+        # Disaggregated prefill/decode worker: the bootstrap and prealloc queues
+        # would start a KV transfer for a request that has no features and no
+        # future, so answer directly instead (the same direct path the session
+        # validation errors above use). One error response, no queue entry.
+        prepare_abort(req, marker.message, status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+        req.finished_reason.err_type = "InternalServerError"
+        self.output_streamer.stream_output([req], req.return_logprob)
+        return True
+
     def handle_generate_request(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
+        # Features lost in transport: reject before any session/state handling.
+        if self._reject_mm_transport_failure(recv_req):
+            return
+
         # Route: normal request / session request / session-not-found
         session_id = (
             recv_req.session_params.id if recv_req.session_params is not None else None
@@ -2626,7 +2720,18 @@ class Scheduler(
 
         # Handle multimodal inputs
         if recv_req.mm_inputs is not None:
-            image_inputs = self._get_multimodal_inputs(recv_req.mm_inputs)
+            try:
+                image_inputs = self._get_multimodal_inputs(recv_req.mm_inputs)
+            except _MultimodalInputProcessingError as error:
+                # A transport fault, not a bad request: 500 so clients may retry.
+                req.set_finish_with_abort(
+                    str(error),
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    err_type="InternalServerError",
+                )
+                self.init_req_max_new_tokens(req)
+                self._add_request_to_queue(req)
+                return
 
             SessionController.adjust_mm_offsets(recv_req, req, image_inputs)
 
@@ -2924,6 +3029,8 @@ class Scheduler(
         self,
         recv_req: TokenizedEmbeddingReqInput,
     ):
+        if self._reject_mm_transport_failure(recv_req, generate=False):
+            return
         req = Req(
             recv_req.rid,
             recv_req.input_text,
@@ -2945,7 +3052,17 @@ class Scheduler(
 
         # Handle multimodal inputs
         if recv_req.mm_inputs is not None:
-            image_inputs = self._get_multimodal_inputs(recv_req.mm_inputs)
+            try:
+                image_inputs = self._get_multimodal_inputs(recv_req.mm_inputs)
+            except _MultimodalInputProcessingError as error:
+                # A transport fault, not a bad request: 500 so clients may retry.
+                req.set_finish_with_abort(
+                    str(error),
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    err_type="InternalServerError",
+                )
+                self._add_request_to_queue(req)
+                return
             # Expand a single image token into multiple dummy tokens for receiving image embeddings
             # The `pad_input_ids_func` is model-specific and may be None for
             # embedding models or models not requiring special padding.

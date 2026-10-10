@@ -43,6 +43,7 @@ class _HostBoundaryFixture:
 
         self.full = object.__new__(FullComponent)
         self.mamba = object.__new__(MambaComponent)
+
         def session_predicate(node):
             return node.component_data[ComponentType.MAMBA].session_ref > 0
 
@@ -65,6 +66,11 @@ class _HostBoundaryFixture:
         self.full.tree_core = self.tree
         self.mamba.tree_core = self.tree
         self.mamba.mamba_checkpoint_grid = page_size
+        # Reporting logs the host pool occupancy on every reclaim.
+        pool = SimpleNamespace(size=4, available_size=lambda: 3)
+        self.mamba.cache = SimpleNamespace(
+            host_pool_group=SimpleNamespace(get_pool=lambda _name: pool)
+        )
 
     def add(
         self,
@@ -173,11 +179,12 @@ class TestMambaHostEvictionPreference(unittest.TestCase):
     def test_prefers_redundant_intermediate_over_older_terminal(self):
         f, terminal, redundant, _ = self._terminal_and_redundant()
 
-        selected = f.mamba._select_host_eviction_candidate(
+        selected, kind = f.mamba._select_host_eviction_candidate(
             f.tree.host_lru_lists[ComponentType.MAMBA]
         )
 
         self.assertIs(selected, redundant)
+        self.assertEqual(kind, "interior")
         self.assertIsNot(selected, terminal)
 
     def test_drive_reclaims_intermediate_without_deleting_terminal_full_kv(self):
@@ -221,11 +228,12 @@ class TestMambaHostEvictionPreference(unittest.TestCase):
         f, terminal, redundant, _ = self._terminal_and_redundant()
         redundant.component_data[ComponentType.MAMBA].host_lock_ref = 1
 
-        selected = f.mamba._select_host_eviction_candidate(
+        selected, kind = f.mamba._select_host_eviction_candidate(
             f.tree.host_lru_lists[ComponentType.MAMBA]
         )
 
         self.assertIs(selected, terminal)
+        self.assertEqual(kind, "leaf")
 
     def test_preference_does_not_cross_session_partition(self):
         f = _HostBoundaryFixture(enable_sessions=True)
@@ -233,11 +241,12 @@ class TestMambaHostEvictionPreference(unittest.TestCase):
         redundant = f.add(f.root, 20, session_ref=1)
         f.add(redundant, 30, session_ref=1)
 
-        selected = f.mamba._select_host_eviction_candidate(
+        selected, kind = f.mamba._select_host_eviction_candidate(
             f.tree.host_lru_lists[ComponentType.MAMBA]
         )
 
         self.assertIs(selected, terminal)
+        self.assertNotEqual(kind, "interior")
 
     def test_session_cursor_is_removed_when_candidate_check_raises(self):
         f = _HostBoundaryFixture(enable_sessions=True)

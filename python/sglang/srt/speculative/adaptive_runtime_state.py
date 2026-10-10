@@ -107,7 +107,12 @@ class AdaptiveController:
 
     The worker only needs to:
       1. Call register() for the initial state, then init_states()
-         once during startup.
+         once during startup. Before the launch width's start-up capture,
+         the scheduler runs the worker's prepare_adaptive_launch_capture()
+         (which calls plan_launch_capture()) so its decode graphs are captured
+         only for the buckets the policy can route to that width -- at the
+         decode-capture boundaries, never around the shared-buffer
+         provisioning.
       2. Call on_verify_complete(results, batch_size) after each decode verify,
          to feed the policy of that batch's size.
       3. Call activate_step_by_batch(batch_size) before each decode forward --
@@ -127,10 +132,45 @@ class AdaptiveController:
             cfg_path=config_path,
         )
         self._states: dict[int, SpecRuntimeState] = {}
+        # The FULL canonical decode bucket list the launch-width capture read
+        # before plan_launch_capture() scoped it; init_states() sizes the
+        # per-width prunes against this, not against the live (scoped) config.
+        self._launch_cuda_graph_bs: list[int] | None = None
 
     @property
     def candidate_steps(self) -> list[int]:
         return self.params.candidate_steps
+
+    @property
+    def launch_cuda_graph_bs(self) -> list[int] | None:
+        """Canonical decode buckets from before the launch-width scoping.
+
+        ``None`` until ``plan_launch_capture()`` has run, and stays ``None``
+        when decode graphs are disabled -- the same "no pruning" semantics
+        ``init_states(cuda_graph_bs=None)`` already carries.
+        """
+        return self._launch_cuda_graph_bs
+
+    def plan_launch_capture(self, cuda_graph_bs: list[int] | None) -> list[int] | None:
+        """Size the policy against the canonical capture list and return the
+        buckets the LAUNCH width can reach.
+
+        The worker calls this from prepare_adaptive_launch_capture() before
+        the launch width's target/draft startup captures; the returned subset
+        is queued for the decode-capture boundaries only, so the process-
+        shared logits and eager fixed-max provisioning stay full-width.
+        Until now the launch width's prunes had nowhere to land: init_states()
+        skips the registered launch state, so cuda_graph_bs_for_step only ever
+        reached the widths built here. Validating first keeps the
+        wider-than-launch refusal fail-loud ahead of the first capture, so a
+        refused table never leaves half-captured graphs behind. The FULL list
+        is kept for init_states(): the narrower widths may reach buckets the
+        launch width cannot.
+        """
+        self.validate_candidates()
+        self.params.set_cuda_graph_bs(cuda_graph_bs)
+        self._launch_cuda_graph_bs = sorted(cuda_graph_bs) if cuda_graph_bs else None
+        return self.params.cuda_graph_bs_for_step(self.initial_steps)
 
     def register(self, state: SpecRuntimeState, steps: int | None = None) -> None:
         """Register a pre-built runtime state.
@@ -191,17 +231,6 @@ class AdaptiveController:
         target = self.params.get_steps_for_batch(batch_size)
         if target != self.worker.speculative_num_steps:
             self._activate(target)
-
-    def observe_confidence(self, confidences: list[float], batch_size: int) -> None:
-        """Draft confidence for the chain that is about to be drafted.
-
-        Routed by ``batch_size`` like every other observation, so a C1 slot only
-        ever sees C1 chains; the fixed C>=2 tier has one candidate and cannot be
-        widened by a sample at all. The confidence itself arrives through the
-        async side channel (``ConfidenceChannel.latest_position0``), which never
-        synchronises a stream.
-        """
-        self.params.observe_confidence(confidences, batch_size)
 
     def on_verify_complete(
         self, num_correct_drafts_per_req: list[int], batch_size: int
