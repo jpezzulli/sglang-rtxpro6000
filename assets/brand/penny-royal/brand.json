@@ -1,0 +1,61 @@
+{
+  "kit": "penny-royal-brand-kit",
+  "version": "1.0",
+  "displayName": "Penny Royal",
+  "cliName": "pennyroyal",
+  "nameRules": {
+    "display": "Exactly 'Penny Royal': two words, capital P and R",
+    "identifier": "'pennyroyal' is CLI/identifier spelling only"
+  },
+  "palette": {
+    "obsidian": "#0B0D10",
+    "charcoal": "#171A20",
+    "silver": "#CBD0D8",
+    "violet": "#7042A6",
+    "paper": "#F4F3F0",
+    "black": "#000000",
+    "white": "#FFFFFF",
+    "accentPolicy": "flat marks are pure black/white; violet is a restrained accent in detailed artwork and page accents only; text is silver/white on dark or obsidian on light"
+  },
+  "typography": {
+    "wordmark": "DejaVu Sans ExtraLight, outlined to native SVG paths (no consumer font dependency)",
+    "companion": "headings: clean readable sans-serif with restrained tracking; body: normal readable weights per host-site typography",
+    "license": "Bitstream Vera / DejaVu public-domain notice, see FONT-LICENSE.txt"
+  },
+  "emblem": {
+    "viewBox": "67 114 400 400",
+    "geometry": "eight fill-only measured polygons; do not alter",
+    "minSizePx": 32,
+    "clearSpace": "15% of emblem width on all sides"
+  },
+  "assets": {
+    "logos/emblem-black.svg": "monochrome black standalone emblem (master mark)",
+    "logos/emblem-white.svg": "monochrome white standalone emblem for dark backgrounds",
+    "logos/logo-stacked-light.svg": "stacked lockup, pure black, light backgrounds",
+    "logos/logo-stacked-dark.svg": "stacked lockup, pure white, dark backgrounds",
+    "logos/logo-horizontal-light.svg": "horizontal lockup, pure black, light backgrounds",
+    "logos/logo-horizontal-dark.svg": "horizontal lockup, pure white, dark backgrounds",
+    "png/emblem-black-1024.png": "transparent 1024px square emblem, black",
+    "png/emblem-white-1024.png": "transparent 1024px square emblem, white",
+    "png/emblem-black-32.png": "32px emblem icon, black",
+    "png/emblem-black-128.png": "128px emblem icon, black",
+    "png/emblem-white-32.png": "32px emblem icon, white",
+    "png/emblem-white-128.png": "128px emblem icon, white",
+    "png/logo-stacked-light-1600.png": "transparent stacked lockup, 1600x1948",
+    "png/logo-stacked-dark-1600.png": "transparent stacked lockup, 1600x1948",
+    "png/logo-horizontal-light-1600.png": "transparent horizontal lockup, 1600x416",
+    "png/logo-horizontal-dark-1600.png": "transparent horizontal lockup, 1600x416",
+    "reference/approved-concept.png": "approved original concept image, 1536x1024 RGB; all emblem geometry derives from it",
+    "artwork/penny-royal-crystal.png": "text-free crystal hero artwork, 1672x941 RGB wide near-16:9, artwork on right with dark left space for page headings",
+    "artwork/penny-royal-crystal-transparent.png": "square crystal cutout, 1254x1254 RGBA with genuine alpha",
+    "artwork/PROMPTS.md": "source prompts for the supplied artwork",
+    "FONT-LICENSE.txt": "wordmark font license and attribution",
+    "brand.json": "this manifest",
+    "README.md": "usage guide"
+  },
+  "altText": {
+    "emblem": "Penny Royal emblem",
+    "lockups": "Penny Royal"
+  },
+  "origin": "Name inspired by Penny Royal, the AI in Neal Asher's Polity universe: https://www.nealasher.co.uk/penny-royal-iii-started/"
+}
