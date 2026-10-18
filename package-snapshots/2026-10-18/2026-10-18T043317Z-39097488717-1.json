@@ -1,0 +1,98 @@
+{
+  "collected_at": "2026-10-18T04:33:17Z",
+  "first_collected_at": "2026-09-16T12:21:06Z",
+  "package": "ghcr.io/jpezzulli/sglang-rtxpro6000",
+  "package_html_url": "https://github.com/users/jpezzulli/packages/container/package/sglang-rtxpro6000",
+  "package_published_date": "2026-09-15",
+  "repository": "jpezzulli/sglang-rtxpro6000",
+  "schema_version": 1,
+  "source_sha256": "2a04ac846ee48e8bdd2ecbca1c4fb159240663b04244f1e7776c188a948fb909",
+  "total_downloads": 10478,
+  "versions": {
+    "1249529601": {
+      "available": true,
+      "digest": "sha256:1d71b02dde64d3edb454fb6020b7b21bb32dee7ba0ddaacefbf9df6b266940d7",
+      "downloads": 943,
+      "html_url": "https://github.com/users/jpezzulli/packages/container/sglang-rtxpro6000/1249529601",
+      "last_observed_at": "2026-10-18T04:33:17Z",
+      "tags": [
+        "build-b976bb329cfc1376b7d4589d55871f586d460ad4",
+        "v2.5.0"
+      ],
+      "version_id": 1249529601
+    },
+    "1258528724": {
+      "available": true,
+      "digest": "sha256:76258532b1c01f7583fbe951f90b80903db931030291db9db4e5a68b28567866",
+      "downloads": 1006,
+      "html_url": "https://github.com/users/jpezzulli/packages/container/sglang-rtxpro6000/1258528724",
+      "last_observed_at": "2026-10-18T04:33:17Z",
+      "tags": [
+        "build-2d6689abdac6f200091e9aa1ae65e95b86d9dd82",
+        "v2.5.1"
+      ],
+      "version_id": 1258528724
+    },
+    "1292540752": {
+      "available": true,
+      "digest": "sha256:294953f40d847b5ff78e89fab41e8657ca925709cb78893d51607792bf51a0d3",
+      "downloads": 1114,
+      "html_url": "https://github.com/users/jpezzulli/packages/container/sglang-rtxpro6000/1292540752",
+      "last_observed_at": "2026-10-18T04:33:17Z",
+      "tags": [
+        "build-5cd0818abf27cc524ee15b1fedb23070855d9ea6",
+        "v2.5.2"
+      ],
+      "version_id": 1292540752
+    },
+    "1303006070": {
+      "available": true,
+      "digest": "sha256:81d4d3d19b21e30b895f57e3628a8dd82c02a52c17e6234f5f3ea7836fd31fb3",
+      "downloads": 1588,
+      "html_url": "https://github.com/users/jpezzulli/packages/container/sglang-rtxpro6000/1303006070",
+      "last_observed_at": "2026-10-18T04:33:17Z",
+      "tags": [
+        "build-d00d88efc8d6281b12be4f4073126aec95038c55",
+        "v2.5.3"
+      ],
+      "version_id": 1303006070
+    },
+    "1367311842": {
+      "available": true,
+      "digest": "sha256:fd26ba8d3ce001bb6e4b865236e1b69f7f790b94fb7fe1c32aa81799f4fe338c",
+      "downloads": 651,
+      "html_url": "https://github.com/users/jpezzulli/packages/container/sglang-rtxpro6000/1367311842",
+      "last_observed_at": "2026-10-18T04:33:17Z",
+      "tags": [
+        "build-5d33142c1f3fd3df1548b9682f728fcdd8c7a710",
+        "v3.0.0"
+      ],
+      "version_id": 1367311842
+    },
+    "1369575549": {
+      "available": true,
+      "digest": "sha256:25400f5609a67a692a40e8567e4a0e635b619279ab411f2a363b02a06251f2d1",
+      "downloads": 1072,
+      "html_url": "https://github.com/users/jpezzulli/packages/container/sglang-rtxpro6000/1369575549",
+      "last_observed_at": "2026-10-18T04:33:17Z",
+      "tags": [
+        "build-6ade93c1a4c52b595ada318466bc41ae190b2709",
+        "v3.0.1"
+      ],
+      "version_id": 1369575549
+    },
+    "1402440307": {
+      "available": true,
+      "digest": "sha256:9bbf48772aff665755d42ea3192bf8221dad9b88a012faba364fad280b18b80a",
+      "downloads": 23,
+      "html_url": "https://github.com/users/jpezzulli/packages/container/sglang-rtxpro6000/1402440307",
+      "last_observed_at": "2026-10-18T04:33:17Z",
+      "tags": [
+        "build-6b501b800181756890561fe3107c2ed551c1d302",
+        "build-cache",
+        "v3.0.2"
+      ],
+      "version_id": 1402440307
+    }
+  }
+}
