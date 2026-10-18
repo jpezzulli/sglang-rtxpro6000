@@ -2,12 +2,12 @@
 
 Model: [`jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4`](https://huggingface.co/jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4).
 Model created: **2026-09-17T03:42:44.000Z**. First captured: **2026-10-06T00:29:45Z**.
-Latest capture: **2026-10-17T04:25:31Z**.
+Latest capture: **2026-10-18T04:33:27Z**.
 
 | Metric | Latest reported | Change from previous archived day |
 | --- | ---: | ---: |
-| All-time downloads (lifetime) | 3,075 | +288 |
-| Rolling 30-day downloads | 3,075 | +288 |
+| All-time downloads (lifetime) | 3,782 | +707 |
+| Rolling 30-day downloads | 3,646 | +571 |
 | Likes | 20 | +0 |
 
 These are Hugging Face public API counters, not unique users or verified installations. The `downloads` field represents a rolling 30-day window; `downloadsAllTime` is cumulative since model creation. Exact daily download history before the first archived observation is unavailable and must never be reconstructed by summing rolling windows.
@@ -28,6 +28,7 @@ These are Hugging Face public API counters, not unique users or verified install
 | 2026-10-15 | 2026-10-15T04:38:32Z | 2,620 | 2,620 | 19 |
 | 2026-10-16 | 2026-10-16T04:32:00Z | 2,787 | 2,787 | 20 |
 | 2026-10-17 | 2026-10-17T04:25:31Z | 3,075 | 3,075 | 20 |
+| 2026-10-18 | 2026-10-18T04:33:27Z | 3,782 | 3,646 | 20 |
 
 Provenance: unauthenticated public API metadata from
 `https://huggingface.co/api/models/jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4?expand%5B%5D=createdAt&expand%5B%5D=lastModified&expand%5B%5D=downloads&expand%5B%5D=downloadsAllTime&expand%5B%5D=likes`
