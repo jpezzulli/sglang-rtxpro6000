@@ -194,7 +194,7 @@ launch_args=(serve \
   --trust-remote-code --chat-template "$CHAT_TEMPLATE" \
   --image-processor-backend "$IMAGE_PROCESSOR_BACKEND" \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
-  --enable-request-time-stats-logging --enable-metrics \
+  --enable-request-time-stats-logging --enable-metrics --enable-cache-report \
   --default-chat-template-kwargs "$DEFAULT_CHAT_TEMPLATE_KWARGS" \
   --enable-hierarchical-cache --hicache-size "$HICACHE_SIZE_GB" --hicache-host-memory-mode cache \
   --hicache-write-policy write_through --hicache-io-backend kernel \

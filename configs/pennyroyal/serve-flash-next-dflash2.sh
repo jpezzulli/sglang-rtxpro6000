@@ -317,7 +317,7 @@ launch_args=(serve \
   "${PLE_ARGS[@]}" --trust-remote-code \
   --chat-template "$CHAT_TEMPLATE" --image-processor-backend "$IMAGE_PROCESSOR_BACKEND" \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
-  --enable-request-time-stats-logging --enable-metrics \
+  --enable-request-time-stats-logging --enable-metrics --enable-cache-report \
   --default-chat-template-kwargs "$DEFAULT_CHAT_TEMPLATE_KWARGS" \
   --speculative-algorithm "$SPECULATIVE_ALGORITHM" \
   --speculative-num-steps "$SPEC_STEPS" \
