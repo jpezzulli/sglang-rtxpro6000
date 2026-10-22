@@ -91,6 +91,18 @@ and manage the files yourself. Restart the server to apply changed settings.
 - **NIXL:** optional disk-cache tier, on by default. Disabling it preserves GPU
   and RAM caching.
 - **NIXL disk budget:** GiB. Zero means unlimited disk budget, **not disabled**.
+- **MTP width policy (`PENNY_MTP_POLICY`, the native-MTP profiles):** how wide
+  the draft blocks are by concurrency — `tiered` (the qualified default: block 8
+  at one running request, block 4 at two or more), `adaptive` (the v3.0.2 policy,
+  which may move between the two at one request) or `fixed-w4` (block 4 at every
+  concurrency). It is asked in the advanced section, it is saved like any other
+  setting, and one value picks both the bundled policy file and the launch width
+  that carries it. A container save writes your answer into the startup script's
+  settings block as `PENNY_MTP_POLICY=<choice>`, so the generated launch carries
+  its own policy with it. Nothing exported and nothing saved leaves the recipe's
+  qualified default in charge. The DFlash2 profiles have no such question: they
+  route their own widths and read nothing from this setting, so a value saved for
+  them changes nothing.
 - **PLE:** Flash-Next table placement in RAM or a prepared NVMe snapshot,
   independent of whether NIXL is on.
 - **Other settings:** model paths, ports, context/request capacity, reasoning,

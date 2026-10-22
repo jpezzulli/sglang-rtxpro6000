@@ -175,6 +175,7 @@ _ADVANCED_ORDER = (
     "SGLANG_HICACHE_TORCH_PINNED_ALLOC",
     "SGLANG_MM_PREPROCESS_DEVICE",
     "SGLANG_FORWARD_UNKNOWN_TOOLS",
+    pc.MTP_POLICY_KEY,
     "MAX_RUNNING_REQUESTS",
     "MAX_MAMBA_CACHE_SIZE",
     "MAX_TOTAL_TOKENS",
@@ -265,6 +266,17 @@ _EXPLANATIONS = {
     "leave it off on native Linux",
     "SGLANG_FORWARD_UNKNOWN_TOOLS": "pass tool names this build does not know "
     "through to the model",
+    pc.MTP_POLICY_KEY: "how wide the native-MTP draft blocks are at each "
+    "concurrency. tiered is what the recipes are "
+    "qualified with (block 8 at one running request, "
+    "block 4 at two or more); adaptive restores the "
+    "v3.0.2 policy, which may move between the two at "
+    "one request; fixed-w4 keeps block 4 everywhere. "
+    "The choice also sets the launch width and its "
+    "graphs. Saved values win over the environment like "
+    "any other setting, so a shell value decides only "
+    "while nothing is saved here; the DFlash2 profiles "
+    "route their own widths and do not have the knob",
     "MAX_RUNNING_REQUESTS": "how many requests are admitted at once; leaving "
     "it blank uses the recipe default",
     "MAX_MAMBA_CACHE_SIZE": "how many recurrent-state slots are kept; blank "

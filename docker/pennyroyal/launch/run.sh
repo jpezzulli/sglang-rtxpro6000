@@ -40,6 +40,13 @@
 # PENNY_REASONING_EFFORT, MAX_TOTAL_TOKENS, ...) are read by the startup script
 # from the container environment. This example forwards none of them: set them
 # in the startup script, or add '-e NAME=value' to the docker arguments below.
+# The native-MTP width policy is one of those settings: the startup script names
+# it as PENNY_MTP_POLICY, with 'tiered' (the qualified default: block 8 at one
+# running request, block 4 at two or more), 'adaptive' (the v3.0.2 policy: block
+# 4 or 8 at one request under the existing hold, block 4 at two or more) or
+# 'fixed-w4' (block 4 at every concurrency) to choose from, and the choice also
+# sets the launch width. ./configure-penny --container writes your answer into
+# that line.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
