@@ -72,7 +72,7 @@ PROFILE_HICACHE_SIZE_GB = {
     "27b": "96",
 }
 CONTAINER_MODELS_TARGET = "/models"
-DEFAULT_IMAGE = "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.1"
+DEFAULT_IMAGE = "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.2"
 COMPOSE_RELPATH = "docker/pennyroyal/compose.yaml"
 # The accepted manual container path: an ordinary host run.sh plus a mounted,
 # user-editable directory of SGLang startup scripts and NIXL TOMLs. The beta

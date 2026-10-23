@@ -53,7 +53,7 @@ Use matching source and image tags from the release notes. Download only the
 small launch-file set; a full source checkout is optional.
 
 ```bash
-RELEASE_REF='pennyroyal-v3.1.1'
+RELEASE_REF='pennyroyal-v3.1.2'
 BASE="https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/$RELEASE_REF/docker/pennyroyal/launch"
 mkdir -p pennyroyal/config
 cd pennyroyal
@@ -142,7 +142,7 @@ the target checkpoint; add `--startup config/start-flash-next-dflash2.sh`
 for the optional DFlash2 profile, which also needs its draft checkpoint:
 
 ```bash
-IMAGE='ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.1'
+IMAGE='ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.2'
 ./run.sh --image "$IMAGE"
 ```
 

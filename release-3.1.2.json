@@ -1,0 +1,83 @@
+{
+  "schema": "release-notes/3.1.2",
+  "version": "3.1.2",
+  "status": {
+    "is_draft": true,
+    "publication_approved": false,
+    "published": false,
+    "container": "not built"
+  },
+  "source": {
+    "base": "4a5610478fbc82e7e4f4ae07f1c1d221547ad66f",
+    "integrated_pulls": {
+      "117": "2d20c79617dc426b17c005c215d93b37b5602a47",
+      "118": "601ed2be97df6edb9b11d39209f08eeeaa61b83c",
+      "119": "b10436f3e5bbe9410110b69661fb20aaf301cc2e"
+    },
+    "release_tag": "pennyroyal-v3.1.2",
+    "release_url": null,
+    "integrated_runtime_revision": null
+  },
+  "container": {
+    "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.2",
+    "digest": null,
+    "build_url": null,
+    "promotion_url": null,
+    "note": "Candidate only; the image has not been built or published and no digest has been checked."
+  },
+  "changes": [
+    {
+      "pull": 118,
+      "summary": "PENNY_MTP_POLICY: one setting selects the native-MTP width policy file and the launch width that carries it. tiered (unchanged public default: block 8 at one running request, block 4 at two or more), adaptive (the exact v3.0.2 policy, byte-for-byte, with its 40/80-batch hold and backoff), fixed-w4 (block 4 at every concurrency). The hard-coded policy checksum gate is replaced by hashing the selected file into the NIXL namespace. DFlash2 and 27B routes read nothing from it.",
+      "profiles": [
+        "Flash-Next native MTP",
+        "Flash-Next native MTP without FR-Spec"
+      ]
+    },
+    {
+      "pull": 119,
+      "issues": [115],
+      "summary": "Derive post-verify lengths for the DFlash2 mamba checkpoint-grid crossing so accepted blocks are tracked instead of leaving an unwritten checkpoint to be registered or promoted. Both DFlash profiles were affected (Flash-Next extra_buffer/grid 64, 27B extra_buffer_lazy/interval 256). Also labels the DFlash2 integration experimental / alpha on both profiles at every user-facing surface.",
+      "profiles": [
+        "Flash-Next DFlash2",
+        "27B DFlash2"
+      ]
+    },
+    {
+      "pull": 117,
+      "author": "Jim Smith",
+      "summary": "With --sleep-on-idle and language-only EPD separation, skip the scheduler idle sleep while mm_receiver has requests waiting for encoder embeddings; those arrive on a socket the sleeper's poll does not watch, so they waited for the 1-second poll timeout.",
+      "profiles": [
+        "EPD language-only"
+      ]
+    }
+  ],
+  "validation": {
+    "focused_cpu_checks": "2026-10-23 on this candidate, CPU only: 20 focused config/setup/recipe/startup-summary tests with 33 subtests passed (170 unrelated cases deselected); 65 registered tests passed across test_prebuilt_container_launch.py, test_container_release.py, test_startup_version.py and test_dflash_mamba_checkpoint_track.py. Total 85 tests and 33 subtests; no GPU use.",
+    "regression": "The #115 checkpoint-tracking regression is red on the 4a56104 base and green with the integrated fix.",
+    "formatting": "Pinned CI Black 26.1.0 --check passes on all changed Python files.",
+    "review": "Individual PRs already reviewed and accepted; only the CONFIGURATION.md docs overlap was resolved at merge. The #117 and #119 runtime/test blobs independently match the exact accepted PR heads; the original PR #117 (EPD) evidence is reused as dated.",
+    "nvme_serving": "not run",
+    "gpu_runtime": "not run; on-GPU mamba checkpoint scatter and actual DFlash2 cache-resume remain unverified on both profiles",
+    "benchmarks": "not run; no performance defaults changed.",
+    "reused_evidence": "Runtime qualification is the dated 3.1 evidence (release-3.1.json and RESULTS.md); the 3.1.1 record is CPU/static and image-package verification, not GPU qualification. No new GPU qualification exists for 3.1.2.",
+    "container_build": "pending; no image build, package check or digest exists for this candidate yet"
+  },
+  "contributors": [
+    {
+      "name": "Jim Smith",
+      "url": "https://github.com/jhsmith409",
+      "contribution": "EPD encoder-embedding idle-sleep fix (PR #117)"
+    },
+    {
+      "name": "Lesilva",
+      "url": "https://github.com/Lesilva",
+      "contribution": "#115 report, proposed arithmetic and runtime evidence"
+    },
+    {
+      "name": "Penny Royal",
+      "email": "Pennyroyal@agentmail.to",
+      "contribution": "Width-policy setting, checkpoint-tracking fix, alpha labeling"
+    }
+  ]
+}

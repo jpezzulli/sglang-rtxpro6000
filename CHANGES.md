@@ -1,5 +1,29 @@
 # Penny Royal release history
 
+## 3.1.2 — MTP width-policy setting, DFlash2 checkpoint fix, alpha labeling
+
+- `PENNY_MTP_POLICY` is now the one public setting for the maintained
+  native-MTP width policy: `tiered` keeps the qualified default (block 8 at
+  one running request, block 4 at two or more), `adaptive` restores the exact
+  v3.0.2 byte-for-byte policy as its bundled file, and `fixed-w4` pins block 4
+  at every concurrency. One value names both the bundled policy file and the
+  launch width that can carry it; the hard-coded policy checksum gate is gone
+  and the selected file's hash is NIXL cache identity instead (PR118).
+- DFlash2 decode-checkpoint tracking: the post-verify lengths are now derived
+  for the checkpoint-grid crossing, so an accepted block that crosses the grid
+  is tracked instead of leaving the backend an unwritten checkpoint
+  (issue #115, PR119). CPU regression only; on-GPU scatter and actual
+  cache-resume remain unexercised on both profiles.
+- Both DFlash2 profiles (Flash-Next and 27B) are now labelled experimental /
+  alpha: the draft's host cache is additional to the target's HiCache budget
+  (about 22 GB on top of our 32 GB setting; documented, not reduced), and the
+  checkpoint path needs validation on user hardware (PR119).
+- Scheduler idle sleep no longer delays a request waiting for its encoder
+  embeddings under `--sleep-on-idle` with language-only EPD separation
+  (PR117, Jim Smith).
+
+See the [3.1.2 release notes](RELEASE_NOTES_3.1.2.md).
+
 ## 3.1.1 — NVMe PLE startup fix
 
 The NVMe PLE reader's whole-module source-hash guard still carried the v3.0.1
