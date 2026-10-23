@@ -2,10 +2,10 @@
   "schema": "release-notes/3.1.2",
   "version": "3.1.2",
   "status": {
-    "is_draft": true,
-    "publication_approved": false,
-    "published": false,
-    "container": "not built"
+    "is_draft": false,
+    "publication_approved": true,
+    "published": true,
+    "container": "published"
   },
   "source": {
     "base": "4a5610478fbc82e7e4f4ae07f1c1d221547ad66f",
@@ -15,15 +15,19 @@
       "119": "b10436f3e5bbe9410110b69661fb20aaf301cc2e"
     },
     "release_tag": "pennyroyal-v3.1.2",
-    "release_url": null,
-    "integrated_runtime_revision": null
+    "release_url": "https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v3.1.2",
+    "integrated_runtime_revision": "fe35e1d817d1875c57d0cfa54c950427104b4d31"
   },
   "container": {
     "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.2",
-    "digest": null,
-    "build_url": null,
-    "promotion_url": null,
-    "note": "Candidate only; the image has not been built or published and no digest has been checked."
+    "digest": "sha256:013a685d042b178842cbf016e7deb8d23113b87044355ef785dbee6d56e57db6",
+    "build_url": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/39913798427",
+    "promotion_url": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/39926203696",
+    "note": "Checked image promoted without rebuilding; the final release tag also includes publication documentation.",
+    "source_revision": "fe35e1d817d1875c57d0cfa54c950427104b4d31",
+    "linux_amd64_manifest": "sha256:4bf60c7c82c61bdf4e48609db8949506d460e2fe116ccb5af170f85dbebac983",
+    "compressed_layer_bytes": 7720171981,
+    "unpacked_image_bytes": 16028405046
   },
   "changes": [
     {
@@ -36,7 +40,9 @@
     },
     {
       "pull": 119,
-      "issues": [115],
+      "issues": [
+        115
+      ],
       "summary": "Derive post-verify lengths for the DFlash2 mamba checkpoint-grid crossing so accepted blocks are tracked instead of leaving an unwritten checkpoint to be registered or promoted. Both DFlash profiles were affected (Flash-Next extra_buffer/grid 64, 27B extra_buffer_lazy/interval 256). Also labels the DFlash2 integration experimental / alpha on both profiles at every user-facing surface.",
       "profiles": [
         "Flash-Next DFlash2",
@@ -58,10 +64,22 @@
     "formatting": "Pinned CI Black 26.1.0 --check passes on all changed Python files.",
     "review": "Individual PRs already reviewed and accepted; only the CONFIGURATION.md docs overlap was resolved at merge. The #117 and #119 runtime/test blobs independently match the exact accepted PR heads; the original PR #117 (EPD) evidence is reused as dated.",
     "nvme_serving": "not run",
-    "gpu_runtime": "not run; on-GPU mamba checkpoint scatter and actual DFlash2 cache-resume remain unverified on both profiles",
+    "gpu_runtime": "Native Flash-Next NEXTN MTP boot and real chat/structured-tool smoke passed with adaptive selected. On-GPU DFlash2 checkpoint scatter and actual cache-resume remain unverified on both DFlash profiles.",
     "benchmarks": "not run; no performance defaults changed.",
     "reused_evidence": "Runtime qualification is the dated 3.1 evidence (release-3.1.json and RESULTS.md); the 3.1.1 record is CPU/static and image-package verification, not GPU qualification. No new GPU qualification exists for 3.1.2.",
-    "container_build": "pending; no image build, package check or digest exists for this candidate yet"
+    "container_build": "Passed. Exact digest pulled and checked locally with GPUs hidden and networking disabled; no GPU container-serving test.",
+    "image_package_check": "Existing image --check passed: pinned CUDA package versions, accepted FlashInfer SM120 sources/AOT module, optional reader import, native recipe syntax and NIXL POSIX support.",
+    "image_contents": {
+      "date": "2026-10-23",
+      "verified_source_files": 13,
+      "policy_selections": [
+        "default (tiered)",
+        "tiered",
+        "adaptive",
+        "fixed-w4"
+      ],
+      "result": "Version, policy helper/assets, native and mounted recipes, entrypoint, scheduler and DFlash runtime files match accepted source. Installed NVMe reader plugin matches vendored source; obsolete source manifest absent from both packages."
+    }
   },
   "contributors": [
     {

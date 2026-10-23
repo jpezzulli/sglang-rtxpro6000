@@ -7,6 +7,14 @@ both DFlash2 profiles experimental / alpha. Model, profile and performance
 defaults are unchanged from 3.1.1: the `tiered` width routing still launches
 exactly what it launched before.
 
+## Published image
+
+Image: `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.2`
+
+Digest: `sha256:013a685d042b178842cbf016e7deb8d23113b87044355ef785dbee6d56e57db6`
+
+The image was built from [`fe35e1d817`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/fe35e1d817d1875c57d0cfa54c950427104b4d31) and promoted after checking, without rebuilding. The release tag also includes final publication documentation.
+
 ## Fixes and changes
 
 - **One width-policy setting.** The native-MTP launch recipes hard-coded one
@@ -103,10 +111,16 @@ Run on this candidate source (2026-10-23), CPU only:
 - The checkpoint regression is red on the release base and green with the
   fix. Pinned CI formatting (Black 26.1.0) passes on all changed files.
 
-No GPU runtime, NVMe serving test, image build or benchmark was run for this
-candidate. The reusable runtime qualification is the dated 3.1 evidence
-(GPU-qualified, release-3.1.json and RESULTS.md); the 3.1.1 record is
-CPU/static and image-package verification, not new GPU qualification. Both
-profile and performance defaults are unchanged, and the RESULTS.md values
-stand as dated history. See [release-3.1.2.json](release-3.1.2.json) for the
-draft publication status.
+The published image passed its CPU package check and checks of its installed
+runtime fixes, policy assets and NVMe reader package. Default, tiered, adaptive
+and fixed-W4 selections were exercised inside the image with GPUs hidden.
+Native Flash-Next NEXTN MTP was restarted with adaptive selected and passed
+real chat and structured-tool smoke checks.
+
+No DFlash2 GPU checkpoint/cache-resume validation, GPU container-serving test,
+NVMe serving test or benchmark was run for this patch. The reusable runtime
+qualification is the dated 3.1 evidence in release-3.1.json and RESULTS.md;
+3.1.1 supplied CPU/static and image-package verification. Public profile and
+performance defaults are unchanged, and measured results remain dated.
+See [release-3.1.2.json](release-3.1.2.json) for the exact image identity,
+build, promotion and verification record.
