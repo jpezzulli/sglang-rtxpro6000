@@ -60,9 +60,7 @@ class StartupSummaryTest(unittest.TestCase):
         self.assertIn("MTP width policy: fixed-w4 (PENNY_MTP_POLICY)", output)
         # Nothing exported (a direct recipe run keeps the qualified default
         # inside the recipe): the line is absent, as it was before the setting.
-        self.assertNotIn(
-            "MTP width policy", self.summary(*base)
-        )
+        self.assertNotIn("MTP width policy", self.summary(*base))
         # DFLASH routes its own widths and never reads the selector, so the
         # routed profile's report says nothing about it either.
         dflash = self.summary(

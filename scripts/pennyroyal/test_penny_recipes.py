@@ -149,7 +149,9 @@ class AdaptiveLaunchRecipeTest(unittest.TestCase):
         for name in ("tiered", "adaptive", "fixed-w4", ""):
             with self.subTest(policy=name):
                 script = (
-                    f'export PENNY_MTP_POLICY="{name}"' if name else "unset PENNY_MTP_POLICY"
+                    f'export PENNY_MTP_POLICY="{name}"'
+                    if name
+                    else "unset PENNY_MTP_POLICY"
                 )
                 out = subprocess.run(
                     [
@@ -178,9 +180,7 @@ class AdaptiveLaunchRecipeTest(unittest.TestCase):
         )
         # And the table is complete: nothing in the helper that the configurator
         # does not know about, or the reverse.
-        named = set(
-            re.findall(r"PENNY_MTP_POLICY_FILE=(\S+)", helper.read_text())
-        )
+        named = set(re.findall(r"PENNY_MTP_POLICY_FILE=(\S+)", helper.read_text()))
         self.assertEqual(named, {spec[0] for spec in pc.MTP_POLICY_SPEC.values()})
 
     def test_every_next_launcher_pins_the_policy_in_the_namespace(self):
@@ -189,7 +189,9 @@ class AdaptiveLaunchRecipeTest(unittest.TestCase):
             with self.subTest(launcher=str(launcher)):
                 # The runtime policy file is an image/repo asset, never a
                 # copy of the host-mounted config directory.
-                self.assertRegex(text, r'source ".*(IMAGE_CONFIGS|SCRIPT_DIR)/mtp-policy\.sh"')
+                self.assertRegex(
+                    text, r'source ".*(IMAGE_CONFIGS|SCRIPT_DIR)/mtp-policy\.sh"'
+                )
                 self.assertIn('--field "speculative_adaptive=true"', text)
                 self.assertRegex(
                     text, r'--field "speculative_adaptive[a-z_]*_sha256=\$ADAPTIVE'
@@ -197,16 +199,22 @@ class AdaptiveLaunchRecipeTest(unittest.TestCase):
                 # Namespace fields follow the launch line, so an incompatible
                 # old namespace can never alias the adaptive one. The approved
                 # identities themselves live in the shared selector, once.
-                self.assertIn('--field "speculative_num_steps=$PENNY_MTP_SPEC_STEPS"', text)
                 self.assertIn(
-                    '--field "speculative_num_draft_tokens=$PENNY_MTP_DRAFT_TOKENS"', text
+                    '--field "speculative_num_steps=$PENNY_MTP_SPEC_STEPS"', text
+                )
+                self.assertIn(
+                    '--field "speculative_num_draft_tokens=$PENNY_MTP_DRAFT_TOKENS"',
+                    text,
                 )
                 # The hash is namespace identity and nothing else: no launcher and
                 # not the shared selector carries a POLICY checksum to refuse a
                 # boot with (3.1.1 compared one hard-coded hash, which could not
                 # survive a second supported policy). The FR-Spec map and
                 # tokenizer guards are a different matter and stay.
-                text_of = {"launcher": text, "selector": self.text(CONFIGS / "mtp-policy.sh")}
+                text_of = {
+                    "launcher": text,
+                    "selector": self.text(CONFIGS / "mtp-policy.sh"),
+                }
                 for label, body in text_of.items():
                     for digest in (
                         ADAPTIVE_NEXT_SHA256,
@@ -237,10 +245,15 @@ class AdaptiveLaunchRecipeTest(unittest.TestCase):
 
             def resolve(policy_name: str) -> subprocess.CompletedProcess[str]:
                 return subprocess.run(
-                    ["bash", "-c", 'source "$1" && printf "%s %s %s %s\\n" '
-                     '"$ADAPTIVE_CONFIG" "$PENNY_MTP_POLICY" '
-                     '"$ADAPTIVE_SHA" "$PENNY_MTP_SPEC_STEPS"',
-                     "bash", str(assets / "mtp-policy.sh")],
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1" && printf "%s %s %s %s\\n" '
+                        '"$ADAPTIVE_CONFIG" "$PENNY_MTP_POLICY" '
+                        '"$ADAPTIVE_SHA" "$PENNY_MTP_SPEC_STEPS"',
+                        "bash",
+                        str(assets / "mtp-policy.sh"),
+                    ],
                     capture_output=True,
                     text=True,
                     env={"PENNY_MTP_POLICY": policy_name, "PATH": "/usr/bin:/bin"},
@@ -397,7 +410,9 @@ class DFlash2RoutedWidthRecipeTest(unittest.TestCase):
             with self.subTest(launcher=str(launcher)):
                 self.assertIn("--speculative-algorithm NEXTN", text)
                 self.assertIn('--speculative-num-steps "$PENNY_MTP_SPEC_STEPS"', text)
-                self.assertRegex(text, r'source ".*(SCRIPT_DIR|IMAGE_CONFIGS)/mtp-policy\.sh"')
+                self.assertRegex(
+                    text, r'source ".*(SCRIPT_DIR|IMAGE_CONFIGS)/mtp-policy\.sh"'
+                )
                 self.assertIn('"$ADAPTIVE_CONFIG"', text)
                 self.assertNotIn("adaptive-dflash2.json", text)
                 # The retained native fraction: 0.981 on this revision, and the

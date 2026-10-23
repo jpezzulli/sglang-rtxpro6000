@@ -317,7 +317,8 @@ SHARED_KEYS: tuple[KeySpec, ...] = (
     ),
     KeySpec(
         MTP_POLICY_KEY,
-        "native-MTP width policy: " + ", ".join(MTP_POLICY_CHOICES)
+        "native-MTP width policy: "
+        + ", ".join(MTP_POLICY_CHOICES)
         + " (the native-MTP profiles only)",
         "choice",
         MTP_POLICY_CHOICES,
@@ -1523,7 +1524,9 @@ def _mtp_policy_line(chosen: str, profile: str, origin: str = "") -> str:
         return ""
     name = chosen or MTP_POLICY_DEFAULT
     if name not in MTP_POLICY_SPEC:
-        return f"MTP width policy: {name!r} is not one of {', '.join(MTP_POLICY_CHOICES)}"
+        return (
+            f"MTP width policy: {name!r} is not one of {', '.join(MTP_POLICY_CHOICES)}"
+        )
     policy_file, steps, draft_tokens = MTP_POLICY_SPEC[name]
     note = (
         " (unset: the recipe's qualified default)"
@@ -1870,7 +1873,7 @@ def _forward_runtime_env(text: str, plan: Plan) -> str:
     when the container starts. The width policy is deliberately absent here: the
     startup script names it in its own settings block, exactly like the capacity
     knobs and the PLE backend, so the generated file is the one place that value
-    lives.    """
+    lives."""
     anchor = "docker_args=(\n  run --rm --init\n"
     if anchor not in text:
         raise ConfigError(

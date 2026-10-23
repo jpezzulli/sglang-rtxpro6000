@@ -1218,9 +1218,7 @@ class MTPPolicySelectionTests(FixtureMixin):
                 # command carries the choice.
                 reloaded = pc.read_env_file(plan.config.path)
                 self.assertEqual(reloaded["PENNY_MTP_POLICY"], name)
-                self.assertIn(
-                    f"PENNY_MTP_POLICY={name}", pc.launch_display(plan)
-                )
+                self.assertIn(f"PENNY_MTP_POLICY={name}", pc.launch_display(plan))
 
     def test_choosing_nothing_leaves_the_recipe_default_alone(self):
         # Nothing saved and nothing exported: the qualified default is reported
@@ -1274,7 +1272,9 @@ class MTPPolicySelectionTests(FixtureMixin):
         # the preview and --check rather than reaching a launch line.
         for environ in ({}, {"PENNY_MTP_POLICY": "w6"}):
             with self.subTest(environ=environ):
-                self.write_native_config({**self.native_env(), "PENNY_MTP_POLICY": "w6"})
+                self.write_native_config(
+                    {**self.native_env(), "PENNY_MTP_POLICY": "w6"}
+                )
                 with self.assertRaises(pc.ConfigError) as caught:
                     pc.load_config("native", self.config_path, environ, self.repo)
                 self.assertIn(
@@ -1345,6 +1345,7 @@ class MTPPolicySelectionTests(FixtureMixin):
             "PENNY_MTP_POLICY",
             (ROOT / "docker/pennyroyal/entrypoint.sh").read_text(),
         )
+
 
 class LauncherTests(FixtureMixin):
     def test_run_penny_delegates_saved_environment_to_a_fake_recipe(self):
@@ -2298,7 +2299,12 @@ class ContainerLaunchGenerationTests(FixtureMixin):
         # with no choice at all records the qualified default rather than nothing.
         cases = (
             ("adaptive", {"PENNY_MTP_POLICY": "fixed-w4"}, "adaptive", "saved file"),
-            (None, {"PENNY_MTP_POLICY": "adaptive"}, "adaptive", "inherited environment"),
+            (
+                None,
+                {"PENNY_MTP_POLICY": "adaptive"},
+                "adaptive",
+                "inherited environment",
+            ),
             (None, {}, "tiered", "utility default"),
         )
         for saved, environ, expected, origin in cases:
@@ -2312,9 +2318,11 @@ class ContainerLaunchGenerationTests(FixtureMixin):
                 summary = "\n".join(plan.summary)
                 self.assertIn(f"MTP width policy: {expected}", summary)
                 self.assertIn(
-                    "(unset: the recipe's qualified default)"
-                    if origin == "utility default"
-                    else f"(from {origin})",
+                    (
+                        "(unset: the recipe's qualified default)"
+                        if origin == "utility default"
+                        else f"(from {origin})"
+                    ),
                     summary,
                 )
                 startup = self.generated(plan)[

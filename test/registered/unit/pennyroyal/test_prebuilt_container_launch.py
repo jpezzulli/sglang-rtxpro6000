@@ -1208,10 +1208,13 @@ def test_the_mtp_policy_selection_reaches_the_real_launch_argv(tmp_path):
     # selection written into the mounted startup script (which is where a
     # container launch keeps the setting, beside the capacity knobs).
     identities = {}
-    for value, asset, steps, draft_tokens in MTP_POLICIES + ((None, "adaptive-next.json", "7", "8"),):
-        mounted = prepared_config(
-            tmp_path, "start-flash-next.sh", policy=value or "tiered"
-        ) / "start-flash-next.sh"
+    for value, asset, steps, draft_tokens in MTP_POLICIES + (
+        (None, "adaptive-next.json", "7", "8"),
+    ):
+        mounted = (
+            prepared_config(tmp_path, "start-flash-next.sh", policy=value or "tiered")
+            / "start-flash-next.sh"
+        )
         for startup, via_entrypoint, env in (
             (
                 RECIPES / "serve-flash-next.sh",
@@ -1228,8 +1231,12 @@ def test_the_mtp_policy_selection_reaches_the_real_launch_argv(tmp_path):
             assert f"MTP width policy: {value or 'tiered'}" in result.stdout, value
             assert argv_after(argv, "--speculative-num-steps") == steps, value
             assert argv_after(argv, "--speculative-eagle-topk") == "1", value
-            assert argv_after(argv, "--speculative-num-draft-tokens") == draft_tokens, value
-            assert argv_after(argv, "--speculative-adaptive-config").endswith(asset), value
+            assert (
+                argv_after(argv, "--speculative-num-draft-tokens") == draft_tokens
+            ), value
+            assert argv_after(argv, "--speculative-adaptive-config").endswith(
+                asset
+            ), value
             assert "--speculative-adaptive" in argv, value
             # The selection is cache identity, so no policy can be served out of
             # another one's persisted namespace.
@@ -1257,7 +1264,8 @@ def test_the_mtp_policy_selection_reaches_the_real_launch_argv(tmp_path):
     # reason these profiles cannot be selected).
     for startup in (
         RECIPES / "serve-flash-next-dflash2.sh",
-        prepared_config(tmp_path, "start-flash-next-dflash2.sh") / "start-flash-next-dflash2.sh",
+        prepared_config(tmp_path, "start-flash-next-dflash2.sh")
+        / "start-flash-next-dflash2.sh",
         RECIPES / "serve-qwen38-27b-dflash2.sh",
     ):
         via_entrypoint = startup.name.startswith("start-")
@@ -1284,9 +1292,10 @@ def test_the_mtp_policy_selection_reaches_the_real_launch_argv(tmp_path):
 def test_an_unusable_mtp_policy_stops_the_launch_with_a_reason(tmp_path):
     # Refused on both routes: an inherited value reaching the recipe, and a value
     # written into the startup script by hand or by setup.
-    mounted = prepared_config(
-        tmp_path, "start-flash-next.sh", policy="w6"
-    ) / "start-flash-next.sh"
+    mounted = (
+        prepared_config(tmp_path, "start-flash-next.sh", policy="w6")
+        / "start-flash-next.sh"
+    )
     for startup, via_entrypoint, env in (
         (RECIPES / "serve-flash-next.sh", False, {"PENNY_MTP_POLICY": "w6"}),
         (mounted, True, {}),
@@ -1372,9 +1381,7 @@ def test_a_generated_launch_runs_the_policy_the_setup_saved(tmp_path):
     generated = startup.read_text()
     assert "PENNY_MTP_POLICY=adaptive" in generated, generated
     startup.write_text(
-        generated.replace(
-            "TARGET_MODEL=/models/penny-model", f'TARGET_MODEL="{model}"'
-        )
+        generated.replace("TARGET_MODEL=/models/penny-model", f'TARGET_MODEL="{model}"')
     )
 
     directory, capture = fake_docker(tmp_path)
@@ -1395,9 +1402,7 @@ def test_a_generated_launch_runs_the_policy_the_setup_saved(tmp_path):
         assert run.returncode == 0, run.stderr + run.stdout
         argv = capture.read_text().splitlines()
         assert not [
-            value
-            for value in argv
-            if value.startswith("PENNY_MTP_POLICY=")
+            value for value in argv if value.startswith("PENNY_MTP_POLICY=")
         ], argv
         # And the container side, by the image's own exec path: the generated
         # startup file carries the setting, so nothing needs to be forwarded.
@@ -1420,7 +1425,11 @@ def test_a_generated_launch_runs_the_policy_the_setup_saved(tmp_path):
     )
     # The documented way to change it is the setting itself: edit the line the
     # save wrote (or run setup again) and the same launch switches.
-    startup.write_text(startup.read_text().replace("PENNY_MTP_POLICY=adaptive", "PENNY_MTP_POLICY=fixed-w4"))
+    startup.write_text(
+        startup.read_text().replace(
+            "PENNY_MTP_POLICY=adaptive", "PENNY_MTP_POLICY=fixed-w4"
+        )
+    )
     policy_file, steps = launch_generated()
     assert policy_file.endswith("adaptive-next-fixed-w4.json") and steps == "3", (
         policy_file,
