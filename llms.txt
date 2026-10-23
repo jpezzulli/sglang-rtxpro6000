@@ -22,13 +22,18 @@ sizing replaces the preset cap; an explicit `MAX_TOTAL_TOKENS` override remains.
 The 27B FP8 DFlash2 profile
 is unchanged at fixed block 8. Native width routing comes from the bundled
 fixed policy `configs/pennyroyal/adaptive-next.json`, pinned by the launch
-recipes. The current release is Penny Royal 3.1.1, which removes the stale
-whole-module source-hash gate that blocked NVMe PLE startup on 3.1.0; table
-validation, cache identity, explicit NVMe selection and required-hook failure
-handling remain. The published release tag is `pennyroyal-v3.1.1` and the image
-is `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.1`; see release-3.1.1.json for
-publication status. The 3.1 feature details, source identity, checked image
-digest and build remain in release-3.1.json and RESULTS.md.
+recipes. The current release is Penny Royal 3.1.2, which adds the single
+`PENNY_MTP_POLICY` width-policy setting for the maintained native-MTP
+profiles (`tiered` default unchanged, `adaptive` restoring the exact v3.0.2
+policy, `fixed-w4`), fixes the DFlash2 decode-checkpoint crossing so accepted
+blocks are tracked instead of dropped, stops the scheduler's idle sleep from
+delaying encoder-embedding handoffs, and labels both DFlash2 profiles
+experimental / alpha while the on-GPU checkpoint resume and the draft's extra
+host RAM await hardware validation. The release tag is `pennyroyal-v3.1.2`
+and the image is `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.2`; see
+release-3.1.2.json for publication status. The 3.1.1 NVMe PLE source-gate
+removal stays in effect, and the 3.1 feature details, source identity,
+checked image digest and build remain in release-3.1.json and RESULTS.md.
 
 ## Hardware and profiles
 
@@ -115,6 +120,8 @@ actual answer grading on the qualified sources; extended or repetitive
 reasoning is not penalized and `ask_user` is a valid tool choice. Recorded
 deviations are listed with the measurements.
 
+- [3.1.2 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.2.md): native-MTP width-policy setting, DFlash2 checkpoint-tracking fix, EPD idle-sleep fix, DFlash2 alpha labeling and contributor acknowledgements.
+- [3.1.2 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.2.json): Fix identities, validation scope and draft publication status.
 - [3.1.1 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.1.md): NVMe PLE source-gate removal and contributor acknowledgements.
 - [3.1.1 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.1.json): Fix identity, validation scope and published image identity.
 - [3.1 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.md): maintained native-MTP default, optional Flash-Next DFlash2, fixed concurrency widths, automatic KV sizing, TP2 support and focused scheduler fixes.
