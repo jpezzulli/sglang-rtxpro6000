@@ -14,7 +14,7 @@ export PENNY_PLE_PLUGIN_DIR="$REPO_ROOT/.ple-nvme"
 # Compose forwards optional knobs with empty defaults; an empty passthrough
 # must behave exactly like an unset variable (qualified defaults, untouched
 # NCCL env), so normalize them away before the recipes read them.
-for optional in PENNY_REASONING_EFFORT TP_SIZE NCCL_P2P_DISABLE; do
+for optional in PENNY_REASONING_EFFORT TP_SIZE NCCL_P2P_DISABLE PENNY_MTP_POLICY; do
   if [[ -z ${!optional:-} ]]; then unset "$optional"; fi
 done
 

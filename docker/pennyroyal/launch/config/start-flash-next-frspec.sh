@@ -44,6 +44,13 @@ NIXL=on
 # wins over that argument.
 MAX_RUNNING_REQUESTS=4
 MAX_MAMBA_CACHE_SIZE=24
+# Native-MTP width policy: tiered (block 8 at one running request, block 4 at
+# two or more), adaptive (the v3.0.2 policy: block 4 or 8 at one request under
+# the existing hold, block 4 at two or more) or fixed-w4 (block 4 at every
+# concurrency). This line decides the policy, the same way the lines around it
+# decide capacity: change it here (or save it with ./configure-penny --container,
+# which writes your choice into this file) and restart.
+PENNY_MTP_POLICY=tiered
 # ----------------------------------------------------------------------------
 
 export NUMPY_MADVISE_HUGEPAGE=0
@@ -102,17 +109,17 @@ pennyroyal_version_banner
 # Pin the qualified map and tokenizer: a different ID mapping changes draft
 # proposals and must never silently reuse this representation's cache namespace.
 TOKEN_MAP="$IMAGE_CONFIGS/frspec/flash-next-64k.pt"
-# The approved Next width policy (fixed by concurrency: W8 = steps 7 at C1,
-# W4 = steps 3 at every batch of two or more, one candidate per tier so the
-# width is a batch-size lookup the acceptance EMA can never move) ships as
-# ordinary --speculative-adaptive-config file: automatic,
-# no user toggle. The launch runs the table's maximum (steps 7, draft tokens 8
-# at topk 1) because a candidate wider than the launch width is refused, not
-# resized, under captured graphs; the W8 state alone needs the BS1 decode
-# bucket, which the default spec-decode capture list keeps. Like the map and
-# template, the policy is an image asset under REPO_ROOT, not a /config copy
-# the host may edit.
-ADAPTIVE_CONFIG="$IMAGE_CONFIGS/adaptive-next.json"
+# The approved Next width policy ships as an ordinary --speculative-adaptive-config
+# file. PENNY_MTP_POLICY names it in the settings block above — tiered (the
+# qualified default: W8 = steps 7 at C1, W4 = steps 3 at every batch of two or
+# more), adaptive (the v3.0.2 policy, whose C1 candidates move under the existing
+# hold and backoff) or fixed-w4 (steps 3 everywhere) — and the same setting
+# selects the launch maximum that can carry it, because a candidate wider than
+# the launch width is refused, not resized, under captured graphs. The wider
+# launch states keep the BS1 decode bucket, which the default spec-decode
+# capture list already keeps. Like the map and template, the policy is an image
+# asset under REPO_ROOT, not a /config copy the host may edit.
+source "$IMAGE_CONFIGS/mtp-policy.sh"
 
 CONTEXT_LENGTH=524288
 PAGE_SIZE=64
@@ -145,7 +152,6 @@ fi
   exit 1
 }
 [[ -f "$TOKEN_MAP" ]] || { echo "FR-Spec map missing: $TOKEN_MAP" >&2; exit 1; }
-[[ -f "$ADAPTIVE_CONFIG" ]] || { echo "Adaptive MTP policy missing: $ADAPTIVE_CONFIG" >&2; exit 1; }
 # The image entrypoint checks these for its built-in profiles; the exec path
 # leaves the roots this script actually uses to the script itself.
 for directory in "${writable_dirs[@]}"; do
@@ -218,7 +224,7 @@ configure_max_total_tokens
 TARGET_OVERRIDES='{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":2.0,"original_max_position_embeddings":262144}}}'
 printf 'Pennyroyal profile: Flash-Next FR-Spec\n  runtime: %s\n  target: %s\n  token map: %s\n  cache root: %s\n  NIXL root: %s\n' \
   "$SGLANG_EXE" "$TARGET_MODEL" "$TOKEN_MAP" "$CACHE_BASE" "${NIXL_STORAGE_BASE:-off}"
-echo "Verifying the pinned FR-Spec map, tokenizer and adaptive MTP policy..."
+echo "Verifying the pinned FR-Spec map and tokenizer..."
 read -r TOKEN_MAP_SHA _ < <(sha256sum "$TOKEN_MAP")
 [[ "$TOKEN_MAP_SHA" == becfa41d394b86c26c632bea8f3c6ea64bbb76d7b238d8673c06afae21269f25 ]] || {
   echo "FR-Spec map does not match the bundled checksum" >&2; exit 1;
@@ -226,10 +232,6 @@ read -r TOKEN_MAP_SHA _ < <(sha256sum "$TOKEN_MAP")
 read -r TOKENIZER_SHA _ < <(sha256sum "$TARGET_MODEL/tokenizer.json")
 [[ "$TOKENIZER_SHA" == 0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3 ]] || {
   echo "Target tokenizer differs from the qualified FR-Spec tokenizer" >&2; exit 1;
-}
-read -r ADAPTIVE_SHA _ < <(sha256sum "$ADAPTIVE_CONFIG")
-[[ "$ADAPTIVE_SHA" == 3edaa87d66f535caae0bddb8f457f03fce0f6dc1f4e8091b20495a0dc9da41fb ]] || {
-  echo "Adaptive MTP policy does not match the approved checksum" >&2; exit 1;
 }
 SGLANG_REV="$(git -C "$REPO_ROOT" rev-parse --short=10 HEAD)"
 PENNY_IDENTITY_PROBE="$("$PYTHON" -c 'import sys; import torch; from sglang.srt.utils import resolve_mm_preprocess_device; resolve_mm_preprocess_device(); from sglang.kernels.ops.gemm.sm120_online_fp8 import launch_precision; print(torch.__version__); print(launch_precision(sys.argv[1]))' "$TARGET_MODEL")"
@@ -263,9 +265,9 @@ if [[ "$NIXL" == on ]]; then
     --field "compute_dtype=$COMPUTE_DTYPE" \
     --field "target_kv_dtype=$KV_DTYPE" \
     --field "speculative_algorithm=NEXTN" \
-    --field "speculative_num_steps=7" \
+    --field "speculative_num_steps=$PENNY_MTP_SPEC_STEPS" \
     --field "speculative_eagle_topk=1" \
-    --field "speculative_num_draft_tokens=8" \
+    --field "speculative_num_draft_tokens=$PENNY_MTP_DRAFT_TOKENS" \
     --field "speculative_adaptive=true" \
     --field "speculative_adaptive_policy_sha256=$ADAPTIVE_SHA" \
     --field "speculative_draft_quantization=unquant" \
@@ -326,8 +328,8 @@ launch_args=(serve \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \
   --default-chat-template-kwargs "$DEFAULT_CHAT_TEMPLATE_KWARGS" \
-  --speculative-algorithm NEXTN --speculative-num-steps 7 \
-  --speculative-eagle-topk 1 --speculative-num-draft-tokens 8 \
+  --speculative-algorithm NEXTN --speculative-num-steps "$PENNY_MTP_SPEC_STEPS" \
+  --speculative-eagle-topk 1 --speculative-num-draft-tokens "$PENNY_MTP_DRAFT_TOKENS" \
   --speculative-adaptive --speculative-adaptive-config "$ADAPTIVE_CONFIG" \
   --speculative-draft-model-quantization unquant \
   --speculative-token-map "$TOKEN_MAP" --watchdog-timeout 1800)

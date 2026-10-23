@@ -115,6 +115,26 @@ CONTAINER_PASSTHROUGH_KEYS = (
 # Settings that only mean something while the disk tier is mounted, so a
 # generated launch with the tier off does not carry them at all.
 DISK_ONLY_KEYS = ("SGLANG_HICACHE_NIXL_MAX_CACHE_GB",)
+# The one public selector for the native-MTP width policy, and the profiles that
+# have it at all: the DFlash2 profiles route their own widths and never read it.
+MTP_POLICY_KEY = "PENNY_MTP_POLICY"
+MTP_POLICY_CHOICES = ("tiered", "adaptive", "fixed-w4")
+MTP_POLICY_DEFAULT = "tiered"
+MTP_POLICY_PROFILES = ("next", "next-plain")
+# name: (bundled policy file, --speculative-num-steps, --speculative-num-draft-tokens)
+# Kept in step with configs/pennyroyal/mtp-policy.sh, which is what the launch
+# itself reads; the check test compares the two so neither can drift alone.
+MTP_POLICY_SPEC = {
+    "tiered": ("adaptive-next.json", "7", "8"),
+    "adaptive": ("adaptive-next-v3.0.2.json", "7", "8"),
+    "fixed-w4": ("adaptive-next-fixed-w4.json", "3", "4"),
+}
+MTP_POLICY_NOTE = {
+    "tiered": "block 8 at one running request, block 4 at two or more",
+    "adaptive": "the v3.0.2 policy: block 4 or 8 at one request under the "
+    "existing hold, block 4 at two or more",
+    "fixed-w4": "block 4 at every concurrency",
+}
 # Knobs the 27b recipe fixes in its own launch line (None: it has no such flag)
 # rather than reading from the environment, so a saved choice there cannot
 # reach the server. Values copied from configs/pennyroyal/
@@ -134,7 +154,15 @@ PROFILE_PINNED_KEYS = {
 }
 # Asked about for the Next profiles, meaningless for 27b, and harmless when an
 # older file still carries it: hidden from the wizard, never refused.
-PROFILE_HIDDEN_KEYS = {"27b": ("PENNY_PLE_NVME_MODEL",)}
+# PENNY_MTP_POLICY is not a setting of either DFlash2 recipe (each routes its own
+# width from its own policy file), so setup does not offer it there. Hidden
+# rather than refused: an operator who exports the native selector globally, or
+# who saved it before switching profile, must still be able to switch, and the
+# value is simply unread by those recipes and those startup files.
+PROFILE_HIDDEN_KEYS = {
+    "27b": ("PENNY_PLE_NVME_MODEL", MTP_POLICY_KEY),
+    "next-dflash2": (MTP_POLICY_KEY,),
+}
 NATIVE_CONFIG_RELPATH = ".config/pennyroyal/pennyroyal.env"
 CONTAINER_CONFIG_RELPATH = ".config/pennyroyal/pennyroyal-container.env"
 DEFAULT_CONTAINER_LAUNCH_DIR = "~/pennyroyal-container"
@@ -286,6 +314,18 @@ SHARED_KEYS: tuple[KeySpec, ...] = (
         default="true",
         advanced=True,
         prompt="Forward unknown tool names (true or false)",
+    ),
+    KeySpec(
+        MTP_POLICY_KEY,
+        "native-MTP width policy: "
+        + ", ".join(MTP_POLICY_CHOICES)
+        + " (the native-MTP profiles only)",
+        "choice",
+        MTP_POLICY_CHOICES,
+        default=MTP_POLICY_DEFAULT,
+        advanced=True,
+        prompt="MTP width policy (tiered is the recipe default; "
+        "adaptive or fixed-w4 to choose the other policies)",
     ),
     KeySpec(
         "MAX_RUNNING_REQUESTS",
@@ -897,6 +937,7 @@ def resolve(config: Config, environ: dict[str, str], name: str) -> Resolved:
     blank is exported as the empty string so the recipe's own ${VAR:-...}
     fallback fires. Only a key the file does not mention at all keeps the
     inherited value. config.values keeps the raw blank either way.
+
     """
     if name in config.values:
         saved = config.values[name]
@@ -1239,6 +1280,7 @@ def _plan_native(
         "NIXL_PREFIX",
         "NIXL",
         "TP_SIZE",
+        MTP_POLICY_KEY,
     ):
         _adopt(plan, config, environ, name)
     gpu = _adopt(plan, config, environ, "GPU") or "0"
@@ -1350,6 +1392,15 @@ def _plan_native(
         f"GPU: {gpu}",
         _hicache_size_line(plan.env.get("PENNY_HICACHE_SIZE_GB", ""), config.profile),
     ]
+    # The width policy is a setting of the native-MTP profiles only, so the
+    # DFlash2 summaries keep saying what they said before.
+    policy_line = _mtp_policy_line(
+        plan.env.get(MTP_POLICY_KEY, ""),
+        config.profile,
+        plan.origins.get(MTP_POLICY_KEY, ""),
+    )
+    if policy_line:
+        plan.summary.append(policy_line)
     # A budget says nothing about a tier that is switched off.
     if disk_tier == "on":
         plan.summary.append(
@@ -1457,6 +1508,39 @@ def _hicache_size_line(chosen: str, profile: str) -> str:
     )
 
 
+def _mtp_policy_line(chosen: str, profile: str, origin: str = "") -> str:
+    """Say which width policy this launch routes, and what it launches at.
+
+    Only the two native-MTP profiles have the setting: their recipe reads
+    PENNY_MTP_POLICY, and one value names both the bundled policy file and the
+    launch maximum that can carry it (a candidate wider than the launch width is
+    refused, not resized, under captured graphs). The DFlash2 recipes route their
+    own widths from their own policy file and never read the variable, so the
+    line is empty for them and their summary is unchanged. Nothing chosen is
+    stated as the recipe's own default rather than as a saved or exported value,
+    because the two are different decisions with the same first launch.
+    """
+    if profile not in MTP_POLICY_PROFILES:
+        return ""
+    name = chosen or MTP_POLICY_DEFAULT
+    if name not in MTP_POLICY_SPEC:
+        return (
+            f"MTP width policy: {name!r} is not one of {', '.join(MTP_POLICY_CHOICES)}"
+        )
+    policy_file, steps, draft_tokens = MTP_POLICY_SPEC[name]
+    note = (
+        " (unset: the recipe's qualified default)"
+        if origin in ("", "utility default")
+        else f" (from {origin})"
+    )
+    return (
+        f"MTP width policy: {name} — {MTP_POLICY_NOTE[name]}; "
+        f"{RECIPE_DIR_RELPATH}/{policy_file} as --speculative-adaptive-config, "
+        f"launched at --speculative-num-steps {steps} "
+        f"--speculative-num-draft-tokens {draft_tokens}{note}"
+    )
+
+
 def _nixl_budget_line(budget: str) -> str:
     """Name the NIXL disk budget honestly: 0 means no cap, not cache off.
 
@@ -1527,6 +1611,7 @@ def _plan_container(
         "USER_ID",
         "GROUP_ID",
         "TP_SIZE",
+        MTP_POLICY_KEY,
     ):
         _adopt(plan, config, environ, name)
     # Settings the generated launch forwards but no KeySpec owns: the saved
@@ -1729,6 +1814,13 @@ def _plan_container(
         f"GPU: {gpu}",
         _hicache_size_line(plan.env.get("PENNY_HICACHE_SIZE_GB", ""), config.profile),
     ]
+    policy_line = _mtp_policy_line(
+        plan.env.get(MTP_POLICY_KEY, ""),
+        config.profile,
+        plan.origins.get(MTP_POLICY_KEY, ""),
+    )
+    if policy_line:
+        plan.summary.append(policy_line)
     if disk_tier == "on":
         plan.summary.append(
             _nixl_budget_line(plan.env.get("SGLANG_HICACHE_NIXL_MAX_CACHE_GB", "0"))
@@ -1778,8 +1870,10 @@ def _forward_runtime_env(text: str, plan: Plan) -> str:
     These are knobs the startup script either never mentions, or mentions only
     as a default it honours (SGLANG_FORWARD_UNKNOWN_TOOLS): the docker arguments
     have to carry the operator's choice, because nothing reads the saved file
-    when the container starts.
-    """
+    when the container starts. The width policy is deliberately absent here: the
+    startup script names it in its own settings block, exactly like the capacity
+    knobs and the PLE backend, so the generated file is the one place that value
+    lives."""
     anchor = "docker_args=(\n  run --rm --init\n"
     if anchor not in text:
         raise ConfigError(
@@ -1827,6 +1921,11 @@ def _render_startup(template: Path, plan: Plan, disk_tier: str) -> str:
         # The disk tier always has to be stated: run.sh decides the mount
         # separately and the two choices must agree.
         "NIXL": disk_tier,
+        # The width policy is stated the same way, in the same block: this file
+        # is what the container launch reads, so the resolved choice belongs in
+        # it. A startup script without the setting (the DFlash2 pair) is skipped
+        # by the same check that skips a pinned knob.
+        MTP_POLICY_KEY: plan.env.get(MTP_POLICY_KEY, ""),
     }
     for lhs, value in choices.items():
         # A knob this profile's recipe pins is not the configurator's to write:
@@ -2068,9 +2167,13 @@ Files and precedence:
   saved explicitly blank suppresses the inherited value: it resets to the
   documented default for keys that have one, and exports an empty value for
   recipe-owned keys so the recipe's own default fires. A key that is not
-  saved keeps the value it inherited, or the recipe's own default.
-  The file is never shell-sourced or eval'd; unknown keys are preserved and
-  exported as-is. Validation here never imports the model stack or CUDA.
+  saved keeps the value it inherited, or the recipe's own default. So
+  PENNY_MTP_POLICY (the native-MTP width policy: tiered, adaptive or fixed-w4)
+  can be chosen from the shell while unsaved, and saved by the wizard afterwards;
+  a saved value then wins like any other, and a policy change applies on the next
+  process start. The file is never shell-sourced or eval'd; unknown keys are
+  preserved and exported as-is.
+  Validation here never imports the model stack or CUDA.
 """
 
 

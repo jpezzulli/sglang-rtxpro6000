@@ -24,6 +24,7 @@ class StartupSummaryTest(unittest.TestCase):
             "SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR",
             "SGLANG_MM_PREPROCESS_DEVICE",
             "SGLANG_SM120_ONLINE_MXFP8",
+            "PENNY_MTP_POLICY",
         ):
             run_env.pop(name, None)
         if env:
@@ -34,6 +35,49 @@ class StartupSummaryTest(unittest.TestCase):
             env=run_env,
             text=True,
         )
+
+    def test_the_width_policy_is_reported_with_the_width_it_launches(self):
+        # One setting selects the policy file and the launch width, and the
+        # startup report has to say both, so an operator can see which policy a
+        # boot is running on instead of guessing from a filename.
+        base = [
+            "serve",
+            "--model-path",
+            "/models/Flash Next",
+            "--speculative-algorithm",
+            "NEXTN",
+            "--speculative-adaptive",
+            "--speculative-adaptive-config",
+            "/cfg/adaptive-next-fixed-w4.json",
+            "--speculative-num-steps=3",
+            "--speculative-eagle-topk=1",
+            "--speculative-num-draft-tokens=4",
+        ]
+        output = self.summary(*base, env={"PENNY_MTP_POLICY": "fixed-w4"})
+        self.assertIn(
+            "draft tokens=4 (policy /cfg/adaptive-next-fixed-w4.json)", output
+        )
+        self.assertIn("MTP width policy: fixed-w4 (PENNY_MTP_POLICY)", output)
+        # Nothing exported (a direct recipe run keeps the qualified default
+        # inside the recipe): the line is absent, as it was before the setting.
+        self.assertNotIn("MTP width policy", self.summary(*base))
+        # DFLASH routes its own widths and never reads the selector, so the
+        # routed profile's report says nothing about it either.
+        dflash = self.summary(
+            "serve",
+            "--model-path",
+            "/models/Flash Next",
+            "--speculative-algorithm",
+            "DFLASH",
+            "--speculative-adaptive",
+            "--speculative-adaptive-config",
+            "/cfg/adaptive-dflash2.json",
+            "--speculative-num-steps=5",
+            "--speculative-num-draft-tokens=6",
+            env={"PENNY_MTP_POLICY": "fixed-w4"},
+        )
+        self.assertIn("DFLASH fixed-width routing", dflash)
+        self.assertNotIn("MTP width policy", dflash)
 
     def test_nextn_frspec_host_ple_cpu_and_quoted_paths(self):
         output = self.summary(
@@ -372,6 +416,14 @@ class StartupSummaryTest(unittest.TestCase):
             "IMAGE_PROCESSOR_BACKEND": "sglang",
             "TOKEN_MAP": "/maps/token map [FR Spec].npy",
             "ADAPTIVE_CONFIG": "/configs/adaptive policy [approved].json",
+            # The launch width comes from the shared width selector, which the
+            # extracted block cannot source; these are the values tiered (the
+            # qualified default) resolves to, and the block-level comparison is
+            # of the launch line itself. PENNY_MTP_POLICY's three widths are
+            # covered by test_penny_recipes.MTPPolicySelectionTests and the real
+            # launches in test/registered/unit/pennyroyal.
+            "PENNY_MTP_SPEC_STEPS": "7",
+            "PENNY_MTP_DRAFT_TOKENS": "8",
             "DRAFT_TOKENS": "8",
             "DRAFT_WINDOW_SIZE": "32",
         }

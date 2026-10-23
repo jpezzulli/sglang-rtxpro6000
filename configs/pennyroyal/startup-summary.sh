@@ -120,11 +120,16 @@ pennyroyal_startup_summary() {
       *)
         # The launch line names the policy maximum; the runtime picks the width
         # per batch from the adaptive config file, so do not report a static one.
+        # The chosen width policy is named because one setting now selects this
+        # whole line: the file and the width travel together.
         printf '  Speculation: adaptive MTP up to steps=%s | top-k=%s | draft tokens=%s (policy %s)\n' \
           "${setting[--speculative-num-steps]:-not set}" \
           "${setting[--speculative-eagle-topk]:-not set}" \
           "${setting[--speculative-num-draft-tokens]:-not set}" \
           "${setting[--speculative-adaptive-config]:-built-in table}"
+        if [[ -n ${PENNY_MTP_POLICY:-} ]]; then
+          printf '  MTP width policy: %s (PENNY_MTP_POLICY)\n' "$PENNY_MTP_POLICY"
+        fi
         ;;
     esac
   else

@@ -578,6 +578,12 @@ class RecipeHiCacheSizeTests(unittest.TestCase):
         "IMAGE_PROCESSOR_BACKEND": "pil",
         "TOKEN_MAP": "/maps/token map [FR Spec].pt",
         "ADAPTIVE_CONFIG": "/configs/adaptive policy [approved].json",
+        # The launch width comes from configs/pennyroyal/mtp-policy.sh, which the
+        # extracted block cannot source; these are the qualified tiered default
+        # the selector resolves to, and the width-only policies are covered in
+        # MTPPolicySelectionTests below.
+        "PENNY_MTP_SPEC_STEPS": "7",
+        "PENNY_MTP_DRAFT_TOKENS": "8",
         "DRAFT_TOKENS": "8",
         "DRAFT_WINDOW_SIZE": "2048",
         "PLE_NAMESPACE_ARGS": "",
@@ -1189,6 +1195,156 @@ class NativePlanTests(FixtureMixin):
         )
         self.assertEqual(run.returncode, 2)
         self.assertIn("positive integer", run.stderr)
+
+
+class MTPPolicySelectionTests(FixtureMixin):
+    """One setting, three policies, and the precedence an operator can rely on."""
+
+    def test_the_choice_round_trips_and_names_the_launch(self):
+        # Saved, reloaded, and printed: the preview has to say which policy runs,
+        # from which bundled file, at which launch width.
+        for name, (asset, steps, draft_tokens) in pc.MTP_POLICY_SPEC.items():
+            with self.subTest(policy=name):
+                plan = self.native_plan({**self.native_env(), "PENNY_MTP_POLICY": name})
+                self.assertEqual(plan.errors, [])
+                self.assertEqual(plan.env["PENNY_MTP_POLICY"], name)
+                self.assertEqual(plan.origins["PENNY_MTP_POLICY"], "saved file")
+                line = [line for line in plan.summary if "MTP width policy" in line][0]
+                self.assertIn(f"MTP width policy: {name}", line)
+                self.assertIn(f"{pc.RECIPE_DIR_RELPATH}/{asset}", line)
+                self.assertIn(f"--speculative-num-steps {steps}", line)
+                self.assertIn(f"--speculative-num-draft-tokens {draft_tokens}", line)
+                # The saved bytes reload to the same plan, and the printed launch
+                # command carries the choice.
+                reloaded = pc.read_env_file(plan.config.path)
+                self.assertEqual(reloaded["PENNY_MTP_POLICY"], name)
+                self.assertIn(f"PENNY_MTP_POLICY={name}", pc.launch_display(plan))
+
+    def test_choosing_nothing_leaves_the_recipe_default_alone(self):
+        # Nothing saved and nothing exported: the qualified default is reported
+        # as the recipe's own, not as a choice the operator made.
+        plan = self.native_plan(self.native_env())
+        self.assertEqual(plan.env["PENNY_MTP_POLICY"], "tiered")
+        self.assertEqual(plan.origins["PENNY_MTP_POLICY"], "utility default")
+        line = [line for line in plan.summary if "MTP width policy" in line][0]
+        self.assertIn("MTP width policy: tiered", line)
+        self.assertIn("the recipe's qualified default", line)
+
+    def test_the_saved_policy_wins_over_the_environment_like_any_setting(self):
+        # This key has no precedence of its own. A saved adaptive setup is not
+        # defeated by an inherited fixed-w4, the same way a saved PLE backend or
+        # capacity number is not, and the preview says where the value came from.
+        plan = self.native_plan(
+            {**self.native_env(), "PENNY_MTP_POLICY": "adaptive"},
+            environ={"PENNY_MTP_POLICY": "fixed-w4"},
+        )
+        self.assertEqual(plan.env["PENNY_MTP_POLICY"], "adaptive")
+        self.assertEqual(plan.origins["PENNY_MTP_POLICY"], "saved file")
+        self.assertIn("MTP width policy: adaptive", "\n".join(plan.summary))
+        # The one-command form is honoured where the shell is the only place a
+        # value was ever given: nothing saved, so the inherited choice launches.
+        plan = self.native_plan(
+            self.native_env(), environ={"PENNY_MTP_POLICY": "fixed-w4"}
+        )
+        self.assertEqual(plan.env["PENNY_MTP_POLICY"], "fixed-w4")
+        self.assertEqual(plan.origins["PENNY_MTP_POLICY"], "inherited environment")
+        line = [line for line in plan.summary if "MTP width policy" in line][0]
+        self.assertIn("MTP width policy: fixed-w4", line)
+        self.assertIn("(from inherited environment)", line)
+        # A saved blank is a decision, not an absence: it resets to the
+        # documented default instead of letting the shell through.
+        plan = self.native_plan(
+            {**self.native_env(), "PENNY_MTP_POLICY": ""},
+            environ={"PENNY_MTP_POLICY": "fixed-w4"},
+        )
+        self.assertEqual(plan.env["PENNY_MTP_POLICY"], "tiered")
+        self.assertIn("saved blank", plan.origins["PENNY_MTP_POLICY"])
+        # Nothing here moved another key's precedence.
+        plan = self.native_plan(
+            {**self.native_env(), "MAX_RUNNING_REQUESTS": "4"},
+            environ={"MAX_RUNNING_REQUESTS": "8", "PENNY_MTP_POLICY": "adaptive"},
+        )
+        self.assertEqual(plan.env["MAX_RUNNING_REQUESTS"], "4")
+        self.assertEqual(plan.env["PENNY_MTP_POLICY"], "adaptive")
+
+    def test_an_invalid_policy_is_refused_from_file_and_environment(self):
+        # A saved value goes through the shared enum validator, so a typo fails
+        # the preview and --check rather than reaching a launch line.
+        for environ in ({}, {"PENNY_MTP_POLICY": "w6"}):
+            with self.subTest(environ=environ):
+                self.write_native_config(
+                    {**self.native_env(), "PENNY_MTP_POLICY": "w6"}
+                )
+                with self.assertRaises(pc.ConfigError) as caught:
+                    pc.load_config("native", self.config_path, environ, self.repo)
+                self.assertIn(
+                    "PENNY_MTP_POLICY must be one of tiered, adaptive, fixed-w4",
+                    str(caught.exception),
+                )
+        # An inherited value is adopted without extra checks, as every other
+        # inherited value is (PENNY_PLE_BACKEND=banana gets through too), and the
+        # shared selector refuses it at launch instead: see the recipe test and
+        # the container launch test, both of which launch PENNY_MTP_POLICY=w6.
+        self.write_native_config(self.native_env())
+        config = pc.load_config("native", self.config_path, {}, self.repo)
+        plan = pc.build_plan(
+            "native", config, {"PENNY_MTP_POLICY": "wide"}, repo_root=self.repo
+        )
+        self.assertEqual(plan.env["PENNY_MTP_POLICY"], "wide")
+        self.assertEqual(plan.origins["PENNY_MTP_POLICY"], "inherited environment")
+
+    def test_the_other_profiles_keep_their_own_routing(self):
+        # The DFlash2 recipes route their widths from their own policy file, so
+        # this selector is not a setting either one reads. Saved, exported or
+        # neither, they launch what they always launched and their summary says
+        # what it always said: hiding the knob from setup must not turn a saved
+        # native value into a reason a profile switch fails.
+        for profile in ("next-dflash2", "27b"):
+            for saved in ("fixed-w4", "adaptive", ""):
+                for environ in ({}, {"PENNY_MTP_POLICY": "adaptive"}):
+                    with self.subTest(profile=profile, saved=saved, environ=environ):
+                        plan = self.native_plan(
+                            {
+                                **self.native_env(),
+                                "TARGET_MODEL": str(self.dense_model),
+                                "DRAFT_MODEL": str(self.draft_model),
+                                "PENNY_MTP_POLICY": saved,
+                            },
+                            profile=profile,
+                            environ=environ,
+                        )
+                        self.assertNotIn(
+                            "PENNY_MTP_POLICY", self.messages(plan, "error")
+                        )
+                        self.assertEqual(
+                            [
+                                line
+                                for line in plan.summary
+                                if "MTP width policy" in line
+                            ],
+                            [],
+                        )
+                        self.assertIn(
+                            pc.RECIPE_BY_PROFILE[profile], Path(plan.argv[0]).name
+                        )
+                        # The recipe line is a single path: no policy flag rides
+                        # along, and the profile's own policy file is unchanged.
+                        self.assertNotIn("--speculative-adaptive", plan.argv)
+
+    def test_compose_forwards_the_policy_the_launcher_and_recipe_agree_on(self):
+        compose = (ROOT / pc.COMPOSE_RELPATH).read_text()
+        self.assertIn("PENNY_MTP_POLICY: ${PENNY_MTP_POLICY:-}", compose)
+        env_example = (ROOT / "docker/pennyroyal/.env.example").read_text()
+        self.assertIn("#PENNY_MTP_POLICY=tiered", env_example)
+        self.assertIn(
+            "#PENNY_MTP_POLICY=tiered",
+            (ROOT / "configs" / "pennyroyal" / "pennyroyal.env.example").read_text(),
+        )
+        # The image entrypoint treats Compose's empty passthrough as unset.
+        self.assertIn(
+            "PENNY_MTP_POLICY",
+            (ROOT / "docker/pennyroyal/entrypoint.sh").read_text(),
+        )
 
 
 class LauncherTests(FixtureMixin):
@@ -2073,7 +2229,7 @@ class ContainerLaunchGenerationTests(FixtureMixin):
                 (
                     "TARGET_MODEL=/models/RadixArk-Qwen3.8-Flash-Next-NVFP4\n",
                     "HICACHE_SIZE_GB=32\n",
-                    "--speculative-num-steps 7",
+                    '--speculative-num-steps "$PENNY_MTP_SPEC_STEPS"',
                 ),
             ),
             (
@@ -2105,31 +2261,83 @@ class ContainerLaunchGenerationTests(FixtureMixin):
                 )
 
     def test_regenerated_next_launches_keep_the_accepted_policy_guard(self):
-        # The approved adaptive MTP policy is guarded by a checksum of the
-        # image's own policy file, so both Next profiles have to carry that
-        # guard after a save: a generated script that dropped it would launch
-        # an unqualified policy without saying so.
-        policy_sha = hashlib.sha256(
-            (ROOT / "configs" / "pennyroyal" / "adaptive-next.json").read_bytes()
-        ).hexdigest()
+        # The width policy is selected and hashed by the image's shared selector,
+        # not by a literal in the startup file, so a saved launch keeps the guard
+        # by keeping the source line and the policy hash it exports. What a save
+        # adds is one ordinary settings line naming the choice, in the same block
+        # as the capacity and PLE settings it sits beside.
         for profile, script in (
             ("next", "start-flash-next-frspec.sh"),
             ("next-plain", "start-flash-next.sh"),
         ):
             with self.subTest(profile=profile):
-                plan = self.container_plan(self.base_values(), profile=profile)
-                startup = self.generated(plan)[
-                    self.base / "launch out" / "config" / script
-                ]
-                self.assertIn(
-                    'ADAPTIVE_CONFIG="$IMAGE_CONFIGS/adaptive-next.json"', startup
+                plan = self.container_plan(
+                    {**self.base_values(), "PENNY_MTP_POLICY": "adaptive"},
+                    profile=profile,
                 )
-                self.assertIn(f'[[ "$ADAPTIVE_SHA" == {policy_sha} ]]', startup)
+                files = self.generated(plan)
+                startup = files[self.base / "launch out" / "config" / script]
+                self.assertIn('source "$IMAGE_CONFIGS/mtp-policy.sh"', startup)
+                self.assertIn("PENNY_MTP_POLICY=adaptive", startup)
                 self.assertIn(
                     '--field "speculative_adaptive_policy_sha256=$ADAPTIVE_SHA"',
                     startup,
                 )
                 self.assertIn("--speculative-adaptive", startup)
+                # Nothing is forwarded to second-guess that line: the settings
+                # block is the truth for a generated launch, as it is for every
+                # other setting in it, so run.sh grows no special passthrough.
+                self.assertNotIn(
+                    "PENNY_MTP_POLICY=",
+                    files[self.base / "launch out" / "run.sh"],
+                )
+
+    def test_a_generated_file_states_the_policy_it_was_given(self):
+        # One settings line, resolved the ordinary way: the saved choice wins over
+        # an inherited one, a save that inherited a value records it (that is what
+        # makes a saved folder reproduce the launch it was saved from), and a save
+        # with no choice at all records the qualified default rather than nothing.
+        cases = (
+            ("adaptive", {"PENNY_MTP_POLICY": "fixed-w4"}, "adaptive", "saved file"),
+            (
+                None,
+                {"PENNY_MTP_POLICY": "adaptive"},
+                "adaptive",
+                "inherited environment",
+            ),
+            (None, {}, "tiered", "utility default"),
+        )
+        for saved, environ, expected, origin in cases:
+            with self.subTest(saved=saved, environ=environ):
+                values = self.base_values()
+                if saved:
+                    values["PENNY_MTP_POLICY"] = saved
+                plan = self.container_plan(values, profile="next", environ=environ)
+                self.assertEqual(plan.env["PENNY_MTP_POLICY"], expected)
+                self.assertEqual(plan.origins["PENNY_MTP_POLICY"], origin)
+                summary = "\n".join(plan.summary)
+                self.assertIn(f"MTP width policy: {expected}", summary)
+                self.assertIn(
+                    (
+                        "(unset: the recipe's qualified default)"
+                        if origin == "utility default"
+                        else f"(from {origin})"
+                    ),
+                    summary,
+                )
+                startup = self.generated(plan)[
+                    self.base / "launch out" / "config" / "start-flash-next-frspec.sh"
+                ]
+                self.assertIn(f"PENNY_MTP_POLICY={expected}", startup)
+        # A startup script without the setting (the DFlash2 pair) gets no line,
+        # exactly as a pinned knob gets none: the recipe there routes its own width.
+        startup = self.generated(
+            self.container_plan(
+                {**self.base_values(), "PENNY_MTP_POLICY": "fixed-w4"},
+                profile="next-dflash2",
+            )
+        )[self.base / "launch out" / "config" / "start-flash-next-dflash2.sh"]
+        self.assertNotIn("PENNY_MTP_POLICY", startup)
 
     def test_a_saved_image_pin_survives_regeneration(self):
         # An operator who pinned a release keeps it: re-saving preserves the
@@ -2374,6 +2582,10 @@ class ContainerLaunchGenerationTests(FixtureMixin):
             "MAX_RUNNING_REQUESTS",
             "MAX_MAMBA_CACHE_SIZE",
             pc.PROFILE_KEY.upper(),
+            # run.sh names this one in its own docker arguments, as the value the
+            # caller exported rather than a saved literal, and the startup file
+            # states it as the default of that same expansion.
+            pc.MTP_POLICY_KEY,
         }
         missing = [
             name

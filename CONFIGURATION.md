@@ -56,7 +56,7 @@ server.
 The verify width on every maintained Flash-Next profile is fixed by active
 concurrency through a bundled policy file: the native-MTP recipes read
 `configs/pennyroyal/adaptive-next.json` (block **8** at one running request,
-block **4** at two or more; the recipes pin its SHA-256 `3edaa87d66f535caae0bddb8f457f03fce0f6dc1f4e8091b20495a0dc9da41fb`) and
+block **4** at two or more) and
 the DFlash2 profile reads `configs/pennyroyal/adaptive-dflash2.json` (block 6
 at one running request, block 4 at two or more). One candidate width per tier,
 and each launch carries the widest routed block (`--speculative-num-steps 7
@@ -69,6 +69,50 @@ files; there is no public toggle for it. The 3.0-era
 profile — setup names it as unavailable rather than forwarding a value the
 policy would ignore. The routed profile also keeps a batch-1 decode graph
 bucket and runs with `--disable-prefill-cuda-graph`.
+
+<a id="speculation-width-policy"></a>
+
+## Speculation width policy
+
+On the two native-MTP profiles (`next` and `next-plain`) the width policy above
+is a choice, and choosing it is one setting: `PENNY_MTP_POLICY`. A value names
+both the bundled policy file and the launch width that can carry it, so there is
+no JSON to copy, no launch flag to keep in step and no wizard run needed.
+
+| `PENNY_MTP_POLICY` | What it does |
+|---|---|
+| unset or `tiered` (the qualified default) | Block **8** at one running request, block **4** at two or more. Fixed by concurrency, so the width is identical between boots. |
+| `adaptive` | The v3.0.2 policy: at one running request the width may move between block **4** and **8** with acceptance, under that policy's existing hold; block **4** at two or more. |
+| `fixed-w4` | Block **4** at every concurrency, one request or many. |
+
+- **`./configure-penny` asks for it** in the advanced section of the native-MTP
+  profiles, shows it in `--check` and `--show-config` with the file and width it
+  selects, and saves it like any other setting. A container save writes your
+  answer into its startup script's settings block, on the line
+  `PENNY_MTP_POLICY=`, beside the capacity and PLE settings. Change the policy by
+  answering again or editing that one line; setup offers nothing for
+  `next-dflash2` or `27b`, which route their own widths and read nothing from
+  this setting, so a value left for them changes nothing.
+- **The shell form works while the setting is unsaved**, which is the ordinary
+  precedence and not a special case: with no `PENNY_MTP_POLICY` in the saved file,
+  the value in the environment is what launches.
+
+  ```bash
+  PENNY_MTP_POLICY=fixed-w4 ./run-penny            # nothing saved: the shell decides
+  PENNY_MTP_POLICY=adaptive ./run-penny --profile next-plain
+  PENNY_MTP_POLICY=tiered   docker compose -f docker/pennyroyal/compose.yaml up
+  ```
+
+  Once a setup has saved a choice, that choice wins, the same way a saved
+  `PENNY_PLE_BACKEND` or capacity number wins: `./run-penny` and `./run.sh` then
+  launch what is saved, and a launch folder carries the choice in its own startup
+  script rather than in the caller's environment. Compose is the exception among
+  the container routes because it has no startup script to carry it:
+  `compose.yaml` passes the variable through, so the `.env` line or the inline
+  value decides there.
+- **It applies at the next start** and each policy keeps its own persistent cache
+  namespace; switching neither deletes old cache data nor reuses another
+  policy's. An invalid value stops the launch instead of being guessed.
 
 ## Models, paths and identity
 
@@ -95,6 +139,16 @@ bucket and runs with `--disable-prefill-cuda-graph`.
 | `PENNY_PLE_BACKEND` | `ram` | Flash-Next PLE table placement: RAM residency or an `nvme` snapshot streamed from SSD ([NVME-PLE.md](NVME-PLE.md)). Independent of `NIXL`; combining NVMe PLE with `NIXL=off` needs `run.sh --nvme-ple` for the io_uring permission. |
 | `PENNY_PLE_NVME_MODEL` | none | Prepared NVMe PLE snapshot directory. Meaningless for `27b`. |
 
+**The DFlash2 draft's host cache is extra to the target's HiCache tier.** On the
+DFlash2 profiles the draft keeps its own host-side state in addition to the
+`PENNY_HICACHE_SIZE_GB` pool, so that number is not the whole host-memory bill:
+in our measured 32 GB setup the draft cache added about 22 GB, roughly 54 GB of
+caches before the PLE table and the rest of the process. The actual amount
+scales with the target's logical slots and the draft's geometry, so size host
+RAM from what the boot reports rather than from the HiCache setting alone. We
+will look into optimizing this soon if we can prove any speed increases with
+DFlash2 vs native MTP.
+
 ## GPUs, TP and media
 
 | Setting | Default | Notes |
@@ -110,7 +164,8 @@ bucket and runs with `--disable-prefill-cuda-graph`.
 |---|---|---|
 | `SGLANG_SM120_ONLINE_MXFP8` | unset (automatic) | Eligible Flash-Next SM120 launches select the accepted rowwise-FP8 path themselves. `false` pins the original checkpoint precision; `true` forces the conversion. A saved private compatibility override, not everyday tuning — see [FP8.md](FP8.md). |
 | `FLASHINFER_GDN_FP16_ACCUM_MMA` | `1` on the Next recipes | FP16-accumulate MMA mode of the patched FlashInfer SM12x delta-rule prefill kernels; `0` runs the kernels as released. The resolved mode is part of the NIXL namespace, so the two modes use separate persistent roots and nothing is deleted. The `27b` recipe never sets it (Triton GDN). |
-| `--speculative-adaptive-config` | bundled per-profile policy file | Fixed routing policy: `configs/pennyroyal/adaptive-next.json` on `next` and `next-plain` (block 8 at BS1, block 4 at BS2+; SHA-256 `3edaa87d66f535caae0bddb8f457f03fce0f6dc1f4e8091b20495a0dc9da41fb`, pinned by the recipes) and `configs/pennyroyal/adaptive-dflash2.json` on `next-dflash2` (block 6 at BS1, block 4 at BS2+). A DFLASH tier with two candidates is refused, not averaged. No operator environment key. |
+| `--speculative-adaptive-config` | bundled per-profile policy file | Fixed routing policy: `configs/pennyroyal/adaptive-next.json` on `next` and `next-plain` (block 8 at BS1, block 4 at BS2+) and `configs/pennyroyal/adaptive-dflash2.json` on `next-dflash2` (block 6 at BS1, block 4 at BS2+). A DFLASH tier with two candidates is refused, not averaged. On the native-MTP profiles the file is not hand-picked: `PENNY_MTP_POLICY` below selects it together with the launch width, and the file you get is hashed into the NIXL namespace as cache identity. |
+| `PENNY_MTP_POLICY` | `tiered` | The one width-policy setting of the native-MTP profiles: `tiered`, `adaptive` (the v3.0.2 policy) or `fixed-w4`; unset keeps `tiered`, and a value in the environment is honoured while the setting is unsaved. See [Speculation width policy](#speculation-width-policy) for what each one routes and where a container launch reads it. Not a setting of `next-dflash2` or `27b`, which route their own widths and read nothing from it. |
 | `SPECULATIVE_NUM_DRAFT_TOKENS` | removed | The 3.0-era block-width knob is gone on `next-dflash2`: the routing policy owns the width. `27b` keeps its own fixed block 8 in the recipe. |
 
 ## Reasoning and request behaviour
@@ -149,6 +204,12 @@ environment when you set them: `SGLANG_HICACHE_NIXL_MAX_CACHE_GB`,
 `FLASHINFER_GDN_FP16_ACCUM_MMA`. The disk-tier-only key is dropped entirely
 from a launch generated with `NIXL=off`.
 
+The native-MTP width policy travels the same route: a generated or shipped
+startup script names it as `PENNY_MTP_POLICY=<choice>` in its settings block,
+which is the one place a container launch reads it, and `compose.yaml` forwards
+it as an environment passthrough for operators who run the image profile directly
+instead of a startup script.
+
 ## Interactions worth knowing
 
 - **Automatic KV pool sizing and the memory fraction.** The pool fits inside
@@ -169,7 +230,10 @@ from a launch generated with `NIXL=off`.
   with their existing recipes and their fixed concurrency widths (block 8 at
   one running request, block 4 at two or more, from the pinned policy), remain
   the default for new setups, and keep receiving updates; `next-dflash2` is
-  the opt-in alternative, verified through FlashInfer's SM120 kernel.
+  the opt-in alternative, verified through FlashInfer's SM120 kernel. The
+  concurrency width is the one thing on these profiles an operator can pick,
+  with `PENNY_MTP_POLICY`, and leaving it unset launches exactly what it
+  launched before the setting existed.
 
 ## Restarts and cache effects
 

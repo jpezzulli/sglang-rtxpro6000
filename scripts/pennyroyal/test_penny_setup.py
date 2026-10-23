@@ -540,6 +540,106 @@ class SetupSessionTests(FixtureMixin):
         self.assertIn("nothing was written", output)
         self.assertIn("  [1] yes\n  [2] no", output)
 
+    def test_the_width_policy_is_asked_once_and_saved(self):
+        # One question in the advanced section, a numbered menu of the three
+        # approved policies, and the choice lands in the file the launcher reads
+        # with the plan saying what it selects. Declining the advanced section
+        # never asks and never writes it: absence stays 'the recipe decides'.
+        code, output, path = self.run_setup(
+            ["next"] + self.basics(str(self.next_model)) + ["n", "y"]
+        )
+        self.assertEqual(code, 0, output)
+        # Declined: the menu was never printed and nothing was saved, so the
+        # recipe's own qualified policy stays in charge of the launch.
+        self.assertNotIn("[3] fixed-w4", output)
+        self.assertNotIn("PENNY_MTP_POLICY", pc.read_env_file(path))
+        advanced = [
+            "",  # PLE placement menu: Enter keeps ram
+            str(self.base / "ple-snap"),  # snapshot path (free text, never empty)
+            "",  # WSL2 host memory
+            "",  # forward tools
+            "3",  # MTP width policy: the third menu row
+            "",  # capacity, slots and KV cap: recipe defaults
+            "",
+            "",
+            "",  # TP ranks and build jobs: recipe defaults
+            "",
+            "/opt/nixl",  # the free-text paths below have no default to keep
+            str(self.venv / "bin" / "sglang"),
+            str(self.venv / "bin" / "python"),
+        ]
+        code, output, path = self.run_setup(
+            ["next"] + self.basics(str(self.next_model)) + ["y"] + advanced + ["y"]
+        )
+        self.assertEqual(code, 0, output)
+        menu = output.split("MTP width policy")[1].split("Choice (")[0]
+        self.assertIn("[1] tiered", menu)
+        self.assertIn("[2] adaptive", menu)
+        self.assertIn("[3] fixed-w4", menu)
+        self.assertIn("block 4 at every concurrency", output)
+        self.assertEqual(pc.read_env_file(path)["PENNY_MTP_POLICY"], "fixed-w4")
+        plan = pc.build_plan(
+            "native",
+            pc.load_config("native", path, {}, self.repo),
+            {},
+            repo_root=self.repo,
+        )
+        self.assertEqual(plan.errors, [])
+        self.assertIn(
+            "MTP width policy: fixed-w4 — block 4 at every concurrency",
+            "\n".join(plan.summary),
+        )
+        # A rerun offers the saved choice as the menu default, so the answer
+        # survives setup instead of resetting to the qualified default: Enter
+        # here keeps fixed-w4 even though tiered is the recipe's own choice.
+        code, output, path = self.run_setup(
+            [""]
+            + self.basics(str(self.next_model))
+            + ["y"]
+            + [advanced[0], advanced[1], advanced[2], advanced[3], ""]
+            + advanced[5:]
+            + ["y"],
+            existing=f"{pc.PROFILE_KEY}=next\n"
+            f"TARGET_MODEL={pc.quote_value(str(self.next_model))}\n"
+            f"CACHE_BASE={pc.quote_value(str(self.cache))}\n"
+            f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n"
+            "PENNY_MTP_POLICY=fixed-w4\n",
+        )
+        self.assertEqual(code, 0, output)
+        self.assertIn("Choice (Enter keeps [3] fixed-w4", output)
+        self.assertEqual(pc.read_env_file(path)["PENNY_MTP_POLICY"], "fixed-w4")
+        # A saved native value does not obstruct the other profiles: 27b routes
+        # its own width, so setup neither asks about the selector nor refuses to
+        # save it. The key rides along unread, exactly as it does in a file an
+        # operator later switches back to a native profile with.
+        code, output, path = self.run_setup(
+            ["3"]
+            + self.basics(str(self.dense_model), draft=str(self.draft_model))
+            + ["n", "y"],
+            existing=f"{pc.PROFILE_KEY}=27b\n"
+            f"TARGET_MODEL={pc.quote_value(str(self.dense_model))}\n"
+            f"DRAFT_MODEL={pc.quote_value(str(self.draft_model))}\n"
+            f"CACHE_BASE={pc.quote_value(str(self.cache))}\n"
+            f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n"
+            "PENNY_MTP_POLICY=fixed-w4\n",
+            config_path=self.base / "hidden.env",
+        )
+        self.assertEqual(code, 0, output)
+        asked = output.split("Review")[0]
+        self.assertNotIn("MTP width policy", asked)
+        self.assertNotIn("Fix one setting", output)
+        self.assertEqual(pc.read_env_file(path)["PENNY_MTP_POLICY"], "fixed-w4")
+        plan = pc.build_plan(
+            "native",
+            pc.load_config("native", path, {"PENNY_MTP_POLICY": "adaptive"}, self.repo),
+            {"PENNY_MTP_POLICY": "adaptive"},
+            repo_root=self.repo,
+        )
+        self.assertEqual(plan.errors, [])
+        self.assertEqual(
+            [line for line in plan.summary if "MTP width policy" in line], []
+        )
+
     def test_media_menu_shows_cpu_model_gpu_saved_and_manual_rows(self):
         base = self.basics(str(self.next_model))
         # Menu rows carry human labels (never the __manual__ sentinel):
@@ -556,6 +656,7 @@ class SetupSessionTests(FixtureMixin):
                 "/nvme-unused-with-ram",  # free-text path stays free text
                 "",  # WSL2 host memory: Enter keeps false
                 "",  # forward tools: Enter keeps true
+                "",  # MTP width policy: Enter keeps the qualified tiered
                 "",
                 "",
                 "",
@@ -623,6 +724,7 @@ class SetupSessionTests(FixtureMixin):
             str(self.base / "ple-snap"),
             "yes",  # WSL2 host-memory workaround
             "",
+            "",  # MTP width policy: Enter keeps the qualified tiered
             "",
             "",
             "",
@@ -1039,7 +1141,7 @@ class SetupSessionTests(FixtureMixin):
         # Enter on the shown RAM size keeps the saved 2 GB.
         self.assertIn("variable PENNY_HICACHE_SIZE_GB", output)
         # Opening the advanced section offers the saved jobs count as default.
-        # Twelve answers cover the advanced keys (three menus, the capacity
+        # Thirteen answers cover the advanced keys (the menus, the capacity
         # knobs, the install paths); every one of them presses Enter.
         code, output, path = self.run_setup(
             [""]
@@ -1051,6 +1153,7 @@ class SetupSessionTests(FixtureMixin):
                 "false",  # online FP8
                 "",  # WSL2 pinned host memory
                 "true",  # unknown tools
+                "",  # MTP width policy: Enter keeps the qualified tiered
                 "",
                 "",
                 "",
