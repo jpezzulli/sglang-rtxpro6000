@@ -36,9 +36,10 @@ native-MTP width policy (the unchanged `tiered` default, the v3.0.2 `adaptive`
 policy, or `fixed-w4`); fixes the DFlash2 decode-checkpoint tracking so an
 accepted block that crosses the checkpoint grid is tracked instead of
 dropped; stops the scheduler's idle sleep from delaying encoder-embedding
-handoffs; and labels both DFlash2 profiles experimental / alpha, since the
-on-GPU checkpoint resume and the draft's extra host RAM are still unverified
-on user hardware. See the
+handoffs; and labels both DFlash2 profiles experimental / alpha: the draft's
+extra host RAM is an observed, documented addition to the target's budget
+(3.1.2 does not reduce it), and the on-GPU checkpoint resume still awaits
+hardware validation. See the
 [3.1.2 release notes](RELEASE_NOTES_3.1.2.md).
 
 <a id="dflash2-maturity"></a>

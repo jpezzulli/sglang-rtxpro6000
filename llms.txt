@@ -20,16 +20,18 @@ flashinfer`, fixed in the recipes; earlier candidates verified through the
 Triton path). Automatic KV pool
 sizing replaces the preset cap; an explicit `MAX_TOTAL_TOKENS` override remains.
 The 27B FP8 DFlash2 profile
-is unchanged at fixed block 8. Native width routing comes from the bundled
-fixed policy `configs/pennyroyal/adaptive-next.json`, pinned by the launch
-recipes. The current release is Penny Royal 3.1.2, which adds the single
+is unchanged at fixed block 8. Native width routing ships as the bundled
+tiered policy (block 8 at one running request, block 4 at two or more);
+since 3.1.2 the policy is selectable with `PENNY_MTP_POLICY` and `tiered`
+remains the default. The current release is Penny Royal 3.1.2, which adds that
 `PENNY_MTP_POLICY` width-policy setting for the maintained native-MTP
 profiles (`tiered` default unchanged, `adaptive` restoring the exact v3.0.2
 policy, `fixed-w4`), fixes the DFlash2 decode-checkpoint crossing so accepted
 blocks are tracked instead of dropped, stops the scheduler's idle sleep from
 delaying encoder-embedding handoffs, and labels both DFlash2 profiles
-experimental / alpha while the on-GPU checkpoint resume and the draft's extra
-host RAM await hardware validation. The release tag is `pennyroyal-v3.1.2`
+experimental / alpha: the draft's extra host RAM is observed and documented
+(this release does not reduce it), and the on-GPU checkpoint resume awaits
+hardware validation. The release tag is `pennyroyal-v3.1.2`
 and the image is `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.2`; see
 release-3.1.2.json for publication status. The 3.1.1 NVMe PLE source-gate
 removal stays in effect, and the 3.1 feature details, source identity,

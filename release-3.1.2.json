@@ -53,13 +53,14 @@
     }
   ],
   "validation": {
-    "focused_cpu_checks": "scripts/pennyroyal suite: 274 tests passed (config, recipes, setup, startup summary, PLE identity helpers). Registered CPU units: 608 passed with 62 subtests (pennyroyal and spec directories, including the DFlash2 checkpoint-tracking regression, container release routing, the startup version banner, prebuilt container launch and FR-Spec KV capacity, plus the EPD idle-sleep guard); 27 environment-failed cases are identical to the same-venv base run (missing GPU/optional runtime deps; one timing-flaky ngram benchmark), so no candidate-introduced failures.",
-    "regression": "The #115 checkpoint-tracking regression is red on the 4a56104 base (7 failures) and green with the integrated fix.",
+    "focused_cpu_checks": "2026-10-23 on this candidate, CPU only: 20 focused config/setup/recipe/startup-summary tests with 33 subtests passed (170 unrelated cases deselected); 65 registered tests passed across test_prebuilt_container_launch.py, test_container_release.py, test_startup_version.py and test_dflash_mamba_checkpoint_track.py. Total 85 tests and 33 subtests; no GPU use.",
+    "regression": "The #115 checkpoint-tracking regression is red on the 4a56104 base and green with the integrated fix.",
     "formatting": "Pinned CI Black 26.1.0 --check passes on all changed Python files.",
-    "review": "Individual PRs already reviewed and accepted; only the CONFIGURATION.md docs overlap was resolved at merge.",
+    "review": "Individual PRs already reviewed and accepted; only the CONFIGURATION.md docs overlap was resolved at merge. The #117 and #119 runtime/test blobs independently match the exact accepted PR heads; the original PR #117 (EPD) evidence is reused as dated.",
     "nvme_serving": "not run",
     "gpu_runtime": "not run; on-GPU mamba checkpoint scatter and actual DFlash2 cache-resume remain unverified on both profiles",
-    "benchmarks": "not run; no performance defaults changed. 3.1/3.1.1 qualification and dated RESULTS.md values stand.",
+    "benchmarks": "not run; no performance defaults changed.",
+    "reused_evidence": "Runtime qualification is the dated 3.1 evidence (release-3.1.json and RESULTS.md); the 3.1.1 record is CPU/static and image-package verification, not GPU qualification. No new GPU qualification exists for 3.1.2.",
     "container_build": "pending; no image build, package check or digest exists for this candidate yet"
   },
   "contributors": [
