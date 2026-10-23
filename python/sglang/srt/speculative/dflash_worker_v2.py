@@ -1890,12 +1890,22 @@ class DFlashWorkerV2(BaseSpecWorker):
 
         if batch.mamba_track_indices is not None:
             mamba_track_interval = mamba_track_grid(batch.tree_cache.page_size)
+            # ``batch.seq_lens`` still holds the pre-verify device lengths here:
+            # the caller publishes the committed (post-verify) lengths only after
+            # this helper returns (``new_seq_lens``/``on_publish`` below, and
+            # neither ``prepare_for_verify`` nor target verify advances the device
+            # tensor). Deriving the post lengths from the pre-verify clone is what
+            # lets the grid-crossing check see the tokens this verify actually
+            # commits, matching native NEXTN's ``_verify_commit_step_indices``.
+            seq_lens_post_verify = seq_lens_pre_verify + commit_lens.to(
+                seq_lens_pre_verify.dtype
+            )
             to_track_mask = (
                 seq_lens_pre_verify // mamba_track_interval
-                != batch.seq_lens // mamba_track_interval
+                != seq_lens_post_verify // mamba_track_interval
             )
             tracking_point = (
-                batch.seq_lens // mamba_track_interval * mamba_track_interval
+                seq_lens_post_verify // mamba_track_interval * mamba_track_interval
             )
             to_track_ith = torch.clamp(tracking_point - seq_lens_pre_verify - 1, min=0)
             can_track_mask = to_track_mask & (

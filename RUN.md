@@ -4,8 +4,9 @@ This is the native launch guide for Penny Royal. The same source runs
 Qwen3.8 Flash-Next NVFP4 with native NEXTN MTP and FR-Spec, the same target
 with the separate DFlash2 draft, or Qwen3.8-27B FP8 with its own DFlash2
 draft, on NVIDIA RTX PRO 6000 Blackwell (SM120), TP1 or TP2. The Flash-Next
-native NEXTN MTP path is the maintained default; the DFlash2 path stays fully
-available as an opt-in with its existing recipe.
+native NEXTN MTP path is the maintained default; the DFlash2 path is an
+**experimental / alpha** opt-in that stays fully available with its existing
+recipe (see the [DFlash2 maturity note](README.md#dflash2-maturity)).
 Both profiles serve an OpenAI-compatible model named `pennyroyal`.
 
 Build the release with [BUILD.md](BUILD.md) first. Container users should
@@ -142,6 +143,12 @@ Mamba slots. During startup, confirm the token map, reduced draft head, graphs,
 and state pools in the resolved server output.
 
 ## Launch 27B with DFlash2
+
+> Penny's 27B DFlash2 integration is **experimental / alpha**: it launches and
+> serves normally, but the decode-checkpoint cache path and off-GPU memory
+> budget still need explicit validation on your hardware (see the
+> [DFlash2 maturity note](README.md#dflash2-maturity)). DFlash2 is 27B's
+> speculative path here, so this profile carries the label too.
 
 Use the official Qwen reference target, or the measured public alternative in
 [BUILD.md](BUILD.md#reference-and-measured-checkpoints), with the separate
@@ -459,7 +466,10 @@ The online-FP8 and PLE-placement options also apply to this recipe.
 ## Launch Flash-Next with DFlash2
 
 `PENNYROYAL_PROFILE=next-dflash2` is the optional Flash-Next DFlash2 choice;
-select it explicitly (or keep a saved file that names it) to use it. It runs the same accepted NVFP4 target and the bundled FR-Spec
+select it explicitly (or keep a saved file that names it) to use it. Penny's
+DFlash2 integration is **experimental / alpha** (see the
+[DFlash2 maturity note](README.md#dflash2-maturity)); native NEXTN MTP remains
+the default profile. It runs the same accepted NVFP4 target and the bundled FR-Spec
 64K token map against the separate
 `incoai/Qwen3.8-Flash-Next-DFlash2` draft — its own download, next to the
 target:

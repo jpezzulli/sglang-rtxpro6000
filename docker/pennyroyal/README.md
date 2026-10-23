@@ -89,11 +89,13 @@ PLE placement and image preprocessing are in this startup file.
 |---|---|
 | Flash-Next, native NEXTN MTP with FR-Spec (default, qualified) | `config/start-flash-next-frspec.sh` |
 | Flash-Next without FR-Spec | `config/start-flash-next.sh` |
-| Flash-Next with DFlash2 + FR-Spec + FlashInfer verify (optional, qualified) | `config/start-flash-next-dflash2.sh` |
-| 27B FP8 with DFlash2 | `config/start-27b-dflash2.sh` |
+| Flash-Next with DFlash2 + FR-Spec + FlashInfer verify (optional, **experimental / alpha**) | `config/start-flash-next-dflash2.sh` |
+| 27B FP8 with DFlash2 (**experimental / alpha**) | `config/start-27b-dflash2.sh` |
 
 The native-MTP profiles are the maintained default with their existing
-recipes; the DFlash2 profile is a fully supported opt-in. An explicitly saved
+recipes; the DFlash2 profiles are **experimental / alpha** but supported and
+fully available for experimentation (see
+[DFlash2 maturity](../../README.md#dflash2-maturity)). An explicitly saved
 profile choice is always preserved.
 
 For TP2, `TP_SIZE` does not grant GPU access: expose both RTX PRO 6000 GPUs

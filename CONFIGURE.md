@@ -72,7 +72,9 @@ and manage the files yourself. Restart the server to apply changed settings.
 - **Profile:** Flash-Next with native NEXTN MTP and the FR-Spec map
   (`next`, the default for new setups) or without it (`next-plain`),
   Flash-Next with the DFlash2 draft and the FR-Spec map
-  (`next-dflash2`, optional), or 27B with its DFlash2 draft (`27b`).
+  (`next-dflash2`, **experimental / alpha**), or 27B with its DFlash2 draft
+  (`27b`, also **experimental / alpha** — see
+  [DFlash2 maturity](README.md#dflash2-maturity)).
   Every profile keeps its existing recipe, and an explicitly saved
   choice is never rewritten by the default. The two DFlash2 profiles need both
   model folders. FR-Spec and

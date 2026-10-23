@@ -25,11 +25,23 @@ so long-running sessions can pick up from cached history.
 maintained default profile, with automatic KV pool sizing replacing the preset
 cap; Flash-Next DFlash2 with a separate draft model, fixed concurrency
 width routing (block 6 for one request, block 4 for two or more) and
-FlashInfer draft-token verification is fully available as an optional
-profile.
+FlashInfer draft-token verification is an **experimental / alpha** profile,
+fully available to opt into.
 
 **3.1.1 patch:** removes the stale source-hash check that blocked NVMe PLE
 startup in 3.1.0.
+
+<a id="dflash2-maturity"></a>
+
+> **DFlash2 maturity.** Penny's DFlash2 integration — both the Flash-Next and
+> 27B profiles — is **experimental / alpha**: available and supported for
+> experimentation, not yet a validated production path. The throughput, prefill
+> and qualification numbers below are specific measured runs, not a correctness
+> guarantee for every configuration. Issue #115 fixes the decode-checkpoint
+> (Mamba `extra_buffer` / `extra_buffer_lazy`) arithmetic and is covered by a
+> CPU regression, but the on-GPU checkpoint resume is not yet verified. The
+> DFlash2 draft also allocates additional host DRAM; see the
+> [configuration reference](CONFIGURATION.md#capacity-and-memory).
 
 <a id="hicache-and-nixl"></a>
 
@@ -68,9 +80,10 @@ Flash-Next keeps **native NEXTN MTP with FR-Spec as the maintained default**,
 and its verify width is now **fixed by active concurrency** - block 8 for a
 single running request, block 4 for two or more - so the width is identical at
 every boot. **DFlash2 with FR-Spec** and its own draft model,
-`incoai/Qwen3.8-Flash-Next-DFlash2`, is an optional profile with the same
-concurrency-routed widths (block 6 at one request, block 4 at two or more),
-and it now verifies accepted draft tokens with **FlashInfer's SM120 kernel**.
+`incoai/Qwen3.8-Flash-Next-DFlash2`, is an **experimental / alpha** opt-in
+profile with the same concurrency-routed widths (block 6 at one request, block
+4 at two or more), and it now verifies accepted draft tokens with
+**FlashInfer's SM120 kernel**.
 The **KV pool is sized automatically** from profiled memory instead of a preset
 cap; an explicit `MAX_TOTAL_TOKENS` remains available. Scheduler admission,
 stop-regex inside speculative blocks and mixed-probability requests are fixed.
@@ -88,8 +101,8 @@ images, HiCache RAM prefix caching, and optional NIXL disk caching.
 
 | Model | Weights | Speculative decoding | Checkpoints |
 |---|---|---|---|
-| **Qwen3.8 Flash-Next** | NVFP4 experts, automatic FP8 dense layers on SM120 | Maintained native NEXTN MTP with FR-Spec is the default, width routed by batch size (block 8 at C1, block 4 at C2+); optional DFlash2 profile (separate draft model, FR-Spec, block 6 at C1 / block 4 at C2+) verifies draft tokens with FlashInfer | [Our OrcaRouter ModelOpt conversion](https://huggingface.co/jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4) · [RadixArk](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) · [Flash-Next DFlash2 draft](https://huggingface.co/incoai/Qwen3.8-Flash-Next-DFlash2) |
-| **Qwen3.8-27B** | FP8 | DFlash2, with a separate draft model at fixed block 8 | [Qwen FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) · [DFlash2 draft](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2) |
+| **Qwen3.8 Flash-Next** | NVFP4 experts, automatic FP8 dense layers on SM120 | Maintained native NEXTN MTP with FR-Spec is the default, width routed by batch size (block 8 at C1, block 4 at C2+); **experimental / alpha** DFlash2 opt-in profile (separate draft model, FR-Spec, block 6 at C1 / block 4 at C2+) verifies draft tokens with FlashInfer | [Our OrcaRouter ModelOpt conversion](https://huggingface.co/jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4) · [RadixArk](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) · [Flash-Next DFlash2 draft](https://huggingface.co/incoai/Qwen3.8-Flash-Next-DFlash2) |
+| **Qwen3.8-27B** | FP8 | DFlash2 (**experimental / alpha** integration), with a separate draft model at fixed block 8 | [Qwen FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) · [DFlash2 draft](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2) |
 
 I personally run Flash-Next on **one RTX PRO 6000 at C=6**, with **524,288-token
 context** and the KV pool sized automatically from profiled memory; the final
@@ -132,10 +145,10 @@ target model keeps its full vocabulary. The maintained default is the
 [FR-Spec native-MTP recipe](RUN.md#launch-flash-next-with-fr-spec), with the
 [non-FR recipe](RUN.md#launch-flash-next-without-fr-spec-alternative) also
 selectable - without the map, and with the same block 8 / block 4 routing; the
-optional [DFlash2 recipe](RUN.md#launch-flash-next-with-dflash2) - which
-verifies its draft tokens with FlashInfer's SM120 kernel - remains
-fully available as an opt-in. DFlash2 offers more token-pool capacity; we are
-still evaluating performance across concurrency levels. TP2 for the DFlash2
+experimental / alpha [DFlash2 recipe](RUN.md#launch-flash-next-with-dflash2) -
+which verifies its draft tokens with FlashInfer's SM120 kernel - remains
+available as an opt-in. DFlash2 offers more token-pool capacity; we are still
+evaluating performance across concurrency levels. TP2 for the DFlash2
 profile is expected to work; it has not been tested on two-GPU hardware.
 
 For 27B alternatives, see the [Swift 27B results](SWIFT-27B.md) and the
