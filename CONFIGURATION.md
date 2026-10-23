@@ -38,7 +38,7 @@ Select the profile with `PENNYROYAL_PROFILE`. Values marked *pinned* are fixed
 in that recipe's launch line; a saved override for them does not reach the
 server.
 
-| | `next-dflash2` (optional) | `27b` | `next` (default) | `next-plain` |
+| | `next-dflash2` (experimental / alpha) | `27b` (experimental / alpha) | `next` (default) | `next-plain` |
 |---|---|---|---|---|
 | Target | OrcaRouter ModelOpt NVFP4 Flash-Next | Qwen3.8-27B FP8 | Flash-Next NVFP4 | Flash-Next NVFP4 |
 | Draft | `incoai/Qwen3.8-Flash-Next-DFlash2`, BF16 unquantized | `incoai/Qwen3.8-27B-DFlash2` | none (in-checkpoint NEXTN head) | none |
@@ -76,11 +76,13 @@ bucket and runs with `--disable-prefill-cuda-graph`.
 |---|---|---|
 | `TARGET_MODEL` | required | Target checkpoint directory (native: absolute or relative to `REPO_ROOT`; container: the path inside `/models`). |
 | `DRAFT_MODEL` | required for `27b` and `next-dflash2` | Separate DFlash2 draft checkpoint. It is a distinct download from the target; the native-MTP profiles need no draft. |
-| `PENNYROYAL_PROFILE` | `next` | New setups default to the maintained native-MTP Flash-Next profile with FR-Spec (`next-plain` is the same without the map). `next-dflash2` keeps its existing recipe and stays fully available as an opt-in; saved profile choices are always preserved. |
+| `PENNYROYAL_PROFILE` | `next` | New setups default to the maintained native-MTP Flash-Next profile with FR-Spec (`next-plain` is the same without the map). `next-dflash2` keeps its existing recipe and stays available as an **experimental / alpha** opt-in (see [README](README.md#dflash2-maturity)); saved profile choices are always preserved. |
 | `REPO_ROOT` / `VENV_PATH` | native: your checkout and its `.venv` | Recipes use `$REPO_ROOT/.venv/bin/sglang` and its Python. |
 | `SGLANG_EXE` / `PYTHON` | derived | Overrides for an environment outside the checkout. |
 | `CACHE_BASE` | native `~/.cache/pennyroyal`; container `/cache` mount | Compiler/JIT and runtime caches; recipes create subdirectories. WSL2 note below. |
 | `NIXL_STORAGE_BASE` | native `~/.local/share/pennyroyal/nixl`; container `/nixl` mount | Persistent NIXL root; required only while `NIXL=on`. |
+
+<a id="capacity-and-memory"></a>
 
 ## Capacity and memory
 
@@ -169,7 +171,9 @@ from a launch generated with `NIXL=off`.
   with their existing recipes and their fixed concurrency widths (block 8 at
   one running request, block 4 at two or more, from the pinned policy), remain
   the default for new setups, and keep receiving updates; `next-dflash2` is
-  the opt-in alternative, verified through FlashInfer's SM120 kernel.
+  the **experimental / alpha** opt-in alternative, verified through FlashInfer's
+  SM120 kernel, and carries the same maturity label as the `27b` DFlash2 profile
+  (see [README](README.md#dflash2-maturity)).
 
 ## Restarts and cache effects
 

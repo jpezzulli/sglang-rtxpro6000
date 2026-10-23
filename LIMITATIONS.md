@@ -159,6 +159,14 @@ v2.3 installation does not need this maintenance update urgently.
   completed-request rates.
 - DFlash2 and native-MTP acceptance vary with content and context and explain a
   large part of throughput variation.
+- Penny's DFlash2 integration is **experimental / alpha** on both the Flash-Next
+  and 27B profiles: available for experimentation, but the decode-checkpoint
+  (Mamba `extra_buffer` / `extra_buffer_lazy`) path and the draft's extra host
+  DRAM need explicit validation on your hardware. The 3.1.2 checkpoint
+  arithmetic fix (#115) is CPU-regression-covered; the on-GPU checkpoint resume
+  is not yet verified. This is a maturity label, not a toggle or an automatic
+  fallback to native MTP. See
+  [DFlash2 maturity](README.md#dflash2-maturity).
 - The 27B community comparison is directional. Checkpoint, runtime,
   speculation, power, client, prompt, duration, and cache/offload differ.
 - Repeat-variance coverage differs across the natural-workload measurements.
