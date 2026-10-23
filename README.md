@@ -128,7 +128,15 @@ and the optional DFlash2 profile (NVFP4 target with the separate
 
 One candidate width per tier means the width is a lookup, so it is identical
 between boots, and a single request gets the wider draft without making every
-request in a busy batch pay that extra draft work. **C is request concurrency;
+request in a busy batch pay that extra draft work. On the maintained native-MTP
+recipes that policy is a choice — `PENNY_MTP_POLICY=tiered` (the table above),
+`adaptive` (the v3.0.2 policy, which may move between four and eight tokens at
+one request) or `fixed-w4` (four tokens at every concurrency) — and it is one
+setting on every launch route: `./configure-penny` saves it, a launch folder
+carries it in its startup script, and
+`PENNY_MTP_POLICY=fixed-w4 ./run-penny` or the same variable in front of
+`docker compose up` decides it while nothing is saved
+([details](CONFIGURATION.md#speculation-width-policy)). **C is request concurrency;
 TP is the number of inference GPUs.**
 
 **FR-Spec rides along at every concurrency.** FR-Spec narrows the vocabulary

@@ -108,8 +108,26 @@ of the tensor-parallel inference pair.
 FR-Spec is on for `next` and off for `next-plain`. It narrows the
 draft vocabulary; the verify width is fixed by concurrency: block 8 for a
 single running request, block 4 for every batch of two or more, from the
-image's `configs/pennyroyal/adaptive-next.json` (the startup file pins the
-policy's SHA-256). On the DFlash2 profile the same FR-Spec map rides along,
+image's `configs/pennyroyal/adaptive-next.json` (the startup files select and
+hash that file through the image's `configs/pennyroyal/mtp-policy.sh`).
+Which policy that is, is one setting: `PENNY_MTP_POLICY` is `tiered` (the
+default, just described), `adaptive` (the v3.0.2 policy: block 4 or 8 at one
+request under the existing hold, block 4 at two or more) or `fixed-w4` (block 4
+at every concurrency, launched at steps 3 / 4 draft tokens). It is a line in the
+startup script's settings block, where the file states the rest of its settings:
+
+```bash
+PENNY_MTP_POLICY=fixed-w4        # in config/start-flash-next.sh
+```
+
+That is the one place a startup-script launch reads it, so `./configure-penny
+--container` writes your answer there and `./run.sh` forwards nothing: a generated
+folder launches the policy it was saved with, whatever shell it is started from.
+Running the image profile through Compose instead, where no startup script is
+involved, selects it with `PENNY_MTP_POLICY` in `.env` or in front of the command,
+as `compose.yaml` forwards it. Each policy's hash is a NIXL namespace field, so
+the three choices keep separate persistent caches and nothing is deleted when you
+switch. On the DFlash2 profile the same FR-Spec map rides along,
 and the width is routed the same way: block 6 for one running request, block
 4 for two or more, from the image's
 `configs/pennyroyal/adaptive-dflash2.json`. That profile verifies accepted

@@ -52,7 +52,6 @@ BLOCK_SCALARS = {
     "IMAGE_PROCESSOR_BACKEND": "pil",
     "CHAT_TEMPLATE": str(CONFIGS / "templates" / "froggeric-v22.5.jinja"),
     "TOKEN_MAP": str(CONFIGS / "frspec" / "flash-next-64k.pt"),
-    "ADAPTIVE_CONFIG": str(CONFIGS / "adaptive-next.json"),
     "SGLANG_SM120_ONLINE_MXFP8": "",
 }
 # Never inherited from the developer's shell: each test decides these itself.
@@ -91,6 +90,10 @@ def launch_argv(launcher: Path, **env_updates: str) -> subprocess.CompletedProce
         "HICACHE_STORAGE_ARGS=()",
         *[f"{name}={shlex.quote(value)}" for name, value in BLOCK_SCALARS.items()],
         'SCRIPT_DIR="$REPO_ROOT/configs/pennyroyal"',
+        # The width policy is sourced for real, so the extracted block carries the
+        # launch width and policy file of the qualified tiered default (the three
+        # selections are launched end to end in test_prebuilt_container_launch.py).
+        'source "$SCRIPT_DIR/mtp-policy.sh"',
         'source "$SCRIPT_DIR/request-capacity.sh"',
         'source "$SCRIPT_DIR/reasoning-effort.sh"',
         'source "$SCRIPT_DIR/ple-backend.sh"',

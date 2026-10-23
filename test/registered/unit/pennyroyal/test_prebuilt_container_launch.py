@@ -52,6 +52,7 @@ CONTROLLED = (
     "SGLANG_MM_PREPROCESS_DEVICE",
     "SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR",
     "FLASHINFER_GDN_FP16_ACCUM_MMA",
+    "PENNY_MTP_POLICY",
     "TILELANG_CACHE_DIR",
     "CUDA_VISIBLE_DEVICES",
     "FAKE_CUDA_DEVICES",
@@ -114,7 +115,12 @@ def host_dirs(tmp_path: Path):
     return roots["models"], roots["cache"], roots["nixl"]
 
 
-def run_launcher(tmp_path: Path, *options: str, cwd: Path | None = None):
+def run_launcher(
+    tmp_path: Path,
+    *options: str,
+    cwd: Path | None = None,
+    env: dict | None = None,
+):
     directory, capture = fake_docker(tmp_path)
     result = subprocess.run(
         ["bash", str(LAUNCH / "run.sh"), *options],
@@ -123,6 +129,7 @@ def run_launcher(tmp_path: Path, *options: str, cwd: Path | None = None):
             PATH=f"{directory}:{os.environ['PATH']}",
             DOCKER_CAPTURE=str(capture),
             HOME=str(tmp_path / "home"),
+            **(env or {}),
         ),
         text=True,
         capture_output=True,
@@ -563,6 +570,7 @@ def prepared_config(
     nixl: str = "on",
     media: str | None = None,
     tp: str | None = None,
+    policy: str | None = None,
 ) -> Path:
     """Copy the shipped examples into the operator's own directory and edit the
     settings there, which is exactly what an operator does before starting."""
@@ -598,6 +606,13 @@ def prepared_config(
         if tp is not None:
             assert "TP_SIZE=1\n" in text, name
             text = text.replace("TP_SIZE=1\n", f"TP_SIZE={tp}\n")
+        if policy is not None:
+            # The settings block, not the shell, is where a container operator
+            # chooses the width policy: this is the edit ./configure-penny makes.
+            assert "PENNY_MTP_POLICY=tiered\n" in text, name
+            text = text.replace(
+                "PENNY_MTP_POLICY=tiered\n", f"PENNY_MTP_POLICY={policy}\n"
+            )
         assert f'TARGET_MODEL="{target}"' in text, name
         assert f"NIXL={nixl}\n" in text, name
         (directory / name).write_text(text)
@@ -1171,6 +1186,255 @@ def test_native_recipes_take_the_same_disk_tier_switch(tmp_path):
     )
     assert bogus.returncode != 0 and argv is None
     assert "NIXL must be on or off" in bogus.stderr
+
+
+# ------------------------------------------------------------- MTP width policy
+
+# One setting, three approved policies. The name maps to a bundled policy file
+# and to the launch width that can carry it, and the pair comes from the image's
+# configs/pennyroyal/mtp-policy.sh, so the native recipe and its mounted copy
+# cannot disagree about what either selection means.
+MTP_POLICIES = (
+    # exported value, approved policy file, steps, draft tokens
+    ("tiered", "adaptive-next.json", "7", "8"),
+    ("adaptive", "adaptive-next-v3.0.2.json", "7", "8"),
+    ("fixed-w4", "adaptive-next-fixed-w4.json", "3", "4"),
+)
+
+
+def test_the_mtp_policy_selection_reaches_the_real_launch_argv(tmp_path):
+    # Not an enum parse: the server binary records the argv it was handed, for
+    # the native recipe (which reads the exported value) and for the same
+    # selection written into the mounted startup script (which is where a
+    # container launch keeps the setting, beside the capacity knobs).
+    identities = {}
+    for value, asset, steps, draft_tokens in MTP_POLICIES + (
+        (None, "adaptive-next.json", "7", "8"),
+    ):
+        mounted = (
+            prepared_config(tmp_path, "start-flash-next.sh", policy=value or "tiered")
+            / "start-flash-next.sh"
+        )
+        for startup, via_entrypoint, env in (
+            (
+                RECIPES / "serve-flash-next.sh",
+                False,
+                {} if value is None else {"PENNY_MTP_POLICY": value},
+            ),
+            (mounted, True, {}),
+        ):
+            result, argv, server_env, _ = launch(
+                tmp_path, startup, through_entrypoint=via_entrypoint, env=env
+            )
+            assert result.returncode == 0, (value, startup, result.stderr)
+            # The startup report names the same selection the argv carries.
+            assert f"MTP width policy: {value or 'tiered'}" in result.stdout, value
+            assert argv_after(argv, "--speculative-num-steps") == steps, value
+            assert argv_after(argv, "--speculative-eagle-topk") == "1", value
+            assert (
+                argv_after(argv, "--speculative-num-draft-tokens") == draft_tokens
+            ), value
+            assert argv_after(argv, "--speculative-adaptive-config").endswith(
+                asset
+            ), value
+            assert "--speculative-adaptive" in argv, value
+            # The selection is cache identity, so no policy can be served out of
+            # another one's persisted namespace.
+            identities[value or "unset"] = server_env["namespace"]
+    assert identities["unset"] == identities["tiered"], identities
+    assert len(set(identities.values())) == 3, identities
+
+    # A value exported in front of the mounted startup script changes nothing:
+    # the settings block decides there, exactly as it decides TP_SIZE and the
+    # HiCache tier, so a saved or hand-edited launch cannot be steered by an
+    # inherited shell.
+    shipped = prepared_config(tmp_path, "start-flash-next.sh") / "start-flash-next.sh"
+    _, exported_argv, _, _ = launch(
+        tmp_path, shipped, through_entrypoint=True, env={"PENNY_MTP_POLICY": "fixed-w4"}
+    )
+    _, plain_argv, _, _ = launch(tmp_path, shipped, through_entrypoint=True)
+    assert exported_argv == plain_argv
+    assert argv_after(plain_argv, "--speculative-adaptive-config").endswith(
+        "adaptive-next.json"
+    )
+
+    # The two DFlash2 recipes and the 27B recipe route their own widths and never
+    # read the setting: an exported value there changes neither their launch line
+    # nor the cache identity they persist under (the knob is native-only, not a
+    # reason these profiles cannot be selected).
+    for startup in (
+        RECIPES / "serve-flash-next-dflash2.sh",
+        prepared_config(tmp_path, "start-flash-next-dflash2.sh")
+        / "start-flash-next-dflash2.sh",
+        RECIPES / "serve-qwen38-27b-dflash2.sh",
+    ):
+        via_entrypoint = startup.name.startswith("start-")
+        _, baseline_argv, baseline_env, _ = launch(
+            tmp_path, startup, through_entrypoint=via_entrypoint
+        )
+        _, argv, server_env, _ = launch(
+            tmp_path,
+            startup,
+            through_entrypoint=via_entrypoint,
+            env={"PENNY_MTP_POLICY": "fixed-w4"},
+        )
+        assert argv == baseline_argv, startup
+        assert server_env["namespace"] == baseline_env["namespace"], startup
+        if startup.name == "serve-flash-next-dflash2.sh":
+            # The routed Flash-Next profile keeps its own widest block and file.
+            assert argv_after(argv, "--speculative-num-steps") == "5", startup
+            assert argv_after(argv, "--speculative-num-draft-tokens") == "6", startup
+            assert argv_after(argv, "--speculative-adaptive-config").endswith(
+                "adaptive-dflash2.json"
+            ), startup
+
+
+def test_an_unusable_mtp_policy_stops_the_launch_with_a_reason(tmp_path):
+    # Refused on both routes: an inherited value reaching the recipe, and a value
+    # written into the startup script by hand or by setup.
+    mounted = (
+        prepared_config(tmp_path, "start-flash-next.sh", policy="w6")
+        / "start-flash-next.sh"
+    )
+    for startup, via_entrypoint, env in (
+        (RECIPES / "serve-flash-next.sh", False, {"PENNY_MTP_POLICY": "w6"}),
+        (mounted, True, {}),
+    ):
+        result, argv, _, _ = launch(
+            tmp_path, startup, through_entrypoint=via_entrypoint, env=env
+        )
+        assert result.returncode != 0 and argv is None, startup
+        assert "PENNY_MTP_POLICY must be tiered, adaptive or fixed-w4" in result.stderr
+
+
+def test_the_launcher_adds_no_environment_of_its_own(tmp_path):
+    # run.sh inherits nothing and forwards only what the generated settings put
+    # in its docker arguments, so the width policy a container runs is the one in
+    # the startup script: no ambient shell can reach it.
+    startup = prepared_config(tmp_path, "start-flash-next.sh") / "start-flash-next.sh"
+    models, cache, nixl = host_dirs(tmp_path)
+    options = [
+        "--startup",
+        str(startup),
+        "--models",
+        str(models),
+        "--cache",
+        str(cache),
+        "--nixl-root",
+        str(nixl),
+        "--image",
+        "pennyroyal:test",
+    ]
+    for exported in ({}, {"PENNY_MTP_POLICY": "fixed-w4"}):
+        result, argv = run_launcher(tmp_path, *options, env=exported)
+        assert result.returncode == 0, result.stderr
+        assert "-e" not in argv, (exported, argv)
+
+
+def test_a_generated_launch_runs_the_policy_the_setup_saved(tmp_path):
+    """Generated files, the docker recorder and the image stand-in.
+
+    The whole chain the acceptance asks for: what ./configure-penny answered is
+    what the launch runs, an inherited shell value cannot steer it, and the
+    settings line the save wrote is the one place the choice lives.
+    """
+    sys.path.insert(0, str(REPO / "scripts" / "pennyroyal"))
+    import penny_config as pc  # noqa: E402
+
+    host_root = tmp_path / "model share"
+    cache = tmp_path / "cache root"
+    nixl = tmp_path / "nixl root"
+    for directory in (host_root, cache, nixl):
+        directory.mkdir(parents=True)
+    model = make_checkpoint(host_root / "penny-model", "generated")
+    saved = {
+        "HOST_MODELS_ROOT": str(host_root),
+        "HOST_CACHE_BASE": str(cache),
+        "HOST_NIXL_STORAGE_BASE": str(nixl),
+        "LAUNCH_DIR": str(tmp_path / "generated"),
+        "TARGET_MODEL": "/models/penny-model",
+        "PENNY_MTP_POLICY": "adaptive",
+    }
+    env_file = tmp_path / "container.env"
+    env_file.write_text(
+        pc.serialize_env(
+            [("", sorted(saved.items()))], header=(f"{pc.PROFILE_KEY}=next-plain",)
+        )
+    )
+    # The save runs with a different policy in the shell: saved wins, as it does
+    # for every other setting, so a stray export cannot rewrite the folder.
+    plan = pc.build_plan(
+        "container",
+        pc.load_config("container", env_file, {}, REPO),
+        {"PENNY_MTP_POLICY": "fixed-w4"},
+        repo_root=REPO,
+    )
+    assert [issue.message for issue in plan.errors] == []
+    assert plan.env["PENNY_MTP_POLICY"] == "adaptive", plan.env
+    assert any(
+        "MTP width policy: adaptive" in line and "saved file" in line
+        for line in plan.summary
+    ), plan.summary
+    pc.write_container_files(plan)
+    run_sh = plan.launch_dir / "run.sh"
+    startup = plan.launch_dir / "config" / "start-flash-next.sh"
+    generated = startup.read_text()
+    assert "PENNY_MTP_POLICY=adaptive" in generated, generated
+    startup.write_text(
+        generated.replace("TARGET_MODEL=/models/penny-model", f'TARGET_MODEL="{model}"')
+    )
+
+    directory, capture = fake_docker(tmp_path)
+
+    def launch_generated(**exported):
+        run = subprocess.run(
+            ["bash", str(run_sh)],
+            env=clean_env(
+                PATH=f"{directory}:{os.environ['PATH']}",
+                DOCKER_CAPTURE=str(capture),
+                HOME=str(tmp_path / "home"),
+                **exported,
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert run.returncode == 0, run.stderr + run.stdout
+        argv = capture.read_text().splitlines()
+        assert not [
+            value for value in argv if value.startswith("PENNY_MTP_POLICY=")
+        ], argv
+        # And the container side, by the image's own exec path: the generated
+        # startup file carries the setting, so nothing needs to be forwarded.
+        result, server_argv, _, _ = launch(tmp_path, startup, env=exported)
+        assert result.returncode == 0, result.stderr
+        return argv_after(server_argv, "--speculative-adaptive-config"), argv_after(
+            server_argv, "--speculative-num-steps"
+        )
+
+    policy_file, steps = launch_generated()
+    assert policy_file.endswith("adaptive-next-v3.0.2.json") and steps == "7", (
+        policy_file,
+        steps,
+    )
+    # An inherited value does not steer a generated launch either.
+    policy_file, steps = launch_generated(PENNY_MTP_POLICY="fixed-w4")
+    assert policy_file.endswith("adaptive-next-v3.0.2.json") and steps == "7", (
+        policy_file,
+        steps,
+    )
+    # The documented way to change it is the setting itself: edit the line the
+    # save wrote (or run setup again) and the same launch switches.
+    startup.write_text(
+        startup.read_text().replace(
+            "PENNY_MTP_POLICY=adaptive", "PENNY_MTP_POLICY=fixed-w4"
+        )
+    )
+    policy_file, steps = launch_generated()
+    assert policy_file.endswith("adaptive-next-fixed-w4.json") and steps == "3", (
+        policy_file,
+        steps,
+    )
 
 
 def test_native_frspec_disk_tier_off_needs_no_nixl_root(tmp_path):

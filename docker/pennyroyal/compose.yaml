@@ -40,6 +40,15 @@ services:
       # Optional launcher-level reasoning-effort default (unset keeps the
       # recipe's qualified medium; per-request reasoning_effort still wins).
       PENNY_REASONING_EFFORT: ${PENNY_REASONING_EFFORT:-}
+      # The one native-MTP width selector: 'tiered' (the qualified default:
+      # block 8 at one running request, block 4 at two or more), 'adaptive'
+      # (the v3.0.2 policy: block 4 or 8 at one request under the existing
+      # hold, block 4 at two or more) or 'fixed-w4' (block 4 at every
+      # concurrency). Empty keeps the recipe's own default; the selection also
+      # sets the launch width, and an invalid value stops the launch. Only this
+      # Compose path selects the policy from the environment: a generated launch
+      # folder keeps PENNY_MTP_POLICY in its startup script instead.
+      PENNY_MTP_POLICY: ${PENNY_MTP_POLICY:-}
       # Optional two-GPU experimental topology (TP1 qualified default).
       # TP_SIZE does not grant GPU access: the single-GPU device_ids
       # reservation below must also name both ids for TP2 to launch (see

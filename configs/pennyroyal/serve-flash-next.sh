@@ -63,16 +63,17 @@ source "$SCRIPT_DIR/startup-summary.sh"
 pennyroyal_version_banner
 
 CONTEXT_LENGTH=524288
-# The approved Next width policy (fixed by concurrency: W8 = steps 7 at C1,
-# W4 = steps 3 at every batch of two or more, one candidate per tier so the
-# width is a batch-size lookup the acceptance EMA can never move) ships as
-# ordinary --speculative-adaptive-config file: automatic,
-# no user toggle. The launch runs the table's maximum (steps 7, draft tokens 8
-# at topk 1) because a candidate wider than the launch width is refused, not
-# resized, under captured graphs; the W8 state alone needs the BS1 decode
-# bucket, which the default spec-decode capture list keeps. This is a runtime
-# asset, so it is read from the repository, never copied to a host directory.
-ADAPTIVE_CONFIG="$SCRIPT_DIR/adaptive-next.json"
+# The approved Next width policy ships as an ordinary --speculative-adaptive-config
+# file. PENNY_MTP_POLICY selects which policy that is — tiered (the default:
+# W8 = steps 7 at C1, W4 = steps 3 at every batch of two or more), adaptive (the
+# v3.0.2 policy, whose C1 candidates move under the existing hold and backoff)
+# or fixed-w4 (steps 3 everywhere) — and the same setting selects the launch
+# maximum that can carry it, because a candidate wider than the launch width is
+# refused, not resized, under captured graphs. The wider launch states keep the
+# BS1 decode bucket, which the default spec-decode capture list already keeps.
+# Everything is a runtime asset, so it is read from the repository, never
+# copied to a host directory.
+source "$SCRIPT_DIR/mtp-policy.sh"
 PAGE_SIZE=64
 # TP1 is the qualified default; TP_SIZE=2 opts into the two-GPU experimental
 # path (the NIXL namespace hashes tp_size, so the two topologies can never
@@ -97,11 +98,6 @@ fi
 [[ -f "$TARGET_MODEL/config.json" && -f "$TARGET_MODEL/model.safetensors.index.json" ]] || {
   echo "Incomplete target checkpoint: $TARGET_MODEL" >&2
   exit 1
-}
-[[ -f "$ADAPTIVE_CONFIG" ]] || { echo "Adaptive MTP policy missing: $ADAPTIVE_CONFIG" >&2; exit 1; }
-read -r ADAPTIVE_SHA _ < <(sha256sum "$ADAPTIVE_CONFIG")
-[[ "$ADAPTIVE_SHA" == 3edaa87d66f535caae0bddb8f457f03fce0f6dc1f4e8091b20495a0dc9da41fb ]] || {
-  echo "Adaptive MTP policy does not match the approved checksum" >&2; exit 1;
 }
 mkdir -p "$CACHE_BASE"/{huggingface,torch,torchinductor,triton,cuda,flashinfer,sglang/jit}
 if [[ "$NIXL" == on ]]; then
@@ -190,9 +186,9 @@ else
     --field "compute_dtype=$COMPUTE_DTYPE" \
     --field "target_kv_dtype=$KV_DTYPE" \
     --field "speculative_algorithm=NEXTN" \
-    --field "speculative_num_steps=7" \
+    --field "speculative_num_steps=$PENNY_MTP_SPEC_STEPS" \
     --field "speculative_eagle_topk=1" \
-    --field "speculative_num_draft_tokens=8" \
+    --field "speculative_num_draft_tokens=$PENNY_MTP_DRAFT_TOKENS" \
     --field "speculative_adaptive=true" \
     --field "speculative_adaptive_policy_sha256=$ADAPTIVE_SHA" \
     --field "speculative_draft_quantization=unquant" \
@@ -248,8 +244,8 @@ launch_args=(serve \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \
   --default-chat-template-kwargs "$DEFAULT_CHAT_TEMPLATE_KWARGS" \
-  --speculative-algorithm NEXTN --speculative-num-steps 7 \
-  --speculative-eagle-topk 1 --speculative-num-draft-tokens 8 \
+  --speculative-algorithm NEXTN --speculative-num-steps "$PENNY_MTP_SPEC_STEPS" \
+  --speculative-eagle-topk 1 --speculative-num-draft-tokens "$PENNY_MTP_DRAFT_TOKENS" \
   --speculative-adaptive --speculative-adaptive-config "$ADAPTIVE_CONFIG" \
   --speculative-draft-model-quantization unquant --watchdog-timeout 1800)
 pennyroyal_startup_summary "${launch_args[@]}"

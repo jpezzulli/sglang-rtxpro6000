@@ -105,11 +105,33 @@ is the source of the reduced-vocabulary work.
 The verify width is fixed by active concurrency through the bundled policy
 `configs/pennyroyal/adaptive-next.json`: block 8 for a single running request,
 block 4 for every batch of two or more, one candidate per tier, so the width
-is identical between boots and the acceptance EMA cannot move it. The recipe
-pins the policy's SHA-256
-(`3edaa87d66f535caae0bddb8f457f03fce0f6dc1f4e8091b20495a0dc9da41fb`) and
-launches at the widest routed block
+is identical between boots and the acceptance EMA cannot move it. The recipes
+read the file through the shared width selector
+`configs/pennyroyal/mtp-policy.sh`, hash what it selects into the NIXL namespace,
+and launch at the widest routed block
 (`--speculative-num-steps 7 --speculative-num-draft-tokens 8`).
+
+That policy is a choice, and choosing it is one setting:
+`PENNY_MTP_POLICY`.
+
+```bash
+PENNY_MTP_POLICY=fixed-w4 ./run-penny     # block 4 at every concurrency
+PENNY_MTP_POLICY=adaptive ./run-penny     # the v3.0.2 policy at one request
+PENNY_MTP_POLICY=tiered   ./run-penny     # the qualified default, as above
+```
+
+The same variable works on the recipe directly
+(`PENNY_MTP_POLICY=fixed-w4 "$REPO_ROOT/configs/pennyroyal/serve-flash-next.sh"`)
+and on Compose (`compose.yaml` forwards it), and `./configure-penny` can save the
+choice instead — a container save writes it into the generated startup script's
+own `PENNY_MTP_POLICY=` settings line, which is what `./run.sh` then launches.
+One value names the policy file and the launch width that can carry it, so there
+is no JSON to copy and no flag pair to keep in step; the precedence is the one
+that has always applied here, a saved value beating the environment, the
+selected policy's hash is part of the NIXL namespace, and a change takes effect
+at the next start. See
+[CONFIGURATION.md](CONFIGURATION.md#speculation-width-policy) for what each
+choice runs and launches.
 
 The extra BF16 draft head uses 320 MiB. The recipe asks for no KV pool size:
 SGLang profiles the free GPU memory and fits the pool inside the static memory
