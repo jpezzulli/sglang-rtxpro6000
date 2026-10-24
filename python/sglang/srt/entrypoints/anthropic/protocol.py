@@ -259,8 +259,8 @@ class AnthropicThinkingParam(BaseModel):
     union of three variants — see ``anthropic-sdk-python``'s
     ``thinking_config_{enabled,disabled,adaptive}_param.py``:
 
-    * ``enabled`` requires ``budget_tokens`` (≥1024) and accepts
-      ``display``.
+    * ``enabled`` optionally accepts ``budget_tokens`` (must be ≥1024
+      when supplied) and ``display``.
     * ``disabled`` accepts no other fields.
     * ``adaptive`` (Claude 4.7) accepts ``display`` but not
       ``budget_tokens``.
@@ -270,7 +270,11 @@ class AnthropicThinkingParam(BaseModel):
     equivalent. ``budget_tokens`` is accepted on ``enabled`` for SDK
     compatibility but the backend has no hard-cap knob to honor it; the
     serving layer logs a WARNING so operators see that the requested
-    budget is not enforced. ``display="omitted"`` is accepted but
+    budget is not enforced. Compatibility exception: the official API
+    requires ``budget_tokens`` on ``enabled``, but since we never enforce
+    it we also accept it absent or null — clients may send
+    ``{"type": "enabled"}`` alone — leaving the budget unset rather than
+    fabricating one. ``display="omitted"`` is accepted but
     similarly cannot suppress reasoning mid-stream and is logged.
     """
 
@@ -280,14 +284,11 @@ class AnthropicThinkingParam(BaseModel):
 
     @model_validator(mode="after")
     def _validate_thinking_shape(self):
-        # Cross-field rules mirror the SDK's three discriminated variants.
+        # Cross-field rules mirror the SDK's three discriminated variants,
+        # except ``enabled`` tolerates a missing/null ``budget_tokens`` (see
+        # class docstring). A *supplied* budget is still validated.
         if self.type == "enabled":
-            if self.budget_tokens is None:
-                raise ValueError(
-                    "thinking.budget_tokens is required when "
-                    "thinking.type is 'enabled'"
-                )
-            if self.budget_tokens < 1024:
+            if self.budget_tokens is not None and self.budget_tokens < 1024:
                 raise ValueError(
                     "thinking.budget_tokens must be >= 1024 "
                     "(got {})".format(self.budget_tokens)
