@@ -783,9 +783,9 @@ class TestAnthropicServing(unittest.TestCase):
         self.assertEqual(serving.openai_serving_chat.apply_reasoning_calls, [False])
 
     def test_request_thinking_enabled_with_budget_tokens_logs_warning(self):
-        """SDK shape: ``enabled`` requires ``budget_tokens``. We accept it
-        (the SDK would), but log a WARNING because the local backend has
-        no equivalent hard-cap knob — the budget is not enforced."""
+        """A supplied ``budget_tokens`` on ``enabled`` is accepted but we log
+        a WARNING because the local backend has no equivalent hard-cap knob —
+        the budget is not enforced."""
         import logging
 
         serving = self._serving()
@@ -802,13 +802,23 @@ class TestAnthropicServing(unittest.TestCase):
             f"expected unenforced-budget warning: {log.output}",
         )
 
-    def test_request_thinking_enabled_requires_budget_tokens(self):
-        """SDK requires ``budget_tokens`` for ``type=enabled`` — Pydantic 400."""
-        from pydantic import ValidationError
-
-        with self.assertRaises(ValidationError) as ctx:
-            self._anthropic_request(thinking={"type": "enabled"}, stream=False)
-        self.assertIn("budget_tokens", str(ctx.exception))
+    def test_request_thinking_enabled_without_budget_tokens_is_accepted(self):
+        """Issue 124 compat: ``enabled`` with ``budget_tokens`` absent or null
+        parses and enables reasoning through the same path. The backend never
+        enforced a budget, so a missing one must not 400 — and we leave the
+        budget unset instead of fabricating a number."""
+        serving = self._serving()
+        for thinking in (
+            {"type": "enabled"},
+            {"type": "enabled", "budget_tokens": None},
+        ):
+            with self.subTest(thinking=thinking):
+                request = self._anthropic_request(thinking=thinking, stream=False)
+                self.assertIsNone(request.thinking.budget_tokens)
+                serving._convert_to_chat_completion_request(request)
+        self.assertEqual(
+            serving.openai_serving_chat.apply_reasoning_calls, [True, True]
+        )
 
     def test_request_thinking_enabled_budget_below_min_is_rejected(self):
         """SDK doc: ``budget_tokens`` must be >= 1024."""
@@ -862,7 +872,7 @@ class TestAnthropicServing(unittest.TestCase):
     def test_request_thinking_display_omitted_logs_warning_but_still_enables(self):
         """``thinking.display='omitted'`` is accepted; reasoning stays on
         because we cannot suppress reasoning text from the OpenAI stream.
-        ``enabled`` requires ``budget_tokens`` per SDK shape."""
+        A supplied ``budget_tokens`` is still validated normally."""
         import logging
 
         serving = self._serving()
