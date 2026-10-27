@@ -16,7 +16,7 @@
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
 | Latest runtime additions | Anthropic thinking-budget acceptance, Responses reasoning-effort precedence, NIXL file-restore validation, QSA retained-prefix ring sizing, hybrid truncated-chunk page alignment and empty-batch admission-latch recovery (3.1.3, adapted from upstream #46125, #46131, #45607 and #46643 with authorship recorded in the commits); NEXTN checkpoint selection and width-policy selection (3.1.2); earlier rows below |
 | Dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.5.3 Python/JIT source; the FlashInfer `0.7.0.post1` CUDA-13 set below arrived with v3.0.0. This candidate changes no dependency pin, and `python/requirements*`, `python/pyproject*.toml`, `docker/pennyroyal/constraints.txt` and `scripts/pennyroyal/flashinfer/` are unchanged since `pennyroyal-v3.1.0` |
-| Container build source | Recorded as the image's OCI revision label and mirrored into the release JSON at build time. For published releases this matched the commit selected by the tag; a later tag may add publication documentation alone, so the build revision, not the tag, is the identity of what shipped. |
+| Container build source | The image OCI revision label identifies the actual build source and is recorded in the release JSON. The final release tag may additionally contain publication documentation; it is not assumed to equal the image build source. |
 
 The current release records are in [release-3.1.3.json](release-3.1.3.json) and
 [RELEASE_NOTES_3.1.3.md](RELEASE_NOTES_3.1.3.md). Each release section below is

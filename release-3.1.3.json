@@ -37,7 +37,7 @@
         "note": "Selected part of #126; ownership and capacity handling are out of scope for this release."
       }
     },
-    "pull_requests": "One functional item per pull request is opened at the release checkpoint; no pull-request numbers are claimed here."
+    "pull_requests": []
   },
   "container": {
     "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3",
