@@ -36,8 +36,8 @@ case "$profile" in
       'Pennyroyal container' \
       '  next          Flash-Next NVFP4 + FR-Spec/native NEXTN MTP (default)' \
       '  next-plain    Flash-Next NVFP4 + native NEXTN MTP without FR-Spec' \
-      '  next-dflash2  Flash-Next NVFP4 + DFlash2 (DFLASH, FR-Spec, routed widths)' \
-      '  27b           Qwen3.8-27B FP8 + DFlash2' \
+      '  next-dflash2  Flash-Next NVFP4 + DFlash2 (DFLASH, FR-Spec, routed widths) (alpha)' \
+      '  27b           Qwen3.8-27B FP8 + DFlash2 (alpha)' \
       '  --check       Check installed packages and POSIX plugin without a GPU' \
       '  exec CMD      Run an explicit utility command inside the image' \
       'The native-MTP profiles are the maintained default; the DFlash2' \
