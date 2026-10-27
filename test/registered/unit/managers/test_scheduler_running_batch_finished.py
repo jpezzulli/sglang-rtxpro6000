@@ -145,6 +145,43 @@ class TestRunningBatchFinished(unittest.TestCase):
         )
         self.assertEqual(seen[-1], "admitted")
 
+    def test_empty_running_batch_reopens_admission_when_a_row_frees(self):
+        """Same release, ordinary (non-prefill-only) empty running batch.
+
+        The rows that latched admission can be handed back from outside the batch:
+        closing an idle streaming session runs Scheduler.close_session ->
+        StreamingSession.release_session, which frees the req_to_token row and the
+        held KV and touches no latch (streaming_session.py:439-472). Nothing
+        shrinks the already-empty running batch, so a latch that only clears on a
+        shrink or on an empty *prefill-only* batch starves the waiting queue
+        forever; an empty batch has no request left to leave either way.
+        """
+        seen = []
+        free_rows = [0]
+
+        def admission(running_batch):
+            if running_batch.batch_is_full:
+                seen.append("shut")
+            elif free_rows[0] <= 0:
+                seen.append("blocked_no_row")
+                running_batch.batch_is_full = True
+            else:
+                seen.append("admitted")
+            return NextBatchPlan(batch_to_run=None, running_batch=running_batch)
+
+        s = self._scheduler(seen, admission=admission)
+        running = _Batch([], extend=False, batch_is_full=True)
+        plan = s.get_next_batch_to_run(running_batch=running, last_batch=None)
+        self.assertEqual(seen[-1], "blocked_no_row")
+
+        # A session row is freed: nothing else changed, so the next step must try
+        # admission again and take the waiting request.
+        free_rows[0] = 1
+        s.get_next_batch_to_run(
+            running_batch=plan.running_batch, last_batch=plan.batch_to_run
+        )
+        self.assertEqual(seen[-1], "admitted")
+
 
 if __name__ == "__main__":
     unittest.main()
