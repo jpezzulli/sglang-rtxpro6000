@@ -257,13 +257,27 @@ class QSAIndexerMetadata(msgspec.Struct, frozen=True):
 # kernel -- must read the count off the pool through ``pending_ring_groups``
 # and must size a run against ``pending_ring_groups_required``. A producer
 # that invents its own width silently reads another group's keys.
+#
+# Corrected for sgl-project/sglang#46125 ("[Fix] QSA: Stop speculative verify
+# from overwriting the pending index-key ring", andyl98), which established
+# that a verify forward publishes every row of its window before compressing
+# the group that window completes: the small-width exemption below is the one
+# thing that made a 2..ratio-row window answer ``1`` group. Penny does not take
+# that PR's flat ``pos % ring`` layout (the group shape here is PR 40143's, and
+# the power-of-two rounding would over-allocate at W8: 16 rows against the 12
+# three groups give) -- only its sizing bound, discovered from the served
+# Qwen3.8-Flash-Next model.
 
 
 def pending_ring_groups(pool) -> int:
     """Ring groups the pool's pending index-K ring holds (1 without a ring).
 
-    Pools that carry no pre-compression ring (tokenwise QSA) and pools that
-    are not resolved yet keep the historical single-group layout.
+    Pools that carry no pre-compression ring (tokenwise QSA, which compresses
+    at ratio 1 and has no groups to collide) and pools that are not resolved
+    yet report the single-group layout: an unresolved pool is *unknown*
+    capacity, not a proven one, so the guard that asks this refuses every
+    multi-row verify window rather than raising AttributeError on the pool.
+    Graph capture resolves the real pool before it runs that guard.
     """
 
     return int(getattr(pool, "qsa_num_groups", 1))
@@ -279,20 +293,27 @@ def pending_ring_groups_required(*, draft_tokens: int, compress_ratio: int) -> i
     to ``compress_ratio - 1`` members retained from the private prefix. Those
     live positions span the retained partial group plus the whole window; at
     an unaligned start that covers ``(draft - 1) // ratio + 2`` distinct ring
-    groups -- one more than a bare window round-up gives. A window no wider
-    than one group (the shipped W4, and any non-speculative run) needs the
-    single-group layout: it is the layout the whole tree is qualified at, and
-    its inherited prefix-tail alias is preserved unchanged rather than
-    silently re-sized.
+    groups -- one more than a bare window round-up gives.
+
+    The span has no small-width exception: at an unaligned committed length a
+    window of 2..ratio rows completes a group whose oldest members are retained
+    prefix tokens, and the window's own later rows land on exactly those slots
+    (``(p + ratio) % ratio == p % ratio``), so the stored compressed key
+    averages the wrong tokens and is rotated at the overwritten first member's
+    RoPE coordinate. Only a one-row window is exact at a single group -- its
+    only publish IS the newest member of the group it completes -- which is why
+    plain decode and a non-speculative launch keep the shipped 1-group layout
+    byte-for-byte. At ratio 4: W1 -> 1, W2-W4 -> 2 (8 rows, the same 8 slots
+    #46125 allocates for a 4-token window), W5-W8 -> 3, W16 -> 5.
     """
 
     if compress_ratio < 1:
         raise ValueError(
             f"QSA pending ring needs a positive compress ratio, got {compress_ratio}"
         )
-    if draft_tokens is None or draft_tokens <= 0:
-        return 1
-    if draft_tokens <= compress_ratio:
+    if draft_tokens is None or draft_tokens <= 1:
+        # No speculation (or a pre-resolution query) and plain decode: the
+        # shipped single-group layout, unchanged by #46125.
         return 1
     return (draft_tokens - 1) // compress_ratio + 2
 

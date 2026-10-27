@@ -427,10 +427,14 @@ class QwenSparseAttnBackend(AttentionBackend):
     def _pending_ring_groups(self) -> int:
         """Groups the pending index-K ring holds; the pool fixes this at construction.
 
-        Read defensively: a backend built before its pool resolves (the capture
-        path, and every ``__new__``-style harness) has no pool to ask, and the
-        single-group layout is the right answer for it -- the guard then refuses
-        any window wider than one group rather than raising AttributeError.
+        Read defensively: a backend built before its pool resolves (and every
+        ``__new__``-style harness) has no pool to ask, and unknown capacity is
+        not proven capacity -- the guard then refuses every multi-row verify
+        window rather than raising AttributeError. Graph capture resolves the
+        real pool first (``_capture_cuda_graph_metadata``), and a tokenwise-QSA
+        pool genuinely has no ring: it compresses at ratio 1, so the same
+        answer already refused its windows wider than one token before this
+        correction and still does.
         """
         return pending_ring_groups(getattr(self, "token_to_kv_pool", None))
 
@@ -457,11 +461,11 @@ class QwenSparseAttnBackend(AttentionBackend):
         # count off the resolved LAUNCH-MAXIMUM draft-token window (with
         # headroom for the retained prefix a partial group may still read), so
         # a verify window is legal exactly when the groups it needs are among
-        # the groups the allocation holds. W4 -> 1 group (the shipped layout,
-        # bit-for-bit), W8 -> 3, W16 -> 5 at ratio 4. Asking for a window wider
-        # than the launch capacity -- an active width the ring was never sized
-        # for, which would alias two live positions onto one slot -- is the
-        # only thing that raises here.
+        # the groups the allocation holds. At ratio 4: W2-W4 -> 2 groups,
+        # W8 -> 3, W16 -> 5 (#46125 -- there is no small-width exemption).
+        # Asking for a window wider than the launch capacity -- an active width
+        # the ring was never sized for, an unresolved pool, or a pool built
+        # before the ring existed -- is the only thing that raises here.
         required = pending_ring_groups_required(
             draft_tokens=draft_tokens, compress_ratio=self.compress_ratio
         )
