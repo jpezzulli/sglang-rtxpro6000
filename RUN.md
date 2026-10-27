@@ -145,15 +145,17 @@ and state pools in the resolved server output.
 
 ## Launch 27B with DFlash2
 
-> The 27B DFlash2 integration is **established and qualified**: it launches
-> and serves as this profile's speculative path, and the recorded reasoning,
-> tool, image, long-context and fresh-process cache-restore checks passed on it.
-> What still needs explicit validation on your hardware is memory, not maturity
-> - the draft keeps its own host cache **in addition to** the 96 GB HiCache
-> budget below (the recorded launch: 79.45 GB target KV plus 16.63 GB Mamba
-> state, and a further 24.83 GB of draft sliding-window cache, about 120.91 GB
-> of caches before other process memory), and the decode-checkpoint cache path
-> is CPU-regression-covered rather than GPU-verified (see the
+> The 27B DFlash2 integration is **established and qualified**: it launches and
+> serves as this profile's speculative path, and the October 27 checks on the
+> 3.1.3 candidate covered reasoning, tools, images, long-context retrieval and a
+> fresh-process cache restore on it. What still needs explicit validation on your
+> hardware is memory, not maturity - the draft keeps its own host cache **in
+> addition to** the 96 GB HiCache budget below (the recorded launch: 79.45 GB
+> target KV plus 16.63 GB Mamba state, and a further 24.83 GB of draft
+> sliding-window cache, about 120.91 GB of caches before other process memory).
+> The #115 decode-checkpoint arithmetic stays covered by its CPU regression; an
+> end-to-end restore is not a grid-scatter unit regression, and no isolated GPU
+> check of that path exists on either DFlash2 profile (see the
 > [DFlash2 maturity note](README.md#dflash2-maturity)).
 
 Use the official Qwen reference target, or the measured public alternative in

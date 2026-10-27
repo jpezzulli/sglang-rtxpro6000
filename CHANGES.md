@@ -15,18 +15,23 @@ no image build.
   read, so a missing, empty or short object is a lookup miss and the request
   recomputes instead of continuing on partial state (issue #122, adapts upstream
   #46131).
-- QSA keeps its retained prefix index keys in narrow speculative windows: two
-  pending ring groups for widths 2 through the compression ratio, allocation
-  still tied to the launch maximum, group-partitioned layout from #40143 kept
-  (issue #123, adapts upstream #46125).
+- QSA keeps its retained prefix index keys in the narrow speculative windows the
+  optional `fixed-w4` policy produces: two pending ring groups for widths 2
+  through the compression ratio, allocation still tied to the launch maximum,
+  group-partitioned layout from #40143 kept; the public `tiered` default routes
+  wider blocks (issue #123, adapts upstream #46125).
 - A hybrid-Mamba prefill chunk truncated by the KV budget now ends on a page
   boundary, so a cached state is never keyed shorter than the prefix it
   summarizes and another request cannot resume from state carrying its tokens
   (issue #109, restates upstream #45607 against this fork).
-- Scheduler admission reopens when a running batch empties through ordinary
-  decode, instead of starving with freed request-to-token rows available. This is
-  the selected hunk of #126; the ownership and capacity handling in that issue is
-  not included (adapts upstream #46643).
+- An already-empty running batch no longer holds the "batch full" latch. The
+  latch was cleared on a batch shrink or for an empty prefill-only batch, so a
+  batch that was already empty kept it - and its rows can be freed from outside
+  the batch, by closing an idle streaming session, leaving waiting requests
+  starved with a free pool. Any empty batch now reopens admission; batches that
+  still hold requests reset on a shrink as before. This is the selected hunk of
+  #126; the ownership and capacity handling in that issue is not included (adapts
+  upstream #46643).
 - Maturity labeling corrected in current guidance: 27B with DFlash2 is
   established and qualified, and only the optional Flash-Next `next-dflash2`
   profile keeps the experimental / alpha label. The draft's host cache stays
