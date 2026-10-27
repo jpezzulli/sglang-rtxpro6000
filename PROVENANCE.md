@@ -6,11 +6,11 @@
 |---|---|
 | Upstream | `https://github.com/sgl-project/sglang.git` |
 | Public documentation and distribution branch | `pennyroyal-main-sm120-final`; continues above the runtime release tag |
-| Current release | 3.1.3 - draft: not approved, not published, container build pending |
+| Current release | 3.1.3 - draft: not approved, not published; source changes merged (#127-#133), container image building |
 | Qualified candidate source | `ef3258749bbe022e38a5b18922a0085320a59928`, with runtime-code parent `1a6d2082766d3f11646bd972c1bc12effb304cb2`. This is the identity the October 27 checks were run on; it still carries the 3.1.2 version and image assets, so it is not by itself the published or built source. |
-| Published / built source | Not yet assigned. The revision the image is built from is recorded as an OCI source revision in [release-3.1.3.json](release-3.1.3.json) when the build runs; it need not be the final tag, which may add publication documentation on top of it. |
+| Published / built source | Not yet published. The merged integrated source is `f38baf2f84337a7f86ee5d2b38ff95c868f05ae8`; the image is building (`actions/runs/40525831339`, started 2026-10-27T14:55:27Z) from `ec1f64e850f31f33decee6d925ab2d57a52341c3`, whose source tree is identical to `f38baf2f8` under a different ancestry. The build revision and the tag are recorded as they land in [release-3.1.3.json](release-3.1.3.json); the tag may add publication documentation on top. |
 | Release tag | `pennyroyal-v3.1.3` planned; the tag does not exist until publication |
-| Container image | `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3` named by the launch defaults; digest, build and promotion identities are open until the image is published |
+| Container image | `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3` named by the launch defaults; the in-flight build is expected to produce `ghcr.io/jpezzulli/sglang-rtxpro6000:build-ec1f64e850f31f33decee6d925ab2d57a52341c3`. Digest and promotion identities are open until the image is published |
 | Previously published release | `pennyroyal-v3.1.2` at `742cbc5d6ea466d60280392e2dc232fa3079adfa`, image digest recorded in [release-3.1.2.json](release-3.1.2.json) |
 | Core runtime source | `69583da7c71b87ac36371333a19f2749bab72773` |
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
