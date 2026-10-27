@@ -99,9 +99,7 @@ class HiCacheNixl(HiCacheStorage):
         storage_dirs = _parse_storage_dirs(
             envs.SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR.get() or file_path
         )
-        verify_derived_namespace_layout(
-            storage_dirs, storage_config.tp_size
-        )
+        verify_derived_namespace_layout(storage_dirs, storage_config.tp_size)
         # Startup-only, read-only filesystem pressure warning, logged before
         # the file manager (re-)creates base/bucket directories so a full or
         # inode-exhausted fresh namespace explains itself before any mkdir can
@@ -274,6 +272,12 @@ class HiCacheNixl(HiCacheStorage):
             self.backend_selector.backend_name,
             mem_type=self.backend_selector.mem_type,
         )
+        if self.backend_selector.mem_type == "FILE":
+            # Failed writes can leave empty files behind after registration.
+            # Ported from upstream sgl-project/sglang#46131 (head b6056684).
+            return [
+                res is not None and int(res.get("size", 0)) > 0 for res in query_res
+            ]
         return [res is not None for res in query_res]
 
     def _xfer_and_wait(
@@ -326,6 +330,36 @@ class HiCacheNixl(HiCacheStorage):
         if len(host_buffers) != len(keys):
             logger.error("Mismatch between number of host buffers and keys")
             return False
+
+        if direction == "READ" and self.backend_selector.mem_type == "FILE":
+            # NIXL <= 1.4 can report short reads as successful. Validate at
+            # this shared read entrypoint so a restore never relies on the
+            # preceding lookup having seen the same bytes (this Penny base
+            # has no assume_stored bypass, but checking here also covers
+            # any future read that skips batch_exists).
+            # Ported from upstream sgl-project/sglang#46131 (head b6056684);
+            # Penny widens this to a try/except so a metadata-query failure
+            # takes the existing failed-read/recompute channel instead of
+            # escaping into the prefetch worker thread. The query is per
+            # batch, not per page.
+            try:
+                query_res = self.agent.query_memory(
+                    [(0, 0, 0, key) for key in keys],
+                    self.backend_selector.backend_name,
+                    mem_type="FILE",
+                )
+                if len(query_res) != len(host_buffers) or any(
+                    res is None or int(res.get("size", 0)) < size
+                    for res, (_, size) in zip(query_res, host_buffers)
+                ):
+                    return False
+            except Exception as e:
+                logger.error(
+                    "HiCacheNixl: FILE pre-read size query failed, treating as "
+                    "failed read: %s",
+                    e,
+                )
+                return False
 
         host_descs = self.agent.get_xfer_descs(
             [(addr, size, 0) for (addr, size) in host_buffers], "DRAM"
