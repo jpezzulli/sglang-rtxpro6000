@@ -28,51 +28,11 @@ width routing (block 6 for one request, block 4 for two or more) and
 FlashInfer draft-token verification is an **experimental / alpha** profile,
 fully available to opt into.
 
-**3.1.1 patch:** removes the stale source-hash check that blocked NVMe PLE
-startup in 3.1.0.
-
-**3.1.2 patch (shipped October 23, 2026):** added `PENNY_MTP_POLICY`, one
-setting that selects the native-MTP width policy (the unchanged `tiered` default,
-the v3.0.2 `adaptive` policy, or `fixed-w4`); fixed the DFlash2 decode-checkpoint
-tracking so an accepted block that crosses the checkpoint grid is tracked instead
-of dropped; stopped the scheduler's idle sleep from delaying encoder-embedding
-handoffs; and labelled both DFlash2 profiles experimental / alpha. The 27B half of
-that label, and the checkpoint-validation wording that went with it, are
-superseded by 3.1.3 below. What 3.1.2 recorded about the draft's extra host RAM
-still stands - it documented the cost and did not reduce it. See the
-[3.1.2 release notes](RELEASE_NOTES_3.1.2.md).
-
-**3.1.3 patch (in preparation):** six accepted correctness fixes - Anthropic
-thinking without a budget (#124), an explicit `reasoning.effort` on the
-Responses API beating the launch default, incomplete NIXL file-backed restores
-refused instead of trusted (#122), QSA retained prefix keys in narrow
-speculative windows (#123), hybrid-Mamba truncated prefill chunks ending on a KV
-page boundary (#109), and admission no longer staying shut on an already-empty
-running batch (#126, selected part). It also corrects one maturity label: **27B with DFlash2
-is established and qualified**, and only the optional Flash-Next DFlash2 profile
-stays experimental / alpha. The draft's extra host cache stays documented on
-both DFlash2 profiles - the launch measured for this release spent about 96 GB
-of target KV and Mamba state plus a further 24.83 GB of draft cache - and no
-allocator change is included. No setting or default changes. See the
-[3.1.3 release notes](RELEASE_NOTES_3.1.3.md); the image build and publication
-are still pending.
+**3.1.3:** fixes reasoning controls, cache restores, scheduling and `fixed-w4` correctness. The container image is building. [Release notes](RELEASE_NOTES_3.1.3.md).
 
 <a id="dflash2-maturity"></a>
 
-> **DFlash2 maturity.** The **27B DFlash2 profile is established and qualified**:
-> it is 27B's speculative path here, qualified on this hardware for reasoning,
-> tools, images, long-context retrieval and a fresh-process cache restore, and it
-> keeps its recipe and fixed block-8 width. Only the **Flash-Next DFlash2 profile
-> (`next-dflash2`) is experimental / alpha** — fully available to opt into, still
-> newer in the field, not yet tested on two-GPU hardware, and not requalified on
-> the October 27 candidate. Every number below is a specific measured run, not a
-> correctness guarantee for every configuration. Issue #115 fixed the
-> decode-checkpoint (Mamba `extra_buffer` / `extra_buffer_lazy`) arithmetic under
-> a CPU regression, and the October 27 restore exercised the 27B cache-resume path
-> end to end; neither of those is a dedicated grid-scatter regression, and no such
-> isolated GPU check exists on either DFlash2 profile. The draft's extra host DRAM
-> is a separate matter from maturity and applies to both DFlash2 profiles: see the
-> [configuration reference](CONFIGURATION.md#capacity-and-memory).
+> **DFlash2:** 27B is established and qualified; Flash-Next DFlash2 is alpha. Both need extra host RAM for the draft cache — **24.83 GB extra** in our 27B run. [RAM guidance](CONFIGURATION.md#capacity-and-memory).
 
 <a id="hicache-and-nixl"></a>
 

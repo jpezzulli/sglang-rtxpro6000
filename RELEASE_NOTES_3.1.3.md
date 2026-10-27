@@ -1,17 +1,25 @@
 # Penny Royal 3.1.3 — draft
 
-**Status: draft, not approved, not published; container build pending.** The
-release tag, image digest and build/promotion identities are deliberately left
-open here and are recorded in [release-3.1.3.json](release-3.1.3.json) as null
-until the image lands and the release is approved. The qualified candidate for
-this release is
+**Status: draft, not approved, not published; source changes merged, container
+image building.** The six correctness fixes and the maturity-label correction
+are merged into the release branch as
+[#127](https://github.com/jpezzulli/sglang-rtxpro6000/pull/127) through
+[#133](https://github.com/jpezzulli/sglang-rtxpro6000/pull/133), and the image is
+building in
+[run 40525831339](https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/40525831339).
+The release tag, image digest and promotion identity are recorded when they
+exist in [release-3.1.3.json](release-3.1.3.json); until the image is published
+the `v3.1.3` tag does not exist. The qualified candidate for this release is
 [`ef3258749`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/ef3258749bbe022e38a5b18922a0085320a59928),
 whose runtime-code parent is
 [`1a6d20827`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/1a6d2082766d3f11646bd972c1bc12effb304cb2):
 that is the source the October 27 checks were run on, and it still carries the
-3.1.2 version and image assets. The revision the 3.1.3 image is actually built
-from, and the tag it is published under, are recorded when they exist rather than
-assumed from the candidate.
+3.1.2 version and image assets. The merged integrated source is
+[`f38baf2f8`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/f38baf2f84337a7f86ee5d2b38ff95c868f05ae8);
+the image builds from
+[`ec1f64e85`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/ec1f64e850f31f33decee6d925ab2d57a52341c3),
+whose source tree is identical, and the tag it is published under is recorded
+when it exists rather than assumed from the candidate.
 
 This patch release carries six accepted correctness fixes, and it corrects one
 maturity label: **27B with DFlash2 is an established, qualified profile.** Only
@@ -30,7 +38,7 @@ Each item below is the problem it solves and what changes for you.
   reasoning-enabled conversion as every other route, while a budget you do
   supply is still validated and `disabled` / `adaptive` keep their existing
   rules. If your client sends `{"type": "enabled"}` with nothing else, it now
-  gets an answer instead of a 400 ([`45ebf993c`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/45ebf993c121e1a1b61376dcbdafdd21c6d0baac)).
+  gets an answer instead of a 400 ([#127](https://github.com/jpezzulli/sglang-rtxpro6000/pull/127)).
 - **An explicit reasoning effort on the Responses API wins.**
   A `/v1/responses` request that named its own `reasoning.effort` could be
   overridden by the effort the server was launched with, so a client asking for
@@ -38,7 +46,7 @@ Each item below is the problem it solves and what changes for you.
   through the existing request-first template policy, and nested overrides, an
   omitted or null effort, summary-only schema defaults and explicit
   thinking-off controls behave exactly as before
-  ([`15885c599`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/15885c59934117f311d90f8865bc30d7cc718e17)).
+  ([#128](https://github.com/jpezzulli/sglang-rtxpro6000/pull/128)).
 - **Incomplete NIXL file restores are refused (#122).** The disk cache could
   report a successful restore for an object that was missing, zero-length or
   shorter than the host buffer it was filling — most visibly after an
@@ -48,7 +56,7 @@ Each item below is the problem it solves and what changes for you.
   the request recomputes the prefix instead of continuing on partial state.
   Complete and padded objects stay valid, and prefetch workers no longer turn a
   metadata query error into a hard failure
-  ([`bef8cce23`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/bef8cce23c16c690cebd96480829df473591b7c0)).
+  ([#129](https://github.com/jpezzulli/sglang-rtxpro6000/pull/129)).
 - **Retained prefix keys in narrow speculative windows (#123).** The QSA index
   sized its retained-prefix ring too tightly for the narrow speculative windows
   produced by the optional `fixed-w4` width policy, so a retained prefix could be
@@ -59,7 +67,7 @@ Each item below is the problem it solves and what changes for you.
   rather than guessed. Group-partitioned layout from #40143 is preserved. This
   affects the `fixed-w4` choice; the public `tiered` default routes wider blocks
   and was not the reported case
-  ([`12476c9a3`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/12476c9a3cefcf940e8e972190f8cf190d686583)).
+  ([#130](https://github.com/jpezzulli/sglang-rtxpro6000/pull/130)).
 - **Truncated hybrid-Mamba chunks end on a page boundary (#109).** A chunked
   prefill cut short by the KV budget — the normal case under four- and
   six-request pressure with 64-token pages — committed at an arbitrary token
@@ -70,7 +78,7 @@ Each item below is the problem it solves and what changes for you.
   tokens. Truncated hybrid chunks are now floored to the page, a chunk with less
   than a page of budget is parked and retried on the existing deferral path, and
   untruncated tails and full-attention profiles are untouched
-  ([`ed54e16dc`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/ed54e16dc7064e5b57d1fcbd4e15365a577817a2)).
+  ([#131](https://github.com/jpezzulli/sglang-rtxpro6000/pull/131)).
 - **Admission stops staying shut on an already-empty batch (#126, selected
   part).** The scheduler latches "batch full" when there is no request-to-token
   row left to allocate, and it cleared that latch only when the running batch
@@ -84,7 +92,7 @@ Each item below is the problem it solves and what changes for you.
   before, so admission is not retried every step while the batch really is at
   capacity. The rest of #126 (ownership and capacity handling) is **not** part of
   this release
-  ([`1a6d20827`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/1a6d2082766d3f11646bd972c1bc12effb304cb2)).
+  ([#132](https://github.com/jpezzulli/sglang-rtxpro6000/pull/132)).
 
 The QSA, NIXL, hybrid-prefill and admission fixes adapt accepted upstream work
 (#46125, #46131, #45607 and #46643); the original authors and the adaptation are
@@ -101,7 +109,8 @@ fixed block-8 width. Only the Flash-Next DFlash2 profile, which is optional, has
 seen less field use and was not requalified on this candidate, carries the
 experimental / alpha label
 ([README](README.md#dflash2-maturity), [RUN](RUN.md#launch-27b-with-dflash2),
-[limitations](LIMITATIONS.md)).
+[limitations](LIMITATIONS.md),
+[#133](https://github.com/jpezzulli/sglang-rtxpro6000/pull/133)).
 
 The draft's host-memory bill is a separate matter, and it applies to both
 DFlash2 profiles, so it stays documented on both. The launch measured for this

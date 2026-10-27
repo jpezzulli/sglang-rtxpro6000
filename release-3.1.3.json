@@ -5,47 +5,71 @@
     "is_draft": true,
     "publication_approved": false,
     "published": false,
-    "container": "pending"
+    "container": "building"
   },
   "source": {
     "base": "742cbc5d6ea466d60280392e2dc232fa3079adfa",
     "candidate": "ef3258749bbe022e38a5b18922a0085320a59928",
-    "candidate_role": "Qualified candidate identity only: this commit still carries the 3.1.2 version and image assets, and the published tag and the image's own build source are recorded here when they exist.",
-    "integrated_runtime_revision": null,
+    "candidate_role": "Qualified candidate identity only: this commit still carries the 3.1.2 version and image assets, and the published tag is recorded here when it exists.",
+    "integrated_runtime_revision": "f38baf2f84337a7f86ee5d2b38ff95c868f05ae8",
+    "image_build_source": "ec1f64e850f31f33decee6d925ab2d57a52341c3",
+    "image_build_source_note": "The image build source and the merged integrated source f38baf2f8 have identical source trees and different ancestry.",
     "runtime_code_parent": "1a6d2082766d3f11646bd972c1bc12effb304cb2",
     "release_tag": "pennyroyal-v3.1.3",
     "release_tag_status": "not yet published",
     "release_url": null,
     "integrated_commits": {
-      "45ebf993c121e1a1b61376dcbdafdd21c6d0baac": {
-        "issues": [124]
+      "8e72932da981bc4ab25935fd6e19bbc7219902ad": {
+        "issues": [124],
+        "pr": 127,
+        "merge_commit": "0fc77a91d025d3fc6e04d7b27abbe9be859ae3bd"
       },
-      "15885c59934117f311d90f8865bc30d7cc718e17": {
-        "issues": []
+      "426cc4895de2086468458932a05c960f380181e0": {
+        "issues": [],
+        "pr": 128,
+        "merge_commit": "4250df155c1855b65eaf3f249c746a0b78492f5c"
       },
-      "bef8cce23c16c690cebd96480829df473591b7c0": {
-        "issues": [122]
+      "23063539ad68bde231d6cadd79d262ec53d38410": {
+        "issues": [122],
+        "pr": 129,
+        "merge_commit": "ec1ec9df10835b4a0fe9bf7188c10c1b990a0079"
       },
-      "12476c9a3cefcf940e8e972190f8cf190d686583": {
-        "issues": [123]
+      "5ee31ece97da5930ae8c48f810c4cfa539e39b08": {
+        "issues": [123],
+        "pr": 130,
+        "merge_commit": "bee0508d6bc25d97f1c038df0afb0e276b0204fb"
       },
-      "ed54e16dc7064e5b57d1fcbd4e15365a577817a2": {
-        "issues": [109]
+      "a524c3a8e8a0d1ead8ecd8c1a7fccd2af70fc50a": {
+        "issues": [109],
+        "pr": 131,
+        "merge_commit": "fe729fc3b6c6f03264d28e0a500a083956dd2fb6"
       },
-      "1a6d2082766d3f11646bd972c1bc12effb304cb2": {
+      "d17f8b06eda1e826ef6ea4d7cb8310b6d3b060f8": {
         "issues": [126],
+        "pr": 132,
+        "merge_commit": "3497db97b3d79f1784ce7dd46d3f1dc81689f7df",
         "note": "Selected part of #126; ownership and capacity handling are out of scope for this release."
       }
     },
-    "pull_requests": []
+    "pull_requests": [
+      { "number": 127, "head": "8e72932da981bc4ab25935fd6e19bbc7219902ad", "merge_commit": "0fc77a91d025d3fc6e04d7b27abbe9be859ae3bd", "fixes": "Anthropic thinking without a budget (#124)" },
+      { "number": 128, "head": "426cc4895de2086468458932a05c960f380181e0", "merge_commit": "4250df155c1855b65eaf3f249c746a0b78492f5c", "fixes": "Explicit reasoning.effort precedence on the Responses API" },
+      { "number": 129, "head": "23063539ad68bde231d6cadd79d262ec53d38410", "merge_commit": "ec1ec9df10835b4a0fe9bf7188c10c1b990a0079", "fixes": "Incomplete NIXL file-backed restores refused (#122)" },
+      { "number": 130, "head": "5ee31ece97da5930ae8c48f810c4cfa539e39b08", "merge_commit": "bee0508d6bc25d97f1c038df0afb0e276b0204fb", "fixes": "QSA retained prefix keys in narrow speculative windows (#123)" },
+      { "number": 131, "head": "a524c3a8e8a0d1ead8ecd8c1a7fccd2af70fc50a", "merge_commit": "fe729fc3b6c6f03264d28e0a500a083956dd2fb6", "fixes": "Hybrid-Mamba truncated prefill chunks page-aligned (#109)" },
+      { "number": 132, "head": "d17f8b06eda1e826ef6ea4d7cb8310b6d3b060f8", "merge_commit": "3497db97b3d79f1784ce7dd46d3f1dc81689f7df", "fixes": "Empty-batch admission-latch recovery (#126, selected part)" },
+      { "number": 133, "head": "278893c317e7f46a8f127024f3c3ae3f4412febd", "merge_commit": "f38baf2f84337a7f86ee5d2b38ff95c868f05ae8", "fixes": "27B DFlash2 maturity correction and 3.1.3 release records" }
+    ]
   },
   "container": {
     "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3",
+    "candidate_image": "ghcr.io/jpezzulli/sglang-rtxpro6000:build-ec1f64e850f31f33decee6d925ab2d57a52341c3",
     "digest": null,
-    "build_url": null,
+    "build_url": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/40525831339",
+    "build_started_at": "2026-10-27T14:55:27Z",
     "promotion_url": null,
-    "source_revision": null,
-    "note": "Image named by the release defaults in this branch; the build has not run, so the tag does not exist yet. The revision the image is actually built from is recorded here at build time with the digest and promotion identity, and is not assumed to be the candidate commit or the final tag."
+    "source_revision": "ec1f64e850f31f33decee6d925ab2d57a52341c3",
+    "note": "Build 40525831339 is in progress from source ec1f64e85 and is expected to produce ghcr.io/jpezzulli/sglang-rtxpro6000:build-ec1f64e850f31f33decee6d925ab2d57a52341c3. The digest, the promotion identity and the final v3.1.3 tag remain open until the image is published; the build source is not assumed to be the candidate commit or the final tag."
   },
   "changes": [
     {
@@ -98,9 +122,10 @@
       ]
     },
     {
-      "commit": null,
-      "identity": "not yet assigned - publication preparation",
-      "summary": "Maturity labeling corrected in current guidance: 27B + DFlash2 is established and qualified, and only the optional Flash-Next next-dflash2 profile keeps the experimental / alpha label. The commit now at the head of the qualified candidate (ef3258749) is the change that added that label to both DFlash2 profiles; the correction itself is publication preparation for this release and is not given a revision here. The draft's additional host cache stays documented on both DFlash2 profiles, separate from maturity: no allocator change and no memory reduction is claimed. Labels and documentation only - no setting, default, launch line, runtime module or test changed."
+      "commit": "278893c317e7f46a8f127024f3c3ae3f4412febd",
+      "pr": 133,
+      "merge_commit": "f38baf2f84337a7f86ee5d2b38ff95c868f05ae8",
+      "summary": "Maturity labeling corrected in current guidance: 27B + DFlash2 is established and qualified, and only the optional Flash-Next next-dflash2 profile keeps the experimental / alpha label. The commit at the head of the qualified candidate (ef3258749) is the change that added that label to both DFlash2 profiles; the correction merged as PR #133, head 278893c317e7f46a8f127024f3c3ae3f4412febd, merge commit f38baf2f84337a7f86ee5d2b38ff95c868f05ae8. The draft's additional host cache stays documented on both DFlash2 profiles, separate from maturity: no allocator change and no memory reduction is claimed. Labels and documentation only - no setting, default, launch line, runtime module or test changed."
     }
   ],
   "defaults_unchanged": {
@@ -121,7 +146,7 @@
     "tools": "Counts with exceptions, not a blanket pass. Flash-Next native MTP: 30/30 calls parseable, 29/30 strict-matcher, 26/30 automatic; the four automatic misses come from scorer/date substring behaviour and mock-router behaviour rather than model call failures. 27B DFlash2: 30/30 scheduled, exact and parseable, 28/30 automatic; the two misses are the invalid-date test cases, where the model issued the correct validate_date calls and then used its whole 512-token output ceiling on reasoning, returning a final answer with an empty visible body. One invoice request also returned unwanted explanatory prose alongside a correct call. Agentic and vision checks passed separately.",
     "benchmarks": "Dated native mean/peak rates and cold TTFT for this candidate are recorded in RESULTS.md with the measured policy, configuration, source and interval counts. No matched-baseline speed-up claim is made and no new performance default changed.",
     "nvme_serving": "not run",
-    "container_build": "Not run. The GPU container smoke check has not run either, so no container or image verification is claimed here.",
+    "container_build": "Building: GitHub Actions run 40525831339 started 2026-10-27T14:55:27Z from source ec1f64e85. The GPU container smoke check has not run, so no container or image verification is claimed here.",
     "exceptions": [
       "The first attempt at the 27B four-request screen on 2026-10-27 ended with an Xid 109 GPU freeze; the unchanged retry completed and is the recorded measurement. Cause unproven, no freeze fix claimed, event still under observation.",
       "Under host-cache pressure, state was evicted rather than retained purely on the host. Host checkpoint reclamation and the NIXL disk-budget cleaner were both active during that run, so pure-host retention was not isolated on this candidate.",

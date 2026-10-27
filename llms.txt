@@ -35,10 +35,15 @@ included). It also
 corrects one maturity label: **27B + DFlash2 is established and qualified**, and
 only the optional Flash-Next `next-dflash2` profile stays experimental / alpha.
 The draft's additional host cache is documented on both DFlash2 profiles and is
-not reduced by this release. The planned release tag is `pennyroyal-v3.1.3` and
-the image is `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3`; the release is a
-draft, not approved, not published, with the container build pending and no
-digest, build or promotion identity yet, as recorded in release-3.1.3.json. The
+not reduced by this release. All seven pull requests are merged (#127-#132 for
+the fixes, #133 for the maturity correction and release records). The planned
+release tag is `pennyroyal-v3.1.3` and the image is
+`ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3`; the release is still a draft, not
+approved, not published, with the container image building from
+`ec1f64e850f31f33decee6d925ab2d57a52341c3` (expected candidate tag
+`build-ec1f64e850f31f33decee6d925ab2d57a52341c3`, run
+https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/40525831339), and no
+digest or promotion identity yet, as recorded in release-3.1.3.json. The
 3.1.1 NVMe PLE source-gate
 removal stays in effect, the 3.1.2 width-policy setting and checkpoint-tracking
 fix stay in effect, and the 3.1 feature details, source identity,
