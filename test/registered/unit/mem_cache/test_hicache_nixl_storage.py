@@ -89,7 +89,9 @@ class MockSlotSiblingHybridPool(MockHybridPool):
     them, while the legacy 1+len(conv_buffer) counting would miss the sibling.
     """
 
-    def __init__(self, num_pages: int = 4, page_size: int = 1, component_bytes: int = 8):
+    def __init__(
+        self, num_pages: int = 4, page_size: int = 1, component_bytes: int = 8
+    ):
         super().__init__(
             num_pages=num_pages,
             page_size=page_size,
@@ -666,7 +668,7 @@ class TestNixlUnified(CustomTestCase):
         """Zero-copy MLA batch_exists counts one storage key per logical key."""
         self.hicache.is_zero_copy = True
         self.hicache.is_mla_model = True
-        self.hicache.agent.query_memory = lambda *a, **kw: [object(), None]
+        self.hicache.agent.query_memory = lambda *a, **kw: [{"size": "16"}, None]
 
         self.assertEqual(self.hicache.batch_exists(["key1", "key2"]), 1)
 
@@ -675,8 +677,8 @@ class TestNixlUnified(CustomTestCase):
         self.hicache.is_zero_copy = True
         self.hicache.is_mla_model = False
         self.hicache.agent.query_memory = lambda *a, **kw: [
-            object(),
-            object(),
+            {"size": "16"},
+            {"size": "16"},
             None,
             None,
         ]
@@ -830,12 +832,16 @@ class TestNixlUnified(CustomTestCase):
         class _KV:
             v_buffer = object()
 
-        self.assertEqual(self.hicache._get_hybrid_key_multiplier(PoolName.SWA, _KV()), 2)
+        self.assertEqual(
+            self.hicache._get_hybrid_key_multiplier(PoolName.SWA, _KV()), 2
+        )
 
         class _Plain:
             pass
 
-        self.assertEqual(self.hicache._get_hybrid_key_multiplier(PoolName.KV, _Plain()), 1)
+        self.assertEqual(
+            self.hicache._get_hybrid_key_multiplier(PoolName.KV, _Plain()), 1
+        )
 
     def test_batch_exists_v2_expands_sibling_component_keys(self):
         """Exists check must agree with the pool's real per-page components."""
@@ -1165,6 +1171,176 @@ class TestNixlUnified(CustomTestCase):
 
         self.assertEqual(results[PoolName.DRAFT], [False, False])
 
+    def test_batch_exists_rejects_incomplete_files(self):
+        """Empty files miss lookup; truncated reads cannot publish partial KV."""
+        self.addCleanup(self.hicache.close)
+        keys = ["complete", "incomplete", "later"]
+        for zero_copy in (False, True):
+            with self.subTest(zero_copy=zero_copy):
+                host = MockMemPoolHost(is_zero_copy_mode=zero_copy)
+                # Seed distinct deterministic nonzero values (never the 3/9
+                # sentinels) per page, so a byte-exact restore cannot be
+                # faked by a wrong-page read, zero-padding substitution, or
+                # an untouched buffer.
+                host.kv_buffer[:] = (
+                    (torch.arange(host.kv_buffer.numel()) * 3 + 1)
+                    .to(host.dtype)
+                    .view(host.kv_buffer.shape)
+                )
+                self.hicache.register_mem_pool_host(host)
+                self.assertEqual(
+                    self.hicache.batch_set_v1(keys, torch.arange(6)), [True] * 3
+                )
+                storage_key = (
+                    self.hicache._get_key_list_from_meta(keys)[3]
+                    if zero_copy
+                    else self.hicache._get_suffixed_key(keys[1])
+                )
+                path = self.hicache.file_manager.get_file_path(storage_key)
+                with open(path, "rb") as f:
+                    original = f.read()
+                full_size = len(original)
+                self.assertEqual(full_size, os.path.getsize(path))
+                self.assertEqual(self.hicache.batch_exists(keys), 3)
+                # State of the restored pages right after the write, used
+                # as the byte-exact control for successful restores. Pages
+                # beyond host_indices are never fetched back, so compare
+                # only the restored region.
+                restored = (
+                    host.kv_buffer[:, :6] if zero_copy else host.kv_buffer[:, :, :6]
+                )
+                reference = restored.clone()
+                for size in (0, full_size - 1, full_size, full_size + 4096):
+                    with self.subTest(size=size):
+                        # Rebuild the object from its ORIGINAL bytes first, so
+                        # padding and complete cases restore real data instead
+                        # of truncate-extended zero holes.
+                        with open(path, "wb") as f:
+                            f.write(original)
+                        if size != full_size:
+                            os.truncate(path, size)
+                        self.assertEqual(
+                            self.hicache.batch_exists(keys),
+                            1 if size == 0 else 3,
+                        )
+                        host.kv_buffer.fill_(9)
+                        self.assertEqual(
+                            self.hicache.batch_get_v1(keys, torch.arange(6)),
+                            [size >= full_size] * 3,
+                        )
+                        if size < full_size:
+                            self.assertTrue(torch.all(host.kv_buffer == 9))
+                        else:
+                            self.assertTrue(torch.equal(restored, reference))
+
+    def test_read_rejects_missing_file_and_query_errors(self):
+        """A deleted object misses lookup; query failures take the recompute channel."""
+        self.addCleanup(self.hicache.close)
+        keys = ["gone-first", "gone-second", "gone-third"]
+        host = MockMemPoolHost(is_zero_copy_mode=False)
+        self.hicache.register_mem_pool_host(host)
+        self.assertEqual(self.hicache.batch_set_v1(keys, torch.arange(6)), [True] * 3)
+        path = self.hicache.file_manager.get_file_path(
+            self.hicache._get_suffixed_key(keys[1])
+        )
+        os.remove(path)
+        self.assertEqual(self.hicache.batch_exists(keys), 1)
+        host.kv_buffer.fill_(9)
+        self.assertEqual(self.hicache.batch_get_v1(keys, torch.arange(6)), [False] * 3)
+        self.assertTrue(torch.all(host.kv_buffer == 9))
+
+        # A query_memory that raises (not just a missing file) must return
+        # the existing boolean failed-read instead of escaping into the
+        # prefetch worker thread.
+        def boom(*args, **kwargs):
+            raise RuntimeError("simulated query_memory failure")
+
+        original_query = self.hicache.agent.query_memory
+        self.hicache.agent.query_memory = boom
+        try:
+            self.assertEqual(
+                self.hicache.batch_get_v1(keys, torch.arange(6)), [False] * 3
+            )
+            self.assertTrue(torch.all(host.kv_buffer == 9))
+        finally:
+            self.hicache.agent.query_memory = original_query
+
+    def test_batch_exists_v2_rejects_incomplete_sidecars(self):
+        """Complete KV cannot make a truncated indexer or Mamba state a hit."""
+        self.addCleanup(self.hicache.close)
+        keys = ["sidecar-first", "sidecar-second", "sidecar-third"]
+        self.hicache.register_mem_pool_host(MockMemPoolHost(False))
+        self.assertEqual(self.hicache.batch_set_v1(keys, torch.arange(6)), [True] * 3)
+        for name, zero_copy in ((PoolName.INDEXER, False), (PoolName.MAMBA, True)):
+            with self.subTest(pool=name):
+                host = MockHybridPool(expose_zero_copy=zero_copy)
+                if zero_copy:
+                    # The temporal and convolution components need different sizes.
+                    host.conv_buffer = [torch.zeros((4, 16), dtype=torch.uint8)]
+                # Distinct nonzero patterns per component (+1/+7 offsets never
+                # hit the 9 sentinel, values differ by position and between
+                # components), so swapped or zero-substituted reads fail.
+                host.temporal_buffer[:] = (
+                    (torch.arange(host.temporal_buffer.numel()) * 3 + 1)
+                    .to(torch.uint8)
+                    .view(host.temporal_buffer.shape)
+                )
+                host.conv_buffer[0][:] = (
+                    (torch.arange(host.conv_buffer[0].numel()) * 3 + 7)
+                    .to(torch.uint8)
+                    .view(host.conv_buffer[0].shape)
+                )
+                self.hicache.register_mem_host_pool_v2(host, name)
+                transfer = PoolTransfer(
+                    name=name, keys=keys, host_indices=torch.arange(3)
+                )
+                self.assertEqual(
+                    self.hicache.batch_set_v2([transfer]), {name: [True] * 3}
+                )
+                result = self.hicache.batch_exists_v2(keys, [transfer])
+                self.assertEqual(result.kv_hit_pages, 3)
+                multiplier = 2 if zero_copy else 1
+                storage_key = self.hicache._get_hybrid_component_keys(
+                    keys, name, multiplier
+                )[2 * multiplier - 1]
+                path = self.hicache.file_manager.get_file_path(storage_key)
+                with open(path, "rb") as f:
+                    original = f.read()
+                full_size = len(original)
+                # Only the pages named in host_indices (rows 0..2) are fetched
+                # back; the fourth row keeps its sentinel after a restore.
+                reference = (
+                    host.temporal_buffer[:3].clone(),
+                    host.conv_buffer[0][:3].clone(),
+                )
+                for size in (0, full_size - 1, full_size, full_size + 4096):
+                    with self.subTest(size=size):
+                        with open(path, "wb") as f:
+                            f.write(original)
+                        if size != full_size:
+                            os.truncate(path, size)
+                        result = self.hicache.batch_exists_v2(keys, [transfer])
+                        self.assertEqual(result.kv_hit_pages, 1 if size == 0 else 3)
+                        self.assertEqual(result.extra_pool_hit_pages[PoolName.KV], 3)
+                        host.temporal_buffer.fill_(9)
+                        host.conv_buffer[0].fill_(9)
+                        self.assertEqual(
+                            self.hicache.batch_get_v2([transfer]),
+                            {name: [size >= full_size] * 3},
+                        )
+                        if size < full_size:
+                            self.assertTrue(torch.all(host.temporal_buffer == 9))
+                            self.assertTrue(torch.all(host.conv_buffer[0] == 9))
+                        else:
+                            # Byte-exact control: every restored component
+                            # page holds the originally written bytes.
+                            self.assertTrue(
+                                torch.equal(host.temporal_buffer[:3], reference[0])
+                            )
+                            self.assertTrue(
+                                torch.equal(host.conv_buffer[0][:3], reference[1])
+                            )
+
     def test_batch_set_get_v2_large_bounce_pool_round_trip(self):
         page_count = STORAGE_BATCH_SIZE + 2
         pool = MockHybridPool(num_pages=page_count, expose_zero_copy=False)
@@ -1328,6 +1504,48 @@ class TestNixlDirectIO(CustomTestCase):
         self.assertFalse(hicache.is_zero_copy)
         self.assertIsNotNone(hicache._bounce_set)
         self.assertIsNotNone(hicache._bounce_get)
+
+    def test_odirect_read_rejects_truncated_object(self):
+        """Real O_DIRECT round trip: complete bytes restore, short files reject."""
+        hicache = self._make_direct_io_hicache()
+        self.addCleanup(hicache.close)
+        # head_dim=64 makes each layer_first flat page exactly 4096 bytes so
+        # the copy-mode bounce slots satisfy O_DIRECT sector alignment the
+        # same way a real page-64 KV pool does.
+        mock_host = MockMemPoolHost(is_zero_copy_mode=False, head_dim=64)
+        # Same nonzero distinct-page pattern as the v1 test.
+        mock_host.kv_buffer[:] = (
+            (torch.arange(mock_host.kv_buffer.numel()) * 3 + 1)
+            .to(mock_host.dtype)
+            .view(mock_host.kv_buffer.shape)
+        )
+        hicache.register_mem_pool_host(mock_host)
+        keys = ["direct-full", "direct-short"]
+        if hicache.batch_set_v1(keys, torch.arange(4)) != [True, True]:
+            self.skipTest(
+                f"O_DIRECT file transfers unsupported on {self.test_dir}'s filesystem"
+            )
+        # Tokens 0..3 are the only pages fetched back (2 keys x page 2).
+        restored = mock_host.kv_buffer[:, :, :4]
+        reference = restored.clone()
+        path = hicache.file_manager.get_file_path(hicache._get_suffixed_key(keys[1]))
+        with open(path, "rb") as f:
+            original = f.read()
+        self.assertEqual(len(original), 4096)
+        os.truncate(path, len(original) - 1)
+        # Lookup still sees a nonzero object; only the read-time byte-size
+        # check can catch this, and it must fail the whole batch atomically
+        # so no partially restored page is ever published.
+        self.assertEqual(hicache.batch_exists(keys), 2)
+        mock_host.kv_buffer.view(torch.uint8).fill_(9)
+        self.assertEqual(hicache.batch_get_v1(keys, torch.arange(4)), [False, False])
+        self.assertTrue(torch.all(mock_host.kv_buffer.view(torch.uint8) == 9))
+
+        with open(path, "wb") as f:
+            f.write(original)
+        mock_host.kv_buffer.view(torch.uint8).fill_(3)
+        self.assertEqual(hicache.batch_get_v1(keys, torch.arange(4)), [True, True])
+        self.assertTrue(torch.equal(restored, reference))
 
     def test_odirect_disabled_via_config(self):
         """Top-level use_direct_io=false in extra_config disables O_DIRECT."""
