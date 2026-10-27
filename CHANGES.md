@@ -1,9 +1,11 @@
 # Penny Royal release history
 
-## 3.1.3 — Six correctness fixes and the 27B DFlash2 maturity correction (draft)
+## 3.1.3 — Six correctness fixes and the 27B DFlash2 maturity correction
 
-Publication of this patch is still pending: draft notes, no approval, no tag,
-no image build.
+Published October 27, 2026 as `pennyroyal-v3.1.3`: merged PRs #127-#133, with
+documentation followups #134 and #135, image
+`ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3` (digest
+`sha256:cdba5f8d72098813454aa552bad35873d65b2ba8cd72f93f3ae3ed7057c0636a`).
 
 - Anthropic requests that enable thinking without `budget_tokens` are accepted
   and use the ordinary reasoning-enabled conversion; an explicit budget is still

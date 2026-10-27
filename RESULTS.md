@@ -94,8 +94,20 @@ request-side costs of this candidate's launches.
   host. Host checkpoint reclamation and the NIXL disk-budget cleaner were both in
   play, so pure-host retention was not isolated on this candidate. Both restart
   restores above are valid.
-- No NVMe PLE serving qualification was run for this release, and the GPU
-  container smoke check has not run yet.
+- No NVMe PLE serving qualification was run for this release. The published
+  image was separately verified on 2026-10-27: the existing-image check passed
+  with GPUs hidden and network none, and a quick actual-GPU serving smoke passed
+  on the Flash-Next profile with the public `tiered` default (TP1, 4 requests /
+  24 slots, 524,288-token context, 32 GB HiCache with NIXL, RAM PLE and CPU
+  preprocessing, diagnostics off) - health and model discovery, one exact READY
+  answer with a
+  stop finish, and one tool-call turn returning the exact `lookup_alpha` (key
+  ALPHA) and `lookup_bravo` (key BRAVO) calls as valid JSON with a `tool_calls`
+  finish and no prose. Native was then restored byte-for-byte and passed the
+  same two checks at `adaptive`, 6 requests / 36 slots and A4000 GPU
+  preprocessing. This is image-serving evidence only: not a new throughput
+  qualification and not a 27B container boot. The bounded 20-second stop used
+  SIGKILL, so graceful container stop is not claimed.
 
 ## Penny Royal 3.1
 

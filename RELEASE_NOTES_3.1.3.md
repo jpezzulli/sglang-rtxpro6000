@@ -1,35 +1,10 @@
-# Penny Royal 3.1.3 — draft
+# Penny Royal 3.1.3
 
-**Status: draft, not approved, not published; source changes merged, container
-image building.** The six correctness fixes and the maturity-label correction
-are merged into the release branch as
-[#127](https://github.com/jpezzulli/sglang-rtxpro6000/pull/127) through
-[#133](https://github.com/jpezzulli/sglang-rtxpro6000/pull/133), and the image is
-building in
-[run 40525831339](https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/40525831339).
-The release tag, image digest and promotion identity are recorded when they
-exist in [release-3.1.3.json](release-3.1.3.json); until the image is published
-the `v3.1.3` tag does not exist. The qualified candidate for this release is
-[`ef3258749`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/ef3258749bbe022e38a5b18922a0085320a59928),
-whose runtime-code parent is
-[`1a6d20827`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/1a6d2082766d3f11646bd972c1bc12effb304cb2):
-that is the source the October 27 checks were run on, and it still carries the
-3.1.2 version and image assets. The merged integrated source is
-[`f38baf2f8`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/f38baf2f84337a7f86ee5d2b38ff95c868f05ae8);
-the image builds from
-[`ec1f64e85`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/ec1f64e850f31f33decee6d925ab2d57a52341c3),
-whose source tree is identical, and the tag it is published under is recorded
-when it exists rather than assumed from the candidate.
+This patch release fixes reasoning controls, cache restores, prefill alignment, request admission and `fixed-w4` correctness. **27B with DFlash2 is established and qualified; only Flash-Next DFlash2 is alpha.**
 
-This patch release carries six accepted correctness fixes, and it corrects one
-maturity label: **27B with DFlash2 is an established, qualified profile.** Only
-the optional **Flash-Next DFlash2** profile (`next-dflash2`) stays experimental
-/ alpha. Model, profile, precision and performance defaults are unchanged from
-3.1.2: the launch you ran yesterday launches the same way tomorrow.
+Published October 27, 2026. [Image and source details](release-3.1.3.json).
 
 ## Fixes
-
-Each item below is the problem it solves and what changes for you.
 
 - **Anthropic requests with thinking enabled and no budget (#124).** An
   Anthropic-format request that asked for thinking without a `budget_tokens`
@@ -124,12 +99,26 @@ host swapping. **3.1.3 documents this bill; it changes no allocator and claims
 no memory reduction.** Any future memory work depends on Flash-Next DFlash2
 first demonstrating a speed benefit over native MTP.
 
+## Published image
+
+`ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3`, digest
+`sha256:cdba5f8d72098813454aa552bad35873d65b2ba8cd72f93f3ae3ed7057c0636a`.
+Built from source
+[`ec1f64e85`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/ec1f64e850f31f33decee6d925ab2d57a52341c3)
+in
+[run 40525831339](https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/40525831339)
+and promoted without rebuilding in
+[run 40549616706](https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/40549616706);
+manifest, config, exact sizes and the candidate image tag are in
+[release-3.1.3.json](release-3.1.3.json). On the RTX PRO 6000, the image passed
+package checks and served generation and parallel-tool requests using the
+public `tiered` profile.
+
 ## Update
 
 Native users can follow [BUILD.md](BUILD.md). Container users should pull
-`ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3` once it is published and restart
-with their existing external configuration; until the image is published, that
-tag does not exist yet
+`ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3` and restart with their existing
+external configuration
 ([container guide](docker/pennyroyal/README.md)). Fresh launch files, Compose
 defaults, `.env.example` and the beta configurator name the new image, but an
 explicit image pin in your saved setup or in an edited `run.sh` survives on
@@ -148,8 +137,10 @@ observations, not a matched-baseline speed-up claim.
 
 ## Validation
 
-Accepted on 2026-10-27 on the candidate source above. Reused evidence, not rerun
-for the documentation-only parts of this release:
+Accepted on 2026-10-27 on the qualified candidate
+[`ef3258749bbe022e38a5b18922a0085320a59928`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/ef3258749bbe022e38a5b18922a0085320a59928);
+the runtime evidence below is reused from those checks, not rerun for the
+documentation-only parts of this release:
 
 - Integrated CPU suite: 409 tests with 404 subtests passed, 1 optional S3 check
   skipped. Each of the six fixes was reviewed individually and its patch matched
@@ -198,8 +189,16 @@ Two observations are recorded as open rather than fixed:
   active during that run, so pure-host retention was not isolated on this
   candidate.
 
-No NVMe PLE serving qualification was run, and the GPU container smoke check has
-not run yet.
+No NVMe PLE serving qualification was run. The published image itself was
+verified on the real hardware on October 27, 2026: the existing-image check
+passed with GPUs hidden and network none (pinned packages, the accepted
+FlashInfer SM120 sources and AOT module, NIXL POSIX/FILE and DRAM transport
+configuration, the NVMe PLE io_uring import, clean exact source), the 28
+runtime, launch, policy and version files hash-matched, the 8 installed
+NVMe-reader Python files matched the vendored source, the obsolete NVMe source
+manifest was absent, and the 16 existing recipe tests passed inside the image;
+the actual-GPU serving smoke details are recorded in the machine-readable
+record and in [RESULTS.md](RESULTS.md#penny-royal-313-october-27-2026).
 
 ## Thanks
 

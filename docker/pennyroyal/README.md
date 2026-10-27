@@ -52,13 +52,12 @@ is copied out of the image and no image rebuild is needed.
 
 ## Get the launch files
 
-Use matching published source and image tags. The examples below use 3.1.2
-while the 3.1.3 container is building. Download the small launch-file set;
-a full source checkout is optional. `RELEASE_REF` names the published tag
+Use matching published source and image tags. Download the small launch-file
+set; a full source checkout is optional. `RELEASE_REF` names the published tag
 (see [release-3.1.3.json](../../release-3.1.3.json) for the 3.1.3 identity).
 
 ```bash
-RELEASE_REF='pennyroyal-v3.1.2'
+RELEASE_REF='pennyroyal-v3.1.3'
 BASE="https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/$RELEASE_REF/docker/pennyroyal/launch"
 mkdir -p pennyroyal/config
 cd pennyroyal
@@ -150,7 +149,7 @@ the target checkpoint; add `--startup config/start-flash-next-dflash2.sh`
 for the optional DFlash2 profile, which also needs its draft checkpoint:
 
 ```bash
-IMAGE='ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.2'   # published identity recorded in the release notes
+IMAGE='ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3'   # published identity recorded in the release notes
 ./run.sh --image "$IMAGE"
 ```
 
