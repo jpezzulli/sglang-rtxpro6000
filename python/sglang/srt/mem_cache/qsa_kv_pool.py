@@ -61,8 +61,8 @@ class QSATokenToKVPool(HybridLinearKVPool):
 
         Thin delegation to ``qsa.metadata.pending_ring_groups_required``, the
         single span model every producer shares (see that docstring for the
-        published-window-plus-retained-prefix span and for why a window no
-        wider than one group keeps the shipped single-group layout). The count
+        published-window-plus-retained-prefix span and for why only a one-row
+        window keeps the shipped single-group layout). The count
         is derived from the LAUNCH-MAXIMUM draft-token window, never the
         active one: a narrower active width (W4/W8 under a W16 launch, or any
         adaptive-MTP step-down) reuses this allocation, so geometry never has
@@ -179,8 +179,10 @@ class QSATokenToKVPool(HybridLinearKVPool):
         # before any of it is compressed, and the first completed group may
         # still read retained prefix members, so the ring must not wrap a
         # live member onto itself within one forward -- see
-        # pending_ring_num_groups for the exact span and for why the
-        # qualified single-group window (W4, num_groups 1) keeps its layout.
+        # pending_ring_num_groups for the exact span and for why only the
+        # one-row (non-speculative / plain-decode) window keeps a one-group
+        # layout: from W2 up, a window's own later rows overwrite the oldest
+        # retained member it reads (sgl-project/sglang#46125).
         # The count is the LAUNCH capacity (sized off the resolved maximum
         # draft-token window, so W4/W8/W16 candidates all fit) and it is fixed
         # at pool construction because CUDA graphs bind these buffers for the
