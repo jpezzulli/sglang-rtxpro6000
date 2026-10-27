@@ -4,7 +4,8 @@ This is the native launch guide for Penny Royal. The same source runs
 Qwen3.8 Flash-Next NVFP4 with native NEXTN MTP and FR-Spec, the same target
 with the separate DFlash2 draft, or Qwen3.8-27B FP8 with its own DFlash2
 draft, on NVIDIA RTX PRO 6000 Blackwell (SM120), TP1 or TP2. The Flash-Next
-native NEXTN MTP path is the maintained default; the DFlash2 path is an
+native NEXTN MTP path is the maintained default and 27B's DFlash2 path is
+established and qualified; the Flash-Next DFlash2 path is an
 **experimental / alpha** opt-in that stays fully available with its existing
 recipe (see the [DFlash2 maturity note](README.md#dflash2-maturity)).
 Both profiles serve an OpenAI-compatible model named `pennyroyal`.
@@ -144,11 +145,16 @@ and state pools in the resolved server output.
 
 ## Launch 27B with DFlash2
 
-> Penny's 27B DFlash2 integration is **experimental / alpha**: it launches and
-> serves normally, but the decode-checkpoint cache path and off-GPU memory
-> budget still need explicit validation on your hardware (see the
-> [DFlash2 maturity note](README.md#dflash2-maturity)). DFlash2 is 27B's
-> speculative path here, so this profile carries the label too.
+> The 27B DFlash2 integration is **established and qualified**: it launches
+> and serves as this profile's speculative path, and the recorded reasoning,
+> tool, image, long-context and fresh-process cache-restore checks passed on it.
+> What still needs explicit validation on your hardware is memory, not maturity
+> - the draft keeps its own host cache **in addition to** the 96 GB HiCache
+> budget below (the recorded launch: 79.45 GB target KV plus 16.63 GB Mamba
+> state, and a further 24.83 GB of draft sliding-window cache, about 120.91 GB
+> of caches before other process memory), and the decode-checkpoint cache path
+> is CPU-regression-covered rather than GPU-verified (see the
+> [DFlash2 maturity note](README.md#dflash2-maturity)).
 
 Use the official Qwen reference target, or the measured public alternative in
 [BUILD.md](BUILD.md#reference-and-measured-checkpoints), with the separate
@@ -466,8 +472,9 @@ The online-FP8 and PLE-placement options also apply to this recipe.
 ## Launch Flash-Next with DFlash2
 
 `PENNYROYAL_PROFILE=next-dflash2` is the optional Flash-Next DFlash2 choice;
-select it explicitly (or keep a saved file that names it) to use it. Penny's
-DFlash2 integration is **experimental / alpha** (see the
+select it explicitly (or keep a saved file that names it) to use it. This
+profile is **experimental / alpha** - the label belongs to it alone, not to
+27B's qualified DFlash2 path (see the
 [DFlash2 maturity note](README.md#dflash2-maturity)); native NEXTN MTP remains
 the default profile. It runs the same accepted NVFP4 target and the bundled FR-Spec
 64K token map against the separate

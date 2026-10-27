@@ -58,7 +58,13 @@ window while ordinary host HiCache capacity is preserved. The widths come from
 `configs/pennyroyal/adaptive-dflash2.json`, one candidate per tier, so the
 3.0-era `SPECULATIVE_NUM_DRAFT_TOKENS` setting is retired on this profile.
 27B DFlash2: unchanged FP8 target and draft, fixed block 8, `.92`,
-4 requests / 24 slots, 96 decimal GB HiCache. C is request concurrency,
+4 requests / 24 slots, 96 decimal GB HiCache. 27B + DFlash2 is the established
+and qualified 27B path and carries no alpha label; only Flash-Next + DFlash2
+(`next-dflash2`) is experimental / alpha. The draft's own host cache is extra to
+the HiCache figure on both DFlash2 profiles - the recorded 27B launch spent
+79.45 GB of target KV plus 16.63 GB of Mamba state and a further 24.83 GB of
+draft sliding-window cache, about 120.91 GB of caches before other process
+memory - documented, not reduced. C is request concurrency,
 independently of the TP GPU count.
 
 ## Installation
