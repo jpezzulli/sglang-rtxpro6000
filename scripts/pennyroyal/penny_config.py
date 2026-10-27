@@ -59,8 +59,8 @@ RECIPE_BY_PROFILE = {
 PROFILE_LABEL = {
     "next": "Flash-Next NVFP4 + FR-Spec/native NEXTN MTP (default)",
     "next-plain": "Flash-Next NVFP4 + native NEXTN MTP without FR-Spec",
-    "next-dflash2": "Flash-Next NVFP4 + DFlash2 (DFLASH, FR-Spec, routed widths)",
-    "27b": "Qwen3.8-27B FP8 + DFlash2",
+    "next-dflash2": "Flash-Next NVFP4 + DFlash2 (DFLASH, FR-Spec, routed widths) (alpha)",
+    "27b": "Qwen3.8-27B FP8 + DFlash2 (alpha)",
 }
 # The --hicache-size literals the serve recipes pass when the operator
 # chose nothing. --hicache-size counts decimal GB (server_args.hicache_size is
