@@ -28,7 +28,7 @@ width routing (block 6 for one request, block 4 for two or more) and
 FlashInfer draft-token verification is an **experimental / alpha** profile,
 fully available to opt into.
 
-**3.1.3:** fixes reasoning controls, cache restores, scheduling and `fixed-w4` correctness. The container image is building. [Release notes](RELEASE_NOTES_3.1.3.md).
+**3.1.3:** fixes reasoning controls, cache restores, scheduling and `fixed-w4` correctness. [Release notes](RELEASE_NOTES_3.1.3.md).
 
 <a id="dflash2-maturity"></a>
 
