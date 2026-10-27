@@ -19,7 +19,7 @@ so long-running sessions can pick up from cached history.
 
 [Get started](#build-and-launch) · [Conversation cache](#hicache-and-nixl) ·
 [Performance](#performance) ·
-[3.1.2 release notes](RELEASE_NOTES_3.1.2.md) · [Community results](COMMUNITY-RESULTS.md)
+[3.1.3 release notes](RELEASE_NOTES_3.1.3.md) · [Community results](COMMUNITY-RESULTS.md)
 
 **Penny Royal 3.1:** Flash-Next runs native NEXTN MTP with FR-Spec as the
 maintained default profile, with automatic KV pool sizing replacing the preset
@@ -41,6 +41,21 @@ extra host RAM is an observed, documented addition to the target's budget
 (3.1.2 does not reduce it), and the on-GPU checkpoint resume still awaits
 hardware validation. See the
 [3.1.2 release notes](RELEASE_NOTES_3.1.2.md).
+
+**3.1.3 patch (in preparation):** six accepted correctness fixes - Anthropic
+thinking without a budget (#124), an explicit `reasoning.effort` on the
+Responses API beating the launch default, incomplete NIXL file-backed restores
+refused instead of trusted (#122), QSA retained prefix keys in narrow
+speculative windows (#123), hybrid-Mamba truncated prefill chunks ending on a KV
+page boundary (#109), and admission reopening when a running batch empties
+(#126, selected part). It also corrects one maturity label: **27B with DFlash2
+is established and qualified**, and only the optional Flash-Next DFlash2 profile
+stays experimental / alpha. The draft's extra host cache stays documented on
+both DFlash2 profiles - the launch measured for this release spent about 96 GB
+of target KV and Mamba state plus a further 24.83 GB of draft cache - and no
+allocator change is included. No setting or default changes. See the
+[3.1.3 release notes](RELEASE_NOTES_3.1.3.md); the image build and publication
+are still pending.
 
 <a id="dflash2-maturity"></a>
 
@@ -213,6 +228,13 @@ The Flash-Next DFlash2 reasoning qualification scored **93.46/100**. See
 [results and measurement settings](RESULTS.md#penny-royal-31)
 for the tool checks, cache restore, sampling details, and earlier results.
 
+[RESULTS.md](RESULTS.md#penny-royal-313-october-27-2026) adds the dated decode
+and time-to-first-token rows measured on the 3.1.3 candidate on both qualified
+profiles, with the launched configuration and interval counts. The Flash-Next
+rows were measured with `adaptive` selected locally while the public width-policy
+default stays `tiered`, so they are not a matched-baseline comparison and carry
+no speed-up claim.
+
 <a id="27b-fp8--dflash2-performance-at-a-glance"></a>
 
 ### Qwen3.8-27B FP8 with DFlash2
@@ -342,7 +364,7 @@ over what was actually worth keeping.
 | Understand the FP8 and SSD options | [Online FP8](FP8.md) · [NVMe PLE](NVME-PLE.md) |
 | See measurements | [Results and history](RESULTS.md) · [Community reports](COMMUNITY-RESULTS.md) |
 | Read the implementation details | [Backends](BACKENDS.md) · [Memory and persistence](MEMORY-AND-PERSISTENCE.md) |
-| Check changes and source lineage | [3.1.2 notes](RELEASE_NOTES_3.1.2.md) · [Machine-readable notes](release-3.1.2.json) · [History](CHANGES.md) · [Provenance](PROVENANCE.md) |
+| Check changes and source lineage | [3.1.3 notes](RELEASE_NOTES_3.1.3.md) · [Machine-readable notes](release-3.1.3.json) · [History](CHANGES.md) · [Provenance](PROVENANCE.md) |
 | Check known issues | [Limitations](LIMITATIONS.md) |
 | Use an AI assistant for setup | [llms.txt](llms.txt) |
 
@@ -382,7 +404,7 @@ components retain their own licenses.
 <a id="scope-and-limitations"></a>
 <a id="documentation-map"></a>
 
-[Current release notes](RELEASE_NOTES_3.1.2.md) · [Benchmark history](RESULTS.md) ·
+[Current release notes](RELEASE_NOTES_3.1.3.md) · [Benchmark history](RESULTS.md) ·
 [Configuration reference](CONFIGURATION.md) · [Known issues](LIMITATIONS.md)
 
 <!-- Compatibility anchors for earlier versions of this guide. -->
