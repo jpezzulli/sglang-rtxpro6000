@@ -7,17 +7,23 @@ speculative-window guard. The ring holds ``num_groups`` groups of
 ``compress_ratio`` slots per request, so a request owns
 ``compress_ratio * num_groups`` slots and a verify window up to that width
 maps every position to a distinct slot. ``num_groups == 1`` is the
-historical single-group layout, and these tests pin the new arithmetic to
-it bit-for-bit: the shipped W4/default path must not move.
+single-group layout non-speculative serving runs on, and these tests pin the
+new arithmetic to it bit-for-bit: a run without speculation must not move.
 
 The width-support layer added on top of that port is pinned here too: the
 group count is the LAUNCH capacity derived from the resolved maximum
-draft-token window (W4 -> 1, W8 -> 3, W16 -> 5 groups at ratio 4), eager and
-in-graph metadata must derive slots from that one capacity, and a narrower
-active width must reuse the allocation the captured graphs hold.
+draft-token window, eager and in-graph metadata must derive slots from that
+one capacity, and a narrower active width must reuse the allocation the
+captured graphs hold. The sizing bound carries no small-width exemption, per
+sgl-project/sglang#46125 ("[Fix] QSA: Stop speculative verify from
+overwriting the pending index-key ring", andyl98) -- at ratio 4 the answer is
+W1 -> 1, W2-W4 -> 2, W8 -> 3, W16 -> 5 groups, and every window that can
+complete a group with retained prefix members is refused on a ring too small
+to hold them apart.
 """
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -252,16 +258,18 @@ class TestPendingRingNumGroups(unittest.TestCase):
         any group (qsa_indexer.update_key_state_and_compress), and the first
         completed group may still read up to ratio-1 retained prefix
         members, so capacity covers draft_tokens + ratio - 1 consecutive
-        positions. The shipped single-group window (draft <= ratio, W4)
-        keeps its qualified layout instead of rounding up. An absent
-        draft-token count (non-speculative run) must not produce an empty
-        ring.
+        positions from W2 up. Only an absent draft-token count
+        (non-speculative run) or a one-row window (plain decode) keeps the
+        single-group layout: the window's own later rows are what overwrite
+        the members it reads, and one row has no later rows.
         """
         cases = [
             (None, 1),
             (0, 1),
-            (1, 1),
-            (4, 1),
+            (1, 1),  # decode / no speculation: unchanged layout
+            (2, 2),  # #46125: a 2-row window at an unaligned start, and
+            (3, 2),  # every wider window up to the ratio, overwrite a live
+            (4, 2),  # member that a one-group ring keeps no room for
             (5, 3),
             (7, 3),
             (8, 3),
@@ -519,7 +527,9 @@ class TestRequireChainSpeculation(unittest.TestCase):
     window wider than the ratio outright; a guard that merely multiplies the
     ratio by the group count waves through windows the ring cannot actually
     hold (8 draft tokens at 2 groups alias the retained prefix member, which is
-    the clobber TestPublishedWindowRingLifetime pins).
+    the clobber TestPublishedWindowRingLifetime pins) -- as did the small-width
+    exemption #46125 removed (4 draft tokens at 1 group, the same overwrite at
+    the width the shipped policy routed).
     """
 
     class _Mode:
@@ -548,7 +558,11 @@ class TestRequireChainSpeculation(unittest.TestCase):
     # (draft tokens, ring groups, accepted) -- legal iff
     # pending_ring_groups_required(draft) <= groups, at ratio 4.
     WINDOW_CASES = (
-        (4, 1, True),  # shipped W4 layout, untouched
+        (2, 1, False),  # #46125: no small-width exemption any more
+        (3, 1, False),
+        (4, 1, False),  # the pre-fix fixed-W4 capacity, now refused at capture
+        (4, 2, True),  # the W4 launch capacity
+        (5, 2, False),  # one position past the two-group span
         (8, 1, False),  # RC2's restriction stays for a pool nobody re-sized
         (8, 2, False),  # two groups alias the retained prefix member
         (8, 3, True),  # the W8 launch capacity
@@ -602,11 +616,30 @@ class TestRequireChainSpeculation(unittest.TestCase):
                     ),
                 )
 
-    def test_missing_ring_geometry_keeps_the_single_group_guard(self):
-        """Tokenwise QSA / unresolved pools have no ring groups: W4-era rules."""
-        self._check(4, None)
-        with self.assertRaises(NotImplementedError):
-            self._check(5, None)
+    def test_unresolved_pool_is_unknown_capacity_not_a_tokenwise_pool(self):
+        """No geometry to ask means the window is unproven, not free of charge.
+
+        ``pending_ring_groups`` keeps answering 1 for a pool with no ring, so a
+        tokenwise-QSA run (ratio 1, no groups at all) holds its existing
+        one-token-only bound, and a backend whose pool has not resolved yet
+        refuses every multi-row verify window instead of admitting a geometry
+        nobody measured. Capture resolves the real pool before this guard runs
+        (``_capture_cuda_graph_metadata``), so the refusal is a start-up error,
+        never a mid-serve surprise.
+        """
+        self._check(1, None)  # decode: one row, one group, always legal
+        for draft_tokens in (2, 3, 4, 5):
+            with self.subTest(draft_tokens=draft_tokens):
+                with self.assertRaises(NotImplementedError):
+                    self._check(draft_tokens, None)
+        # A genuine tokenwise pool (compress ratio 1, no ring) keeps the
+        # W1-only bound it had before the small-width correction.
+        for draft_tokens in (2, 4):
+            with self.subTest(ratio=1, draft_tokens=draft_tokens):
+                with self.assertRaises(NotImplementedError):
+                    self._check(draft_tokens, None, ratio=1)
+        self.assertEqual(pending_ring_groups(None), 1)
+        self.assertEqual(pending_ring_groups(SimpleNamespace()), 1)
 
     def test_non_verify_modes_are_not_guarded(self):
         from sglang.srt.layers.attention.qwen_sparse_attn_backend import (
@@ -749,7 +782,7 @@ class TestLaunchCapacityGeometry(unittest.TestCase):
     """
 
     def test_supported_widths_and_their_capacities(self):
-        self.assertEqual({w: groups_for(w) for w in WIDTHS}, {4: 1, 8: 3, 16: 5})
+        self.assertEqual({w: groups_for(w) for w in WIDTHS}, {4: 2, 8: 3, 16: 5})
 
     def test_capacity_is_monotonic_in_the_launch_width(self):
         capacities = [groups_for(w) for w in range(1, 33)]
@@ -822,11 +855,13 @@ class TestLiveSpanIsCollisionFree(unittest.TestCase):
     members, so the live span is ``width + ratio - 1`` consecutive positions.
     The launch capacity must keep that whole span distinct -- a bare
     ``ceil(width / ratio)`` round-up does not, which is the bug the sizing rule
-    exists to prevent.
+    exists to prevent, and it is also why the rule has no small-width case:
+    the aliasing rows are the window's own, so a window no wider than one
+    group is not exempt (#46125).
     """
 
-    # Windows wider than one compression group.
-    WIDE = (8, 16)
+    # Every width a speculative launch can route to, the shipped W4 included.
+    WIDE = (4, 8, 16)
     STARTS = (5, 6, 7, 8, 9, 17, 18, 19, 20, 21, 64, 65, 66)
 
     def _live_span(self, start, width):
@@ -881,20 +916,20 @@ class TestLiveSpanIsCollisionFree(unittest.TestCase):
                 self.assertGreaterEqual(RATIO * groups_for(width), width + RATIO - 1)
                 self.assertLess(RATIO * (groups_for(width) - 1), width + RATIO - 1)
 
-    def test_shipped_w4_keeps_the_inherited_prefix_tail_alias(self):
-        """The one window the single-group layout cannot cover, pinned as-is.
+    def test_w4_no_longer_keeps_an_inherited_prefix_tail_alias(self):
+        """The window the pre-fix single-group layout could not cover.
 
-        A W4 verify's live span (7 positions) is wider than the one group (4
-        rows) the shipped layout allocates: PR41's inherited prefix-tail alias,
-        preserved unchanged -- not claimed correct, and not re-sized here so the
-        qualified W4 runtime does not move. Two groups separate the span, so any
-        wider launch capacity (the W8/W16 rings, or the adaptive-MTP candidate
-        set) covers an active W4 window as a side effect.
+        A W4 verify's live span is 7 positions and the pre-fix capacity gave it
+        4 rows: PR41's inherited prefix-tail alias, kept "not claimed correct"
+        until #46125 measured what it cost. The sizing rule now rounds W2-W4 up
+        to two groups, the span is distinct, and every wider launch capacity
+        (the W8/W16 rings, the adaptive-MTP candidate set, the DFlash2 W6) still
+        covers an active W4 window as it always did.
         """
-        self.assertLess(RATIO * groups_for(4), 4 + RATIO - 1)
+        self.assertGreaterEqual(RATIO * groups_for(4), 4 + RATIO - 1)
         positions = self._live_span(8, 4)
         self.assertEqual(positions.unique().numel(), 4 + RATIO - 1)
-        self.assertLess(
+        self.assertEqual(
             self._slots(positions, groups_for(4)).unique().numel(),
             positions.unique().numel(),
         )
@@ -904,6 +939,10 @@ class TestLiveSpanIsCollisionFree(unittest.TestCase):
                     self._slots(positions, num_groups).unique().numel(),
                     positions.unique().numel(),
                 )
+        # The pre-fix capacity, pinned as the counter-example it is.
+        self.assertLess(
+            self._slots(positions, 1).unique().numel(), positions.unique().numel()
+        )
 
 
 class TestWideWindowRollbackLifetime(unittest.TestCase):
@@ -1340,6 +1379,429 @@ class TestWidthTransitionUsesStableStorage(unittest.TestCase):
             live = row_reqs > 0
             self.assertTrue(bool((slots[live] >= inert).all()))
             self.assertTrue(bool((groups[live] >= inert).all()))
+
+
+# ---------------------------------------------------------------------------
+# sgl-project/sglang#46125 (Penny issue 123) as correctness regressions, on
+# Penny's OWN ring geometry.
+#
+# Upstream replaced its flat ``req * ratio + pos % ratio`` ring with a flat
+# ``req * ring + pos % ring`` (ring = pow2 >= ratio + rows - 1). Penny took
+# PR 40143's group-partitioned form instead -- position ``p`` lands in ring
+# group ``(p // ratio) % groups`` at offset ``p % ratio`` -- so what transfers
+# from #46125 is the bound, not the layout: the allocation has to keep the
+# published window and the retained prefix members that window reads distinct,
+# and it has no exemption for a narrow window, because the rows that do the
+# overwriting belong to the window itself. Everything below therefore asks the
+# sizing rule for the capacity (``pending_ring_num_groups`` of the launch
+# width, never a hand-picked group count) and replays the production write plan
+# and ``QSAIndexer``, not a transcription of the formula.
+# ---------------------------------------------------------------------------
+
+# A committed length in the middle of a request's history, group-aligned.
+PREFIX_START = 4 * 16
+REQ = 1
+
+# Every verify width a shipped Penny launch line can route to, including the
+# optional Flash-Next DFlash2 widths and a W16 adaptive-MTP candidate.
+SHIPPED_WIDTHS = (4, 6, 8, 16)
+
+
+def _launch_groups(width):
+    """The capacity the pool derives for a launch whose maximum is ``width``."""
+    return QSATokenToKVPool.pending_ring_num_groups(
+        max_num_draft_tokens=width, compress_ratio=RATIO
+    )
+
+
+def _ring_replay(pool, num_groups, *, start, width, follow=None):
+    """Publish a committed prefix, then one ``width``-row speculative forward.
+
+    Uses the backend's own speculative-paged write plan and
+    ``QSAIndexer.update_key_state_and_compress``, so the compressed slot, the
+    published slots and the group's member slots are all production output.
+    Every key and every RoPE coordinate equals its token's position, so a
+    compressed group names the tokens it averaged and a ring row names the
+    token that last wrote it.
+
+    ``follow`` replays what a partial acceptance does: the next verify window
+    starts there and re-publishes the accepted positions, but the prefix tokens
+    are not re-sent, so a group whose members were destroyed can never come out
+    right again -- and a correct ring recompresses it to the same key.
+    """
+    indexer = _cpu_indexer()
+    q0 = (start // RATIO) * RATIO
+
+    def publish(positions):
+        meta = _paged_metadata(pool, [position + 1 for position in positions], REQ)
+        indexer.update_key_state_and_compress(
+            _keys(positions),
+            torch.tensor(positions),
+            torch.tensor(positions),
+            meta,
+        )
+        return meta
+
+    def group_mean(meta):
+        # The plan is compacted: entry i is the i-th block this forward
+        # completes, and ``compress_group_positions`` names the block by its
+        # last position. Padding entries name group 0 (end position ratio-1),
+        # never this one, so a match here is a block this forward really wrote.
+        ends = meta.compress_group_positions.long().flatten()
+        owned = (ends == q0 + RATIO - 1).nonzero().flatten()
+        if owned.numel() == 0:
+            return None  # this window completes no group
+        return float(
+            pool.get_qsa_compressed_k_buffer(0)[int(meta.write_locs[int(owned[0])])]
+            .float()
+            .mean()
+        )
+
+    # The previous whole group plus the retained partial group: exactly the
+    # state a serving run holds when the verify forward starts.
+    publish(list(range(max(0, q0 - RATIO), start)))
+    meta = publish(list(range(start, start + width)))
+    out = {
+        "correct": q0 + (RATIO - 1) / 2,
+        "group_mean": group_mean(meta),
+    }
+    if follow is not None:
+        out["follow_mean"] = group_mean(publish(list(range(follow, follow + width))))
+    state = pool.get_qsa_key_state_buffer(0)
+    retained_slots = [_slot_of(REQ, q, num_groups) for q in range(q0, start)]
+    out.update(
+        {
+            "retained": [float(state[slot].float().mean()) for slot in retained_slots],
+            # Compression rotates the group at the RoPE coordinate stored in the
+            # FIRST member's slot, so an overwrite is wrong in its value and in
+            # its rotation at once -- whichever later row landed there.
+            "retained_rope": [
+                int(pool.qsa_rope_position_buffer[slot][0]) for slot in retained_slots
+            ],
+        }
+    )
+    return out
+
+
+class TestVerifyWindowRingLifetime(unittest.TestCase):
+    """Every routed width keeps its own live span apart, at the sized capacity.
+
+    A speculative-paged forward publishes every row of its window before
+    compressing the group that window completes. At an unaligned committed
+    length that group still reads members retained from the prefix, and on a
+    one-group ring the window's own later rows have already wrapped onto those
+    slots (``(p + ratio) % ratio == p % ratio``): the stored compressed key
+    averages this forward's tokens and is rotated at the coordinate written into
+    the first member's slot. #46125 measured that on the served
+    Qwen3.8-Flash-Next model; the sizing rule now refuses it at launch, so no
+    shipped width can reach it.
+    """
+
+    def _run(self, width, *, start, follow=None):
+        num_groups = _launch_groups(width)
+        return _ring_replay(
+            _ring_pool(num_groups, num_request_slots=4),
+            num_groups,
+            start=start,
+            width=width,
+            follow=follow,
+        )
+
+    def test_small_windows_keep_their_retained_members_distinct(self):
+        for width in (2, 3, 4):
+            for residue in (0, 1, 2, 3):
+                with self.subTest(width=width, residue=residue):
+                    got = self._run(width, start=PREFIX_START + residue)
+                    intact = [float(PREFIX_START + index) for index in range(residue)]
+                    self.assertEqual(got["retained"], intact)
+                    self.assertEqual(
+                        got["retained_rope"],
+                        [PREFIX_START + index for index in range(residue)],
+                    )
+                    # A window that starts too late in the group to complete it
+                    # writes no compressed key at all; anything it does write is
+                    # the prefill-equivalent average.
+                    self.assertEqual(
+                        got["group_mean"],
+                        (
+                            got["correct"]
+                            if residue + width > RATIO
+                            else (got["correct"] if residue + width == RATIO else None)
+                        ),
+                    )
+
+    def test_partial_acceptance_recompresses_to_the_same_key(self):
+        """Rejected rows are not inert, and a correct ring is idempotent.
+
+        W4 at residue 1 with one accepted draft token: the next verify window
+        re-publishes the accepted positions and re-compresses the same group.
+        Sized capacity (2 groups, and the maintained W8 launch's 3 for its C2+
+        W4 tier) returns the prefill-equivalent key both rounds.
+        """
+        start = PREFIX_START + 1
+        for width in (4, 8):
+            with self.subTest(launch_max=width):
+                got = self._run(width, start=start, follow=start + 1)
+                self.assertEqual(got["group_mean"], got["correct"])
+                self.assertEqual(got["follow_mean"], got["correct"])
+
+    def test_one_row_window_keeps_the_single_group_layout(self):
+        """The layout non-speculative serving and plain decode run on: unchanged.
+
+        A decode forward publishes its one row and reads the rest of the group,
+        and its row IS the group's newest member, so nothing aliases. This is
+        the whole reason the corrected rule still answers 1 below W2 -- the
+        per-request ring of a launch without speculation does not move.
+        """
+        self.assertEqual(_launch_groups(1), 1)
+        self.assertEqual(_launch_groups(0), 1)
+        self.assertEqual(_launch_groups(None), 1)
+        for residue in (1, 2, 3):
+            with self.subTest(residue=residue):
+                got = _ring_replay(
+                    _ring_pool(1, num_request_slots=4),
+                    1,
+                    start=PREFIX_START + residue,
+                    width=1,
+                )
+                self.assertEqual(
+                    got["retained"],
+                    [float(PREFIX_START + index) for index in range(residue)],
+                )
+                self.assertEqual(
+                    got["group_mean"],
+                    got["correct"] if residue == RATIO - 1 else None,
+                )
+
+
+class TestPreCorrectionSingleGroupCapacity(unittest.TestCase):
+    """The capacity Penny shipped for W4, pinned as the failure it now refuses.
+
+    One group at ratio 4 was ``pending_ring_groups_required``'s small-width
+    exemption -- the fixed-W4 launch (steps 3, 4 draft tokens) sized its ring to
+    the window and nothing else. The replay is unchanged, the sizing is not, so
+    the overwrite stays reproducible here as the counter-example even though no
+    shipped launch can allocate that ring any more (the guard refuses it, see
+    ``TestGraphMetadataCarriesTheSizedSpan``).
+    """
+
+    def _run(self, *, start, width=4, follow=None):
+        return _ring_replay(
+            _ring_pool(1, num_request_slots=4),
+            1,
+            start=start,
+            width=width,
+            follow=follow,
+        )
+
+    def test_w4_overwrote_every_retained_member(self):
+        for residue in (1, 2, 3):
+            with self.subTest(residue=residue):
+                got = self._run(start=PREFIX_START + residue)
+                # The group averaged the whole window instead of the retained
+                # members plus the window's first rows.
+                self.assertEqual(got["group_mean"], got["correct"] + residue)
+                # Every retained member's slot -- including the first member's,
+                # whose stored coordinate compression rotates the group at --
+                # now holds the token ratio positions later.
+                self.assertEqual(
+                    got["retained"],
+                    [float(PREFIX_START + RATIO + index) for index in range(residue)],
+                )
+                self.assertEqual(
+                    got["retained_rope"],
+                    [PREFIX_START + RATIO + index for index in range(residue)],
+                )
+
+    def test_narrow_windows_overwrote_too(self):
+        """#46125: every 2..ratio-row window, not only a window == ratio.
+
+        The outcome turns on how many rows follow the boundary row, i.e. on
+        ``residue + width`` against the ratio: past it the group is wrong, at it
+        the boundary row is last and the group is exact, short of it nothing
+        compresses. A W4 window is always past it.
+        """
+        for width in (2, 3, 4):
+            for residue in (1, 2, 3):
+                with self.subTest(width=width, residue=residue):
+                    got = self._run(start=PREFIX_START + residue, width=width)
+                    intact = [float(PREFIX_START + index) for index in range(residue)]
+                    if residue + width > RATIO:
+                        self.assertGreater(got["group_mean"], got["correct"])
+                        self.assertEqual(
+                            got["retained"][0], float(PREFIX_START + RATIO)
+                        )
+                        self.assertEqual(got["retained_rope"][0], PREFIX_START + RATIO)
+                    elif residue + width == RATIO:
+                        self.assertEqual(got["group_mean"], got["correct"])
+                        self.assertEqual(got["retained"], intact)
+                    else:
+                        self.assertIsNone(got["group_mean"])
+                        self.assertEqual(got["retained"], intact)
+
+    def test_partial_acceptance_did_not_undo_the_overwrite(self):
+        start = PREFIX_START + 1
+        got = self._run(start=start, follow=start + 1)
+        self.assertEqual(got["group_mean"], got["correct"] + 1)
+        # The destroyed members are never re-sent, so the recompression drifts
+        # further instead of converging.
+        self.assertEqual(got["follow_mean"], got["correct"] + 2)
+
+
+class TestGraphMetadataCarriesTheSizedSpan(unittest.TestCase):
+    """The recorded in-graph kernel, replayed at each width's sized capacity.
+
+    Verify and draft-extend forwards read their group members from
+    ``graph_ring_group_locs``, written by ``_qsa_graph_row_metadata_kernel``
+    through Triton's CPU interpreter here. At the capacity the sizing rule
+    derives, no member slot of a boundary row can collide with the slots of the
+    rows published after it in the same window, for every width a Penny recipe
+    can launch; the pre-fix single-group W4 ring does not get that far, because
+    capture asks the guard first.
+    """
+
+    # One request per unaligned residue.
+    BASES = (PREFIX_START + 1, PREFIX_START + 2, PREFIX_START + 3)
+    REQS = (1, 2, 3)
+
+    def _collisions(self, num_groups, width):
+        import triton
+
+        knobs = triton.knobs.runtime
+        previous, knobs.interpret = knobs.interpret, True
+        try:
+            harness = _GraphMetadataHarness(
+                num_groups, bases=self.BASES, reqs=self.REQS
+            )
+            metadata = harness.capture_and_replay(width)
+        finally:
+            knobs.interpret = previous
+        indexer_metadata = metadata.indexer_metadata
+        rows = torch.arange(indexer_metadata.sequence_lengths.numel())
+        boundary = (indexer_metadata.sequence_lengths.long() % RATIO) == 0
+        self.assertTrue(bool(boundary.any()), "no row completed a group")
+        stores = indexer_metadata.pending_ring_slots.long()
+        members = indexer_metadata.graph_ring_group_locs.long()
+        row_reqs = metadata.row_req_pool_indices.long()
+        # Every slot a boundary row's group reads that a LATER row of the same
+        # window published into: a live position sharing one slot.
+        aliased = set()
+        for row in rows[boundary]:
+            later = rows[(row_reqs == row_reqs[row]) & (rows > row)]
+            aliased.update(
+                int(slot)
+                for slot in (set(members[row].tolist()) & set(stores[later].tolist()))
+            )
+        return sorted(aliased)
+
+    def test_sized_capacity_keeps_member_slots_out_of_later_rows(self):
+        for width in SHIPPED_WIDTHS:
+            with self.subTest(width=width):
+                self.assertEqual(self._collisions(_launch_groups(width), width), [])
+
+    def test_capture_refuses_the_pre_correction_single_group_w4_ring(self):
+        """The old capacity is now a start-up refusal, not a silent overwrite.
+
+        Deliberately replaying a W4 window on a one-group ring cannot even
+        record its metadata: ``_require_chain_speculation`` runs after the pool
+        is resolved and before any kernel, so the undersized ring is reported at
+        capture instead of mixing keys mid-serve.
+        """
+        harness = _GraphMetadataHarness(1, bases=self.BASES, reqs=self.REQS)
+        with self.assertRaises(NotImplementedError):
+            harness.capture(4)
+
+
+POLICY_DIR = Path(__file__).resolve().parents[5] / "configs" / "pennyroyal"
+
+# policy -> (bundled --speculative-adaptive-config, the draft-token count the
+# recipe that ships it launches, the ring groups that capacity must size).
+# configs/pennyroyal/mtp-policy.sh pairs each file with its
+# --speculative-num-steps / --speculative-num-draft-tokens.
+MAINTAINED_POLICIES = {
+    "tiered (default)": ("adaptive-next.json", 8, 3),
+    "adaptive": ("adaptive-next-v3.0.2.json", 8, 3),
+    "fixed-w4": ("adaptive-next-fixed-w4.json", 4, 2),
+    "next-dflash2": ("adaptive-dflash2.json", 6, 3),
+}
+
+
+class TestMaintainedPolicyRingCapacity(unittest.TestCase):
+    """Applicability by profile/policy, derived from the shipped launch lines.
+
+    The ring group count comes from ``max_speculative_num_draft_tokens()``, i.e.
+    the widest routed candidate (adaptive route: ``max(candidate_steps) + 1``,
+    which is what every maintained recipe launches), so the policy files decide
+    it. After the correction no maintained launch capacity is below the live
+    span of its own widest window -- and the ``27b`` profile is not in this
+    table for a stronger reason: it is not a compressed-QSA model, so it
+    allocates no pending ring at all.
+    """
+
+    def _launch_draft_tokens(self, config_path):
+        from sglang.srt.speculative.adaptive_spec_params import (
+            resolve_candidate_steps_from_config,
+        )
+
+        return max(resolve_candidate_steps_from_config(str(config_path))) + 1
+
+    def test_every_maintained_capacity_covers_its_own_live_span(self):
+        for policy, (name, launched, expected_groups) in MAINTAINED_POLICIES.items():
+            config = POLICY_DIR / name
+            with self.subTest(policy=policy):
+                # The recipe and the policy file agree, so the capacity below is
+                # the one the profile really boots with.
+                self.assertEqual(self._launch_draft_tokens(config), launched)
+                groups = _launch_groups(launched)
+                self.assertEqual(groups, expected_groups, policy)
+                # Rows the launch allocates per request, and the span the
+                # widest routed window plus its retained prefix tail occupies.
+                pool = _ring_pool(groups, num_request_slots=3)
+                self.assertEqual(
+                    pool.get_qsa_key_state_buffer(0).shape[0], 3 * RATIO * groups
+                )
+                self.assertGreaterEqual(RATIO * groups, launched + RATIO - 1)
+
+    def test_pools_without_a_compressed_ring_cannot_be_exposed(self):
+        """27B / tokenwise QSA isolation: no ring, so nothing to collide.
+
+        The pool class is chosen from the parsed QSA profile, and the tokenwise
+        variant (and a model with no QSA profile, which is what the ``27b``
+        recipe launches: plain FlashInfer prefill + TRTLLM-MHA decode, and no
+        ``qsa_compressed_hicache`` namespace field) carries a flat per-token
+        index-K cache with no compression groups and no per-request ring. The
+        guard's answer for those pools is ``1`` group, which is why it refuses
+        every multi-row window there rather than skipping the check.
+        """
+        from sglang.srt.layers.attention.qsa.config import parse_qsa_profile
+        from sglang.srt.mem_cache.qsa_kv_pool import QwenDSATokenToKVPool
+
+        tokenwise = SimpleNamespace(
+            model_type="qwen3_next",
+            index_topk=2048,
+            index_n_heads=16,
+            index_kv_heads=1,
+            index_head_dim=128,
+        )
+        self.assertEqual(parse_qsa_profile(tokenwise).variant, "tokenwise")
+        self.assertEqual(parse_qsa_profile(tokenwise).compress_ratio, 1)
+        self.assertIsNone(parse_qsa_profile(SimpleNamespace(model_type="qwen3_5")))
+        pool = QwenDSATokenToKVPool(
+            size=256,
+            dtype=torch.bfloat16,
+            page_size=64,
+            head_num=2,
+            head_dim=64,
+            full_attention_layer_ids=[0],
+            device="cpu",
+            mamba_pool=None,
+            qsa_index_kv_heads=1,
+            qsa_index_head_dim=8,
+            qsa_token_budget=2048,
+        )
+        self.assertFalse(hasattr(pool, "qsa_num_groups"))
+        self.assertFalse(hasattr(pool, "qsa_ring_span"))
+        self.assertEqual(pending_ring_groups(pool), 1)
 
 
 if __name__ == "__main__":
