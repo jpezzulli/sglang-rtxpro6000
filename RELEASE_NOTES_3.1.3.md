@@ -3,10 +3,15 @@
 **Status: draft, not approved, not published; container build pending.** The
 release tag, image digest and build/promotion identities are deliberately left
 open here and are recorded in [release-3.1.3.json](release-3.1.3.json) as null
-until the image lands and the release is approved. Qualified runtime source for
-this release is [`ef3258749`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/ef3258749bbe022e38a5b18922a0085320a59928),
+until the image lands and the release is approved. The qualified candidate for
+this release is
+[`ef3258749`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/ef3258749bbe022e38a5b18922a0085320a59928),
 whose runtime-code parent is
-[`1a6d20827`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/1a6d2082766d3f11646bd972c1bc12effb304cb2).
+[`1a6d20827`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/1a6d2082766d3f11646bd972c1bc12effb304cb2):
+that is the source the October 27 checks were run on, and it still carries the
+3.1.2 version and image assets. The revision the 3.1.3 image is actually built
+from, and the tag it is published under, are recorded when they exist rather than
+assumed from the candidate.
 
 This patch release carries six accepted correctness fixes, and it corrects one
 maturity label: **27B with DFlash2 is an established, qualified profile.** Only
@@ -16,8 +21,7 @@ the optional **Flash-Next DFlash2** profile (`next-dflash2`) stays experimental
 
 ## Fixes
 
-Each item below ships as one functional change with its own tests, and
-publication happens through its own pull request at the release checkpoint.
+Each item below is the problem it solves and what changes for you.
 
 - **Anthropic requests with thinking enabled and no budget (#124).** An
   Anthropic-format request that asked for thinking without a `budget_tokens`
@@ -46,13 +50,15 @@ publication happens through its own pull request at the release checkpoint.
   metadata query error into a hard failure
   ([`bef8cce23`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/bef8cce23c16c690cebd96480829df473591b7c0)).
 - **Retained prefix keys in narrow speculative windows (#123).** The QSA index
-  kept its retained-prefix ring sized too tightly for the narrow speculative
-  windows this release routes (fixed-W4 at every concurrency), so a retained
-  prefix could be recompressed and lose the positions it was supposed to keep.
-  The ring now carries two pending index-key groups for speculative widths from
-  2 up to the compression ratio, allocation still follows the launch maximum,
-  and an undersized or unresolved verify geometry is refused by the existing
-  guard rather than guessed. Group-partitioned layout from #40143 is preserved
+  sized its retained-prefix ring too tightly for the narrow speculative windows
+  produced by the optional `fixed-w4` width policy, so a retained prefix could be
+  recompressed and lose the positions it was supposed to keep. The ring now
+  carries two pending index-key groups for speculative widths from 2 up to the
+  compression ratio, allocation still follows the launch maximum, and an
+  undersized or unresolved verify geometry is refused by the existing guard
+  rather than guessed. Group-partitioned layout from #40143 is preserved. This
+  affects the `fixed-w4` choice; the public `tiered` default routes wider blocks
+  and was not the reported case
   ([`12476c9a3`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/12476c9a3cefcf940e8e972190f8cf190d686583)).
 - **Truncated hybrid-Mamba chunks end on a page boundary (#109).** A chunked
   prefill cut short by the KV budget — the normal case under four- and
@@ -65,30 +71,34 @@ publication happens through its own pull request at the release checkpoint.
   than a page of budget is parked and retried on the existing deferral path, and
   untruncated tails and full-attention profiles are untouched
   ([`ed54e16dc`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/ed54e16dc7064e5b57d1fcbd4e15365a577817a2)).
-- **Admission reopens when a running batch empties (#126, selected part).** The
-  scheduler latches "batch full" when there is no request-to-token row left to
-  allocate, and cleared that latch only when a batch shrank or when a
-  *prefill-only* batch came back empty. A batch that emptied through ordinary
-  decode was neither, and the rows that caused the latch can be handed back from
-  outside it — closing an idle streaming session frees its KV and its row and
-  touches nothing. Waiting requests then starved with a free pool. Any empty
-  batch now reopens admission; non-empty batches still reset only on a shrink,
-  so admission is not retried every step while the batch really is at capacity.
-  The rest of #126 (ownership and capacity handling) is **not** part of this
-  release ([`1a6d20827`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/1a6d2082766d3f11646bd972c1bc12effb304cb2)).
+- **Admission stops staying shut on an already-empty batch (#126, selected
+  part).** The scheduler latches "batch full" when there is no request-to-token
+  row left to allocate, and it cleared that latch only when the running batch
+  shrank or when an empty *prefill-only* batch came round. A batch that was
+  **already empty** clears neither test: there is no request left in it to leave,
+  so no shrink is ever seen, and the reset could not come from inside the batch.
+  Meanwhile the rows that produced the latch can be handed back from outside it -
+  closing an idle streaming session frees its KV and its row and touches nothing
+  - so waiting requests starved with a free pool. Any empty batch now reopens
+  admission. A batch that still holds requests resets only on a shrink, as
+  before, so admission is not retried every step while the batch really is at
+  capacity. The rest of #126 (ownership and capacity handling) is **not** part of
+  this release
+  ([`1a6d20827`](https://github.com/jpezzulli/sglang-rtxpro6000/commit/1a6d2082766d3f11646bd972c1bc12effb304cb2)).
 
-The QSA, NIXL, hybrid-prefill and admission fixes adapt accepted upstream work:
-sgl-project/sglang#46125 (andyl98), #46131 (AEGO-WRJ), #45607 (jongukc) and
-#46643 (aryatsc). Source notices and authorship stay with their commits.
-Features from #80 and the remaining #47 work are not included.
+The QSA, NIXL, hybrid-prefill and admission fixes adapt accepted upstream work
+(#46125, #46131, #45607 and #46643); the original authors and the adaptation are
+recorded in the commit messages and in [PROVENANCE.md](PROVENANCE.md). Features
+from #80 and the remaining #47 work are not included.
 
 ## DFlash2 maturity correction
 
 3.1.2 labelled both DFlash2 profiles experimental / alpha. That was wrong for
-27B: the 27B DFlash2 profile is the shipped 27B launch path, qualified on this
-hardware for reasoning, tools, images, long-context retrieval and cache restore,
-and it keeps its recipe and fixed block-8 width. Only the Flash-Next DFlash2
-profile, which is optional and has seen less field use, carries the
+27B: the 27B DFlash2 profile is the shipped 27B launch path, and the October 27
+checks on this candidate served it end to end with reasoning, tools, images,
+long-context retrieval and a fresh-process cache restore. It keeps its recipe and
+fixed block-8 width. Only the Flash-Next DFlash2 profile, which is optional, has
+seen less field use and was not requalified on this candidate, carries the
 experimental / alpha label
 ([README](README.md#dflash2-maturity), [RUN](RUN.md#launch-27b-with-dflash2),
 [limitations](LIMITATIONS.md)).
@@ -129,7 +139,8 @@ observations, not a matched-baseline speed-up claim.
 
 ## Validation
 
-Accepted on 2026-10-27 on the candidate source above:
+Accepted on 2026-10-27 on the candidate source above. Reused evidence, not rerun
+for the documentation-only parts of this release:
 
 - Integrated CPU suite: 409 tests with 404 subtests passed, 1 optional S3 check
   skipped. Each of the six fixes was reviewed individually and its patch matched
@@ -139,51 +150,54 @@ Accepted on 2026-10-27 on the candidate source above:
 - Real-CUDA coverage of the QSA fix used the production shape with retained
   prefix residues of 1, 2 and 3 tokens, partial acceptance and fused
   compression; the serving suite passed 9/9.
-- Both profiles passed 4/4 API probes, a sealed agentic run (6 turns, 5 tool
-  calls), image checks, and correct 63,906-token and 489,921-token retrieval.
-  Fresh-process 64K and 490K NIXL restores were correct on both: each returned
-  553,792 NIXL-backed KV tokens and 4 Mamba states, and the 27B profile
-  additionally 4,096 sliding-window tokens. Both restart restores are valid.
-  Repeat replays of the same prompt answered from the device cache rather than
-  four independent disk loads, so the disk-path evidence is the two restore
-  runs.
+- The maintained Flash-Next native-MTP profile and the 27B DFlash2 profile each
+  passed 4/4 API probes, a sealed agentic run (6 turns, 5 tool calls), image
+  checks, and correct 63,906-token and 489,921-token retrieval. The optional
+  Flash-Next DFlash2 profile was not requalified on this candidate.
+- Fresh-process 64K and 490K NIXL restores were correct on both of those
+  profiles: each returned 553,792 NIXL-backed KV tokens and 4 Mamba states, and
+  the 27B profile additionally 4,096 sliding-window tokens. Both restart restores
+  are valid. Repeat replays of the same prompt answered from the device cache
+  rather than four independent disk loads, so the disk-path evidence is the two
+  restore runs. The #115 decode-checkpoint arithmetic fix stays covered by its
+  CPU regression; an end-to-end restore is not a grid-scatter unit regression,
+  and no such isolated GPU check exists here.
 - Reasoning: all 36 measured requests completed naturally, with no confirmed
   loops and extended reasoning not penalized. Blind grading scored 95.36/100
   sequentially and 97.61/100 across three concurrent users on Flash-Next native
   MTP, and 98.67/100 and 99.23/100 on 27B DFlash2.
-- Tool calls are green with named deviations, not universally. Flash-Next
-  native MTP: 30/30 parseable, 29/30 strict-matcher, 26/30 automatic; the
-  automatic misses include scorer/date substring behaviour and a mock-router
-  response. 27B DFlash2: 30/30 scheduled, exact and parseable, 28/30 automatic —
-  two answers carried an invalid date and exhausted their 512-token ceiling
-  entirely inside reasoning with empty visible answers, and one invoice answer
-  added unwanted explanatory prose. The separate agentic and vision checks
-  passed.
+- Tool calls: Flash-Next native MTP 30/30 parseable, 29/30 strict-matcher, 26/30
+  automatic, with the four automatic misses coming from scorer/date substring
+  behaviour and a mock-router response rather than model call failures. 27B
+  DFlash2 30/30 scheduled, exact and parseable, 28/30 automatic: the two misses
+  are the invalid-date test cases, where the model issued the correct
+  `validate_date` calls and then used its entire 512-token output ceiling on
+  reasoning, so the final answer came back with an empty visible body. One
+  invoice request also returned unwanted explanatory prose alongside a correct
+  call. The separate agentic and vision checks passed.
 - Dated native decode and time-to-first-token measurements for both profiles are
-  in [RESULTS.md](RESULTS.md#penny-royal-313-october-27-2026). No new
-  qualification was run for the documentation-only parts of this release.
+  in [RESULTS.md](RESULTS.md#penny-royal-313-october-27-2026).
 
-Two things are recorded honestly as open rather than fixed:
+Two observations are recorded as open rather than fixed:
 
-- The first 27B four-request screen stopped with an Xid 109 GPU freeze. The
-  unchanged retry after a host reboot completed and is the accepted row. The
-  cause is unproven, so **no freeze fix is claimed**, and the detailed incident
-  note stays an internal observation.
-- Under host-cache pressure, state was evicted rather than retained purely on
-  the host. Host checkpoint reclamation and the NIXL disk-budget cleaner were
-  both active, so pure-host retention was not isolated on this candidate. This
-  outcome is accepted; it is not a blocker and not a testing instruction.
+- The first attempt at the 27B four-request screen on October 27, 2026 ended with
+  an Xid 109 GPU freeze. The unchanged retry completed and is the measurement that
+  was kept. The cause is unproven and 3.1.3 does not claim to fix it; the event
+  stays under observation.
+- Under host-cache pressure, state was evicted rather than retained purely on the
+  host. Host checkpoint reclamation and the NIXL disk-budget cleaner were both
+  active during that run, so pure-host retention was not isolated on this
+  candidate.
 
-No NVMe PLE serving qualification was run, and the GPU container smoke check is
-still pending under separate publication coordination — nothing here claims it
-passed.
+No NVMe PLE serving qualification was run, and the GPU container smoke check has
+not run yet.
 
 ## Thanks
 
-- [John Pezzulli](https://github.com/jpezzulli) — the Responses-API reasoning
+- [John Pezzulli](https://github.com/jpezzulli) - the Responses-API reasoning
   effort precedence fix.
-- [andyl98](https://github.com/andyl98), [AEGO-WRJ](https://github.com/AEGO-WRJ),
-  [jongukc](https://github.com/jongukc) and [aryatsc](https://github.com/aryatsc)
-  — the upstream corrections this release adapts.
-- [Penny Royal](mailto:Pennyroyal@agentmail.to) — the remaining five fixes,
+- [Penny Royal](mailto:Pennyroyal@agentmail.to) - the remaining five fixes,
   integration and this release's documentation.
+
+The upstream authors whose corrections were adapted here are credited in the
+commit messages and in [PROVENANCE.md](PROVENANCE.md).

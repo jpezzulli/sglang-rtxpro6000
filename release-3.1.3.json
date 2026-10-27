@@ -10,7 +10,8 @@
   "source": {
     "base": "742cbc5d6ea466d60280392e2dc232fa3079adfa",
     "candidate": "ef3258749bbe022e38a5b18922a0085320a59928",
-    "integrated_runtime_revision": "ef3258749bbe022e38a5b18922a0085320a59928",
+    "candidate_role": "Qualified candidate identity only: this commit still carries the 3.1.2 version and image assets, and the published tag and the image's own build source are recorded here when they exist.",
+    "integrated_runtime_revision": null,
     "runtime_code_parent": "1a6d2082766d3f11646bd972c1bc12effb304cb2",
     "release_tag": "pennyroyal-v3.1.3",
     "release_tag_status": "not yet published",
@@ -43,8 +44,8 @@
     "digest": null,
     "build_url": null,
     "promotion_url": null,
-    "source_revision": "ef3258749bbe022e38a5b18922a0085320a59928",
-    "note": "Image named by the release defaults in this branch; the build has not run, so the tag does not exist yet. Digest, build and promotion identities are recorded when the image is published."
+    "source_revision": null,
+    "note": "Image named by the release defaults in this branch; the build has not run, so the tag does not exist yet. The revision the image is actually built from is recorded here at build time with the digest and promotion identity, and is not assumed to be the candidate commit or the final tag."
   },
   "changes": [
     {
@@ -75,9 +76,9 @@
     {
       "commit": "12476c9a3cefcf940e8e972190f8cf190d686583",
       "issues": [123],
-      "summary": "QSA retains prefix index keys in narrow speculative windows: two pending index-key ring groups for speculative widths 2 through the compression ratio, allocation still tied to the launch maximum, undersized or unresolved verify geometry refused by the existing guard, and the group-partitioned layout from #40143 preserved. Adapts sgl-project/sglang#46125.",
+      "summary": "QSA keeps its retained prefix index keys in the narrow speculative windows produced by the operator-selected fixed-w4 width policy; the public default stays tiered. Two pending index-key ring groups for speculative widths 2 through the compression ratio, allocation still tied to the launch maximum, undersized or unresolved verify geometry refused by the existing guard, and the group-partitioned layout from #40143 preserved. Adapts sgl-project/sglang#46125.",
       "profiles": [
-        "Flash-Next QSA (narrow fixed-W4 speculative windows)"
+        "Flash-Next QSA under the optional fixed-w4 width policy"
       ]
     },
     {
@@ -91,14 +92,15 @@
     {
       "commit": "1a6d2082766d3f11646bd972c1bc12effb304cb2",
       "issues": [126],
-      "summary": "Drop the prefill-only qualifier on the empty-batch reset of the batch_is_full latch, so a running batch that emptied through ordinary decode reopens admission instead of starving while freed request-to-token rows sit unused. Non-empty batches still reset only on a shrink. This is the selected hunk of #126; the ownership and capacity changes are not included.",
+      "summary": "An already-empty running batch no longer keeps the batch_is_full latch. The latch was cleared only when the batch shrank or when an empty prefill-only batch came round; a batch that was already empty matches neither test, because it has no request left to leave, and the rows that produced the latch can be released from outside it (closing an idle streaming session frees the held KV and the request-to-token row and touches no latch), so waiting requests starved with a free pool. Any empty batch now reopens admission; a batch that still holds requests resets only on a shrink, as before. This is the selected hunk of #126; the ownership and capacity changes are not included.",
       "profiles": [
         "Scheduler admission, all profiles"
       ]
     },
     {
-      "commit": "ef3258749bbe022e38a5b18922a0085320a59928",
-      "summary": "Maturity labeling corrected in current guidance: 27B + DFlash2 is established and qualified, and only the optional Flash-Next next-dflash2 profile keeps the experimental / alpha label. The draft's additional host cache stays documented on both DFlash2 profiles, separate from maturity. Labels and documentation only - no setting, default, launch line, runtime module or test changed."
+      "commit": null,
+      "identity": "not yet assigned - publication preparation",
+      "summary": "Maturity labeling corrected in current guidance: 27B + DFlash2 is established and qualified, and only the optional Flash-Next next-dflash2 profile keeps the experimental / alpha label. The commit now at the head of the qualified candidate (ef3258749) is the change that added that label to both DFlash2 profiles; the correction itself is publication preparation for this release and is not given a revision here. The draft's additional host cache stays documented on both DFlash2 profiles, separate from maturity: no allocator change and no memory reduction is claimed. Labels and documentation only - no setting, default, launch line, runtime module or test changed."
     }
   ],
   "defaults_unchanged": {
@@ -109,21 +111,21 @@
     "note": "No settings or default changes in this release; the width-policy rows in RESULTS.md were measured with adaptive selected."
   },
   "validation": {
-    "focused_cpu_checks": "2026-10-27 on this candidate, CPU only: integrated suite passed 409 tests with 404 subtests and 1 optional S3 skip. Documentation and release-identity preparation reran the focused setup/recipe/version checks and pinned formatting without rerunning runtime qualification.",
+    "focused_cpu_checks": "Accepted Oct27 run on the candidate, CPU only: integrated suite passed 409 tests with 404 subtests and 1 optional S3 skip; not rerun for documentation work. Checked again in the source venv for the corrected records on 2026-10-27: 102 focused CPU tests with 42 subtests passed (36 config/setup/recipe checks plus 66 registered container-launch, startup-version and release-routing checks). Pinned Black 26.1.0 and codespell 2.4.1 report no changes on the edited files. Runtime qualification was not rerun.",
     "review": "Each of the six fixes was reviewed individually and accepted; exact patch-id equality with the accepted contributions was verified.",
     "regression": "The focused regressions for #109, #122, #123, #124 and the Responses effort fix are red on the 742cbc5 base and green with the fix.",
-    "cuda_regression": "Fixed-W4 QSA coverage ran on the production shape with retained-prefix residues of 1, 2 and 3 tokens, partial acceptance and fused compression; serving checks passed 9/9.",
-    "api_probes": "Both profiles passed 4/4 API probes, a sealed agentic run of 6 turns with 5 tool calls, vision checks, and correct 63,906-token and 489,921-token retrieval.",
-    "cache_restore": "Fresh-process 64K and 490K NIXL restores were correct on both profiles: 553,792 NIXL-backed KV tokens plus 4 Mamba states each, and additionally 4,096 sliding-window tokens on 27B. Both restart restores are valid. Duplicate replays answered from the device cache rather than four independent disk loads.",
+    "cuda_regression": "QSA coverage for the narrow-window case ran on the production shape under the optional fixed-w4 policy, with retained-prefix residues of 1, 2 and 3 tokens, partial acceptance and fused compression; serving checks passed 9/9.",
+    "api_probes": "The two profiles this candidate carries day to day - Flash-Next native MTP and 27B DFlash2 - each passed 4/4 API probes, a sealed agentic run of 6 turns with 5 tool calls, vision checks, and correct 63,906-token and 489,921-token retrieval. The optional Flash-Next DFlash2 profile was not requalified on this candidate.",
+    "cache_restore": "Fresh-process 64K and 490K NIXL restores were correct on Flash-Next native MTP and on 27B DFlash2: 553,792 NIXL-backed KV tokens plus 4 Mamba states each, and additionally 4,096 sliding-window tokens on 27B. Both restart restores are valid. Duplicate replays answered from the device cache rather than four independent disk loads. These are end-to-end restore results, not a dedicated checkpoint-grid scatter regression.",
     "reasoning": "All 36 measured requests completed naturally with no confirmed loops; extended reasoning is not penalized. Blind scores: Flash-Next native MTP 95.36 (sequential) and 97.61 (three concurrent users); 27B DFlash2 98.67 and 99.23.",
-    "tools": "Not universal. Flash-Next native MTP: 30/30 parseable, 29/30 strict, 26/30 automatic; automatic misses include scorer/date substring behavior and mock-router behavior. 27B DFlash2: 30/30 scheduled, exact and parseable, 28/30 automatic; two invalid-date answers exhausted 512 tokens entirely in reasoning with empty visible answers, and one invoice answer added unwanted explanatory prose. Agentic and vision checks passed separately.",
+    "tools": "Counts with exceptions, not a blanket pass. Flash-Next native MTP: 30/30 calls parseable, 29/30 strict-matcher, 26/30 automatic; the four automatic misses come from scorer/date substring behaviour and mock-router behaviour rather than model call failures. 27B DFlash2: 30/30 scheduled, exact and parseable, 28/30 automatic; the two misses are the invalid-date test cases, where the model issued the correct validate_date calls and then used its whole 512-token output ceiling on reasoning, returning a final answer with an empty visible body. One invoice request also returned unwanted explanatory prose alongside a correct call. Agentic and vision checks passed separately.",
     "benchmarks": "Dated native mean/peak rates and cold TTFT for this candidate are recorded in RESULTS.md with the measured policy, configuration, source and interval counts. No matched-baseline speed-up claim is made and no new performance default changed.",
     "nvme_serving": "not run",
-    "container_build": "Pending. The GPU container smoke check is still pending under separate publication coordination and is not claimed as passed here.",
+    "container_build": "Not run. The GPU container smoke check has not run either, so no container or image verification is claimed here.",
     "exceptions": [
-      "The first 27B four-request screen stopped with an Xid 109 GPU freeze; the unchanged retry after a host reboot completed. Cause unproven, no freeze fix claimed, detailed incident note kept as an internal observation.",
-      "Cache-pressure eviction rather than pure-host retention was accepted; host checkpoint reclamation and the disk-budget cleaner were both in play, so pure-host retention was not isolated. Not a blocker and not a testing instruction.",
-      "The on-GPU DFlash2 checkpoint-grid resume is still not exercised on either DFlash2 profile; the #115 arithmetic fix remains CPU-regression-covered."
+      "The first attempt at the 27B four-request screen on 2026-10-27 ended with an Xid 109 GPU freeze; the unchanged retry completed and is the recorded measurement. Cause unproven, no freeze fix claimed, event still under observation.",
+      "Under host-cache pressure, state was evicted rather than retained purely on the host. Host checkpoint reclamation and the NIXL disk-budget cleaner were both active during that run, so pure-host retention was not isolated on this candidate.",
+      "The #115 decode-checkpoint arithmetic remains covered by its 3.1.2 CPU regression. The Oct27 restore results are end-to-end, not a grid-scatter unit regression, and no isolated GPU check of that path exists on either DFlash2 profile. The optional Flash-Next DFlash2 profile was not requalified on this candidate."
     ]
   },
   "contributors": [

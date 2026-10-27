@@ -29,8 +29,9 @@ correctness fixes over the 3.1.2 source: Anthropic thinking accepted without a
 API outranking the launch default, incomplete NIXL file-backed restores refused
 instead of trusted (#122), QSA retained prefix keys in narrow speculative
 windows (#123), truncated hybrid-Mamba prefill chunks ending on a KV page
-boundary (#109), and scheduler admission reopening when a running batch empties
-(#126, selected part; the ownership and capacity work is not included). It also
+boundary (#109), and admission no longer staying shut on an already-empty
+running batch (#126, selected part; the ownership and capacity work is not
+included). It also
 corrects one maturity label: **27B + DFlash2 is established and qualified**, and
 only the optional Flash-Next `next-dflash2` profile stays experimental / alpha.
 The draft's additional host cache is documented on both DFlash2 profiles and is
