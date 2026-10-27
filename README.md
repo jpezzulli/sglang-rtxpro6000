@@ -44,14 +44,18 @@ hardware validation. See the
 
 <a id="dflash2-maturity"></a>
 
-> **DFlash2 maturity.** Penny's DFlash2 integration — both the Flash-Next and
-> 27B profiles — is **experimental / alpha**: available and supported for
-> experimentation, not yet a validated production path. The throughput, prefill
-> and qualification numbers below are specific measured runs, not a correctness
-> guarantee for every configuration. Issue #115 fixes the decode-checkpoint
-> (Mamba `extra_buffer` / `extra_buffer_lazy`) arithmetic and is covered by a
-> CPU regression, but the on-GPU checkpoint resume is not yet verified. The
-> DFlash2 draft also allocates additional host DRAM; see the
+> **DFlash2 maturity.** The **27B DFlash2 profile is established and qualified**:
+> it is 27B's speculative path here, qualified on this hardware for reasoning,
+> tools, images, long-context retrieval and cache restore, and it keeps its
+> recipe and fixed block-8 width. Only the **Flash-Next DFlash2 profile
+> (`next-dflash2`) is experimental / alpha** — fully available to opt into,
+> still newer in the field, and not yet tested on two-GPU hardware. Every number
+> below is a specific measured run, not a correctness guarantee for every
+> configuration. Issue #115 fixes the decode-checkpoint (Mamba `extra_buffer` /
+> `extra_buffer_lazy`) arithmetic and is covered by a CPU regression; the
+> on-GPU checkpoint-grid resume itself is still not exercised. The draft's extra
+> host DRAM is a separate matter from maturity and applies to both DFlash2
+> profiles: see the
 > [configuration reference](CONFIGURATION.md#capacity-and-memory).
 
 <a id="hicache-and-nixl"></a>
@@ -113,7 +117,7 @@ images, HiCache RAM prefix caching, and optional NIXL disk caching.
 | Model | Weights | Speculative decoding | Checkpoints |
 |---|---|---|---|
 | **Qwen3.8 Flash-Next** | NVFP4 experts, automatic FP8 dense layers on SM120 | Maintained native NEXTN MTP with FR-Spec is the default, width routed by batch size (block 8 at C1, block 4 at C2+); **experimental / alpha** DFlash2 opt-in profile (separate draft model, FR-Spec, block 6 at C1 / block 4 at C2+) verifies draft tokens with FlashInfer | [Our OrcaRouter ModelOpt conversion](https://huggingface.co/jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4) · [RadixArk](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) · [Flash-Next DFlash2 draft](https://huggingface.co/incoai/Qwen3.8-Flash-Next-DFlash2) |
-| **Qwen3.8-27B** | FP8 | DFlash2 (**experimental / alpha** integration), with a separate draft model at fixed block 8 | [Qwen FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) · [DFlash2 draft](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2) |
+| **Qwen3.8-27B** | FP8 | DFlash2 (established and qualified integration), with a separate draft model at fixed block 8 | [Qwen FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) · [DFlash2 draft](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2) |
 
 I personally run Flash-Next on **one RTX PRO 6000 at C=6**, with **524,288-token
 context** and the KV pool sized automatically from profiled memory; the final
@@ -281,7 +285,17 @@ slimmer and easier to download.
 | Profile | Default host cache | Additional model-related host memory |
 |---|---|---|
 | Flash-Next | 32 GB HiCache | About 48 GiB for RAM-backed PLE |
-| 27B/DFlash2 | 96 GB HiCache | Loading and runtime allocations |
+| Flash-Next/DFlash2 | 32 GB HiCache | The draft's own host cache, on top of the target's budget |
+| 27B/DFlash2 | 96 GB HiCache | Draft cache plus loading and runtime allocations |
+
+A DFlash2 draft keeps a host cache of its own that is **additional to** the
+HiCache figure above, so size host RAM from what a boot reports rather than
+from the HiCache setting alone. The recorded 27B launch spent 79.45 GB of
+target KV plus 16.63 GB of Mamba state - the 96 GB target/Mamba budget - and a
+further 24.83 GB of draft sliding-window cache, about 120.91 GB of caches
+before other process memory. This release documents that bill; it does not
+reduce it. See [limitations](LIMITATIONS.md) and the
+[configuration reference](CONFIGURATION.md#capacity-and-memory).
 
 Leave room for the operating system and model loading. You can
 [change the RAM cache size](RUN.md#choose-hicache-ram-size), or move Flash-Next's

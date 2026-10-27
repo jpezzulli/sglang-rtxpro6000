@@ -42,7 +42,10 @@ is copied out of the image and no image rebuild is needed.
   draft.
 - Writable cache directories owned by the UID/GID you will run as.
 - Enough host RAM: Flash-Next defaults to 32 GB HiCache plus about 48 GiB RAM
-  PLE; 27B defaults to 96 GB HiCache. Leave room for loading and the OS.
+  PLE; 27B defaults to 96 GB HiCache. On either DFlash2 profile the draft keeps
+  its own host cache on top of that figure - the recorded 27B launch spent about
+  96 GB of target KV and Mamba state plus a further 24.83 GB of draft cache, so
+  roughly 121 GB of caches. Leave room for loading and the OS.
 - If using NIXL, a local filesystem supporting its O_DIRECT/io_uring path.
 
 <a id="configure-and-start"></a>
@@ -90,12 +93,15 @@ PLE placement and image preprocessing are in this startup file.
 | Flash-Next, native NEXTN MTP with FR-Spec (default, qualified) | `config/start-flash-next-frspec.sh` |
 | Flash-Next without FR-Spec | `config/start-flash-next.sh` |
 | Flash-Next with DFlash2 + FR-Spec + FlashInfer verify (optional, **experimental / alpha**) | `config/start-flash-next-dflash2.sh` |
-| 27B FP8 with DFlash2 (**experimental / alpha**) | `config/start-27b-dflash2.sh` |
+| 27B FP8 with DFlash2 (established and qualified) | `config/start-27b-dflash2.sh` |
 
 The native-MTP profiles are the maintained default with their existing
-recipes; the DFlash2 profiles are **experimental / alpha** but supported and
+recipes, and 27B with its DFlash2 draft is the established, qualified 27B path.
+The Flash-Next DFlash2 profile is **experimental / alpha** but supported and
 fully available for experimentation (see
-[DFlash2 maturity](../../README.md#dflash2-maturity)). An explicitly saved
+[DFlash2 maturity](../../README.md#dflash2-maturity)). Either DFlash2 startup
+file also needs the draft checkpoint mounted, and the draft's host cache sits
+**on top of** the HiCache figure in the startup file. An explicitly saved
 profile choice is always preserved.
 
 For TP2, `TP_SIZE` does not grant GPU access: expose both RTX PRO 6000 GPUs

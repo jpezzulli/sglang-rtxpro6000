@@ -73,7 +73,7 @@ and manage the files yourself. Restart the server to apply changed settings.
   (`next`, the default for new setups) or without it (`next-plain`),
   Flash-Next with the DFlash2 draft and the FR-Spec map
   (`next-dflash2`, **experimental / alpha**), or 27B with its DFlash2 draft
-  (`27b`, also **experimental / alpha** — see
+  (`27b`, the established and qualified 27B path — see
   [DFlash2 maturity](README.md#dflash2-maturity)).
   Every profile keeps its existing recipe, and an explicitly saved
   choice is never rewritten by the default. The two DFlash2 profiles need both
@@ -85,7 +85,9 @@ and manage the files yourself. Restart the server to apply changed settings.
 - **GPUs:** choose the inference device(s), TP size and optional image-processing
   device. TP2 needs two RTX PRO 6000 inference GPUs; a sidecar remains separate.
 - **HiCache:** RAM prefix-cache size in decimal GB. Profile defaults are 32 GB
-  for Flash-Next and 96 GB for 27B.
+  for Flash-Next and 96 GB for 27B. On either DFlash2 profile the draft keeps
+  its own host cache on top of that figure, so the saved number is not the whole
+  RAM bill.
 - **KV pool:** automatic on every profile — leave `MAX_TOTAL_TOKENS` blank and
   the engine sizes the shared pool from the memory it profiles. A deliberate
   cap is preserved and reaches the server on all four profiles; it must be
