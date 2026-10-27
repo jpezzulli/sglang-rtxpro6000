@@ -59,7 +59,7 @@ RECIPE_BY_PROFILE = {
 PROFILE_LABEL = {
     "next": "Flash-Next NVFP4 + FR-Spec/native NEXTN MTP (default)",
     "next-plain": "Flash-Next NVFP4 + native NEXTN MTP without FR-Spec",
-    "next-dflash2": "Flash-Next NVFP4 + DFlash2 (DFLASH, FR-Spec, routed widths)",
+    "next-dflash2": "Flash-Next NVFP4 + DFlash2 (DFLASH, FR-Spec, routed widths) (alpha)",
     "27b": "Qwen3.8-27B FP8 + DFlash2",
 }
 # The --hicache-size literals the serve recipes pass when the operator
@@ -72,7 +72,7 @@ PROFILE_HICACHE_SIZE_GB = {
     "27b": "96",
 }
 CONTAINER_MODELS_TARGET = "/models"
-DEFAULT_IMAGE = "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.2"
+DEFAULT_IMAGE = "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3"
 COMPOSE_RELPATH = "docker/pennyroyal/compose.yaml"
 # The accepted manual container path: an ordinary host run.sh plus a mounted,
 # user-editable directory of SGLang startup scripts and NIXL TOMLs. The beta

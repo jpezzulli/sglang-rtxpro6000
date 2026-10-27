@@ -1,5 +1,55 @@
 # Penny Royal release history
 
+## 3.1.3 — Six correctness fixes and the 27B DFlash2 maturity correction (draft)
+
+Publication of this patch is still pending: draft notes, no approval, no tag,
+no image build.
+
+- Anthropic requests that enable thinking without `budget_tokens` are accepted
+  and use the ordinary reasoning-enabled conversion; an explicit budget is still
+  validated (issue #124).
+- A `reasoning.effort` supplied on a `/v1/responses` request now outranks the
+  effort the server launched with; omitted or null effort, nested overrides,
+  summary-only defaults and thinking-off controls are unchanged (John Pezzulli).
+- NIXL FILE restores are validated against the host-buffer byte count before the
+  read, so a missing, empty or short object is a lookup miss and the request
+  recomputes instead of continuing on partial state (issue #122, adapts upstream
+  #46131).
+- QSA keeps its retained prefix index keys in the narrow speculative windows the
+  optional `fixed-w4` policy produces: two pending ring groups for widths 2
+  through the compression ratio, allocation still tied to the launch maximum,
+  group-partitioned layout from #40143 kept; the public `tiered` default routes
+  wider blocks (issue #123, adapts upstream #46125).
+- A hybrid-Mamba prefill chunk truncated by the KV budget now ends on a page
+  boundary, so a cached state is never keyed shorter than the prefix it
+  summarizes and another request cannot resume from state carrying its tokens
+  (issue #109, restates upstream #45607 against this fork).
+- An already-empty running batch no longer holds the "batch full" latch. The
+  latch was cleared on a batch shrink or for an empty prefill-only batch, so a
+  batch that was already empty kept it - and its rows can be freed from outside
+  the batch, by closing an idle streaming session, leaving waiting requests
+  starved with a free pool. Any empty batch now reopens admission; batches that
+  still hold requests reset on a shrink as before. This is the selected hunk of
+  #126; the ownership and capacity handling in that issue is not included (adapts
+  upstream #46643).
+- Maturity labeling corrected in current guidance: 27B with DFlash2 is
+  established and qualified, and only the optional Flash-Next `next-dflash2`
+  profile keeps the experimental / alpha label. The draft's host cache stays
+  documented as additional on both DFlash2 profiles - the recorded 27B launch
+  spent 79.45 GB of target KV plus 16.63 GB of Mamba state and a further 24.83 GB
+  of draft sliding-window cache, about 120.91 GB of caches before other process
+  memory - and no allocator change is included.
+- Dated native decode, time-to-first-token, cache-restore, reasoning and tool
+  measurements for this candidate are recorded in
+  [RESULTS.md](RESULTS.md#penny-royal-313-october-27-2026), with the Xid 109
+  freeze that ended the first 27B four-request screen recorded as unproven rather
+  than fixed.
+
+No setting or default changed: the public native-MTP width policy stays `tiered`
+and the launcher reasoning-effort default stays `medium`. See the
+[3.1.3 release notes](RELEASE_NOTES_3.1.3.md) and
+[machine-readable record](release-3.1.3.json).
+
 ## 3.1.2 — MTP width-policy setting, DFlash2 checkpoint fix, alpha labeling
 
 - `PENNY_MTP_POLICY` is now the one public setting for the maintained

@@ -38,7 +38,7 @@ Select the profile with `PENNYROYAL_PROFILE`. Values marked *pinned* are fixed
 in that recipe's launch line; a saved override for them does not reach the
 server.
 
-| | `next-dflash2` (experimental / alpha) | `27b` (experimental / alpha) | `next` (default) | `next-plain` |
+| | `next-dflash2` (experimental / alpha) | `27b` (established and qualified) | `next` (default) | `next-plain` |
 |---|---|---|---|---|
 | Target | OrcaRouter ModelOpt NVFP4 Flash-Next | Qwen3.8-27B FP8 | Flash-Next NVFP4 | Flash-Next NVFP4 |
 | Draft | `incoai/Qwen3.8-Flash-Next-DFlash2`, BF16 unquantized | `incoai/Qwen3.8-27B-DFlash2` | none (in-checkpoint NEXTN head) | none |
@@ -120,7 +120,7 @@ no JSON to copy, no launch flag to keep in step and no wizard run needed.
 |---|---|---|
 | `TARGET_MODEL` | required | Target checkpoint directory (native: absolute or relative to `REPO_ROOT`; container: the path inside `/models`). |
 | `DRAFT_MODEL` | required for `27b` and `next-dflash2` | Separate DFlash2 draft checkpoint. It is a distinct download from the target; the native-MTP profiles need no draft. |
-| `PENNYROYAL_PROFILE` | `next` | New setups default to the maintained native-MTP Flash-Next profile with FR-Spec (`next-plain` is the same without the map). `next-dflash2` keeps its existing recipe and stays available as an **experimental / alpha** opt-in (see [README](README.md#dflash2-maturity)); saved profile choices are always preserved. |
+| `PENNYROYAL_PROFILE` | `next` | New setups default to the maintained native-MTP Flash-Next profile with FR-Spec (`next-plain` is the same without the map). `next-dflash2` keeps its existing recipe and stays available as an **experimental / alpha** opt-in; `27b` keeps the same recipe and is **established and qualified** - it carries no alpha label (see [README](README.md#dflash2-maturity)); saved profile choices are always preserved. |
 | `REPO_ROOT` / `VENV_PATH` | native: your checkout and its `.venv` | Recipes use `$REPO_ROOT/.venv/bin/sglang` and its Python. |
 | `SGLANG_EXE` / `PYTHON` | derived | Overrides for an environment outside the checkout. |
 | `CACHE_BASE` | native `~/.cache/pennyroyal`; container `/cache` mount | Compiler/JIT and runtime caches; recipes create subdirectories. WSL2 note below. |
@@ -144,12 +144,17 @@ no JSON to copy, no launch flag to keep in step and no wizard run needed.
 **The DFlash2 draft's host cache is extra to the target's HiCache tier.** On the
 DFlash2 profiles the draft keeps its own host-side state in addition to the
 `PENNY_HICACHE_SIZE_GB` pool, so that number is not the whole host-memory bill:
-in our measured 32 GB setup the draft cache added about 22 GB, roughly 54 GB of
-caches before the PLE table and the rest of the process. The actual amount
-scales with the target's logical slots and the draft's geometry, so size host
-RAM from what the boot reports rather than from the HiCache setting alone. We
-will look into optimizing this soon if we can prove any speed increases with
-DFlash2 vs native MTP.
+in our measured 32 GB Flash-Next setup the draft cache added about 22 GB,
+roughly 54 GB of caches before the PLE table and the rest of the process, and
+one contributor reported a 48 GB target budget plus a further 32.9 GB of draft
+cache with the host swapping. On 27B the recorded launch allocated 79.45 GB of
+target KV plus 16.63 GB of Mamba state - the 96 GB target/Mamba budget - and a
+further 24.83 GB of draft sliding-window cache, about 120.91 GB of caches
+before other process memory. The actual amount scales with the target's logical
+slots and the draft's geometry, so size host RAM from what the boot reports
+rather than from the HiCache setting alone. This release documents the bill and
+changes no allocator: we will look into optimizing this soon if we can prove
+any speed increases with DFlash2 vs native MTP.
 
 ## GPUs, TP and media
 
@@ -192,7 +197,7 @@ DFlash2 vs native MTP.
 
 | Setting | Default | Notes |
 |---|---|---|
-| `PENNYROYAL_IMAGE` / `--image` | `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.2` | An explicit pin survives every later setup save: update it to the new tag to upgrade (in an edited `run.sh`, keep the `IMAGE=` assignment — the script runs under `set -u`; in saved setup settings or the Compose `.env` you may instead delete the line to follow the launcher default). Startup files belong to their release's image. |
+| `PENNYROYAL_IMAGE` / `--image` | `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3` | The 3.1.3 image is named by these defaults while its build is pending; see [release-3.1.3.json](release-3.1.3.json) for the published identity. An explicit pin survives every later setup save: update it to the new tag to upgrade (in an edited `run.sh`, keep the `IMAGE=` assignment — the script runs under `set -u`; in saved setup settings or the Compose `.env` you may instead delete the line to follow the launcher default). Startup files belong to their release's image. |
 | `PENNYROYAL_PORT` / `--port` | 8001 | Published API port. |
 | `PENNYROYAL_USER` / `--user`, `USER_ID`/`GROUP_ID` | `1000:1000` | Numeric identity that must own the writable cache mounts. |
 | `PENNYROYAL_STARTUP` / `--startup` | `config/start-flash-next-frspec.sh` | Selected host startup file; the whole directory is mounted read-only at `/config`. |
@@ -233,8 +238,8 @@ instead of a startup script.
   one running request, block 4 at two or more, from the pinned policy), remain
   the default for new setups, and keep receiving updates; `next-dflash2` is
   the **experimental / alpha** opt-in alternative, verified through FlashInfer's
-  SM120 kernel, and carries the same maturity label as the `27b` DFlash2 profile
-  (see [README](README.md#dflash2-maturity)). The concurrency width is the one
+  SM120 kernel, while `27b` DFlash2 is **established and qualified** and carries
+  no alpha label (see [README](README.md#dflash2-maturity)). The concurrency width is the one
   thing on these profiles an operator can pick, with `PENNY_MTP_POLICY`, and
   leaving it unset launches exactly what it launched before the setting existed.
 

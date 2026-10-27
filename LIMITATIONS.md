@@ -159,13 +159,21 @@ v2.3 installation does not need this maintenance update urgently.
   completed-request rates.
 - DFlash2 and native-MTP acceptance vary with content and context and explain a
   large part of throughput variation.
-- Penny's DFlash2 integration is **experimental / alpha** on both the Flash-Next
-  and 27B profiles: available for experimentation, but the decode-checkpoint
-  (Mamba `extra_buffer` / `extra_buffer_lazy`) path and the draft's extra host
-  DRAM need explicit validation on your hardware. The 3.1.2 checkpoint
-  arithmetic fix (#115) is CPU-regression-covered; the on-GPU checkpoint resume
-  is not yet verified. This is a maturity label, not a toggle or an automatic
-  fallback to native MTP. See
+- The **Flash-Next DFlash2 profile (`next-dflash2`) is experimental / alpha**:
+  available for experimentation, but still newer in the field, untested on
+  two-GPU hardware, and not requalified on the October 27 candidate. The **27B
+  DFlash2 profile is established and qualified** and carries no alpha label; on
+  that candidate it served the reasoning, tool, image and long-context checks and
+  restored a fresh-process cache end to end, and it remains 27B's speculative path
+  here. The #115 decode-checkpoint (Mamba `extra_buffer` /
+  `extra_buffer_lazy`) arithmetic is covered by its 3.1.2 CPU regression; an
+  end-to-end restore is not a grid-scatter unit regression, and no isolated GPU
+  check of that path exists on either DFlash2 profile. On both profiles the
+  draft's extra host DRAM is a real cost that is separate from maturity - the
+  recorded 27B launch spent 79.45 GB of target KV plus 16.63 GB of Mamba state and
+  a further 24.83 GB of draft sliding-window cache, about 120.91 GB of caches
+  before other process memory. Nothing here is a toggle or an automatic fallback to
+  native MTP, and no allocator change is included. See
   [DFlash2 maturity](README.md#dflash2-maturity).
 - The 27B community comparison is directional. Checkpoint, runtime,
   speculation, power, client, prompt, duration, and cache/offload differ.

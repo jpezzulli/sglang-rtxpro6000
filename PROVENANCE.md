@@ -6,15 +6,21 @@
 |---|---|
 | Upstream | `https://github.com/sgl-project/sglang.git` |
 | Public documentation and distribution branch | `pennyroyal-main-sm120-final`; continues above the runtime release tag |
+| Current release | 3.1.3 - draft: not approved, not published, container build pending |
+| Qualified candidate source | `ef3258749bbe022e38a5b18922a0085320a59928`, with runtime-code parent `1a6d2082766d3f11646bd972c1bc12effb304cb2`. This is the identity the October 27 checks were run on; it still carries the 3.1.2 version and image assets, so it is not by itself the published or built source. |
+| Published / built source | Not yet assigned. The revision the image is built from is recorded as an OCI source revision in [release-3.1.3.json](release-3.1.3.json) when the build runs; it need not be the final tag, which may add publication documentation on top of it. |
+| Release tag | `pennyroyal-v3.1.3` planned; the tag does not exist until publication |
+| Container image | `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3` named by the launch defaults; digest, build and promotion identities are open until the image is published |
+| Previously published release | `pennyroyal-v3.1.2` at `742cbc5d6ea466d60280392e2dc232fa3079adfa`, image digest recorded in [release-3.1.2.json](release-3.1.2.json) |
 | Core runtime source | `69583da7c71b87ac36371333a19f2749bab72773` |
-| Complete release source | Exact commit selected by `pennyroyal-v2.5.3`, including release packaging updates |
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Latest runtime additions | NEXTN checkpoint selection, BF16 NVMe PLE staging, streaming tools, prompt encoding and cache persistence |
-| Dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.5.3 Python/JIT source |
-| Release | v2.5.3 |
-| Release tag | `pennyroyal-v2.5.3` |
-| Container build source | Exact commit selected by the release tag; also recorded in the image's OCI revision label |
-| Container image | `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3`; published after a successful build, with its digest recorded by the [release workflow](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml) |
+| Latest runtime additions | Anthropic thinking-budget acceptance, Responses reasoning-effort precedence, NIXL file-restore validation, QSA retained-prefix ring sizing, hybrid truncated-chunk page alignment and empty-batch admission-latch recovery (3.1.3, adapted from upstream #46125, #46131, #45607 and #46643 with authorship recorded in the commits); NEXTN checkpoint selection and width-policy selection (3.1.2); earlier rows below |
+| Dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.5.3 Python/JIT source; the FlashInfer `0.7.0.post1` CUDA-13 set below arrived with v3.0.0. This candidate changes no dependency pin, and `python/requirements*`, `python/pyproject*.toml`, `docker/pennyroyal/constraints.txt` and `scripts/pennyroyal/flashinfer/` are unchanged since `pennyroyal-v3.1.0` |
+| Container build source | The image OCI revision label identifies the actual build source and is recorded in the release JSON. The final release tag may additionally contain publication documentation; it is not assumed to equal the image build source. |
+
+The current release records are in [release-3.1.3.json](release-3.1.3.json) and
+[RELEASE_NOTES_3.1.3.md](RELEASE_NOTES_3.1.3.md). Each release section below is
+dated history and keeps the identity it was released with.
 
 The release includes launch recipes, documentation, and measurement summaries.
 v2.5.3 keeps the v2.5.0 dependency stack, optional Flash-Next online FP8 and

@@ -11,6 +11,92 @@ keeps credited external field reports separate from our measurements, including
 week-long agentic use, Max-Q, both model profiles and multi-GPU deployments.
 The older H3PO raw table remains at its existing link.
 
+## Penny Royal 3.1.3 (October 27, 2026)
+
+Measured on the 3.1.3 candidate source `ef3258749b` (runtime-code parent
+`1a6d208276`) on one RTX PRO 6000 Blackwell (TP1), 524,288-token context, on the
+two profiles this candidate carries day to day: the maintained Flash-Next
+native-MTP profile and 27B FP8 with DFlash2. Means are elapsed-weighted over complete native decode
+intervals, peaks are the highest eligible native sample from the same windows,
+reasoning is included, and C4/C6 figures are full-batch aggregates. Rates use
+the actual launched configuration, named in each row.
+
+### Decode rates
+
+| Profile / workload | Mean tok/s | Sampled peak tok/s | Intervals | Configuration |
+|---|---:|---:|---:|---|
+| Flash-Next native MTP, single request | **209.75** | **299.44** | 127 | `PENNY_MTP_POLICY=adaptive`, xhigh, 6 requests / 36 Mamba slots, 32 decimal GB HiCache |
+| Flash-Next native MTP, full C4 aggregate | **510.02** | **691.71** | 188 | as above |
+| Flash-Next native MTP, full C6 aggregate | **461.90** | **572.34** | 111 | as above |
+| 27B DFlash2, single request, fixed W8 | **116.99** | **205.02** | 128 | xhigh, 4 requests / 24 Mamba slots, 96 decimal GB HiCache, FP32 Mamba state, 2,048-token draft window, 1,466,304-token automatically sized KV pool |
+| 27B DFlash2, full C4 aggregate (accepted retry) | **404.3877** | **538.55** | 135 | as above; 159.876 eligible seconds |
+
+The 27B C4 row is the accepted retry of the first attempt on October 27, 2026:
+all four requests completed naturally, 72,007 generated tokens between them.
+That run's 201.86-second client batch wall time is a separate end-to-end
+measurement and is not a native decode rate. The public width-policy default is
+still `tiered` (block 8 at one request, block 4 at two or more) and the
+Flash-Next rows here were measured with `adaptive` selected locally, so no row
+here is a matched-baseline comparison and no speed-up is claimed. The 27B rows
+use the same fixed block-8 shape as the 3.1 record.
+
+| Cold prompt time to first token | Flash-Next native MTP | 27B DFlash2 |
+|---|---:|---:|
+| 63,906 tokens | 4.50 s | 10.61 s |
+| 489,921 tokens | 59.05 s | 296.77 s |
+
+Client-measured first token on cold prompts, from the same launches. The dated
+prefill-throughput rows in the 3.1 section below stay as recorded; these are the
+request-side costs of this candidate's launches.
+
+### Correctness, cache and behaviour on this candidate
+
+- Integrated CPU suite: 409 tests and 404 subtests passed, with 1 optional S3
+  check skipped. Each of the six fixes was also reviewed individually, and its
+  patch matched the accepted contribution exactly.
+- The Flash-Next native-MTP profile and the 27B DFlash2 profile each passed 4/4
+  API probes, a sealed agentic run (6 turns, 5 tool calls), image checks, and
+  correct 63,906-token and 489,921-token retrieval. The optional Flash-Next
+  DFlash2 profile was not requalified on this candidate.
+- Fresh-process restore was correct on both of those profiles: each returned
+  553,792 NIXL-backed KV tokens and 4 Mamba states, the 27B profile additionally
+  4,096 sliding-window attention tokens, and both restores after a restart are
+  valid. The repeat replays of the same prompt answered from the device cache
+  rather than four independent disk loads, so disk-path evidence is the two
+  restore runs, not the replay count.
+- The narrow fixed-W4 QSA path passed its real CUDA regression (production QSA
+  shape, retained-prefix residues of 1, 2 and 3 tokens, partial acceptance,
+  fused compression) and the 9/9 serving checks. `fixed-w4` is the operator-selected
+  width policy; the public default remains `tiered`.
+- Reasoning: all 36 measured requests completed naturally, with no confirmed
+  loops and extended reasoning not penalized. Blind grading scored 95.36/100
+  sequentially and 97.61/100 across three concurrent users on Flash-Next native
+  MTP, and 98.67/100 and 99.23/100 on 27B DFlash2. These are this suite's
+  scores; the 3.1-era figures in the sections below come from a different suite
+  run and the two are not directly comparable.
+- Tool calls: Flash-Next native MTP 30/30 parseable, 29/30 strict-matcher, 26/30
+  automatic. The four automatic misses are scorer/date substring behaviour and
+  mock-router behaviour, not model call failures. 27B DFlash2 30/30 scheduled,
+  exact and parseable, 28/30 automatic: the two failures are the invalid-date test
+  cases, where the model issued the correct `validate_date` calls and then spent
+  its entire 512-token output ceiling on reasoning, so the final answer came back
+  with an empty visible body; one invoice request also returned unwanted
+  explanatory prose alongside a correct call. The separate agentic and vision
+  checks passed.
+
+### Recorded exceptions
+
+- The first 27B C4 screen on October 27, 2026 stopped with an Xid 109 GPU freeze.
+  The unchanged retry completed and is the accepted row. The cause is unproven and
+  nothing in 3.1.3 fixes it, so no freeze fix is claimed here; the detailed
+  incident note is kept internally.
+- Under host-cache pressure, state was evicted rather than retained purely on the
+  host. Host checkpoint reclamation and the NIXL disk-budget cleaner were both in
+  play, so pure-host retention was not isolated on this candidate. Both restart
+  restores above are valid.
+- No NVMe PLE serving qualification was run for this release, and the GPU
+  container smoke check has not run yet.
+
 ## Penny Royal 3.1
 
 Penny Royal 3.1.0. Recorded October 2026
