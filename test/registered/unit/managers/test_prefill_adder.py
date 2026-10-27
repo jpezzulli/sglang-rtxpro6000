@@ -53,6 +53,9 @@ class TestPrefillAdder(CustomTestCase):
         tree_cache.swa_evictable_size.return_value = swa_evictable_size
         tree_cache.evictable_size.return_value = evictable_size
         tree_cache.disable = False
+        # A MagicMock() answers supports_mamba() truthily, which would silently
+        # select the hybrid-SSM budget branch; pin it and let tests opt in.
+        tree_cache.supports_mamba.return_value = False
         tree_cache.inc_lock_ref.return_value = IncLockRefResult()
         tree_cache.dec_lock_ref.return_value = DecLockRefResult()
         return tree_cache
@@ -791,6 +794,185 @@ class TestPrefillAdder(CustomTestCase):
         self.assertIsNone(result)
         req.set_extend_range.assert_called_once_with(0, 200)
         self.assertIn(req, adder.can_run_list)
+
+    # ---- hybrid Mamba truncated-chunk page alignment (sgl-project/sglang#45607) ----
+
+    def _build_chunked_mamba_req(
+        self,
+        *,
+        page_size,
+        rem_chunk,
+        prefix_len,
+        fill_len,
+        mamba=True,
+        available=10_000,
+    ):
+        """A continuing chunked prefill whose commit is limited by the chunk budget,
+        so the truncation (and its page alignment) is decided by add_chunked_req."""
+        self.mock_tree_cache.supports_mamba.return_value = mamba
+        self.mock_token_allocator.available_size.return_value = available
+        self.mock_token_allocator.full_available_size.return_value = available
+        adder = self.create_adder(
+            self.create_running_batch(),
+            page_size=page_size,
+            rem_chunk_tokens=rem_chunk,
+        )
+        req = self.create_mock_req("continuation", priority=0, max_new_tokens=128)
+        req.prefix_indices = list(range(prefix_len))
+        req.full_untruncated_fill_ids = list(range(fill_len))
+        req.set_extend_range = MagicMock(
+            side_effect=lambda start, end: setattr(
+                req, "extend_range", Range(start, end)
+            )
+        )
+        return adder, req
+
+    def test_hybrid_mamba_continuation_ends_on_full_kv_page(self):
+        # A Mamba checkpoint is named by a page-floored radix key, so a truncated
+        # chunk that ends inside a page leaves the checkpoint describing more
+        # tokens than its key (and the next chunk starting inside a page).
+        PAGE = 16
+        adder, req = self._build_chunked_mamba_req(
+            page_size=PAGE, rem_chunk=123, prefix_len=128, fill_len=307
+        )
+
+        self.assertIs(adder.add_chunked_req(req), req)  # still chunked
+        req.set_extend_range.assert_called_once_with(128, 240)
+        self.assertEqual((240 - 128) % PAGE, 0)
+
+    def test_hybrid_mamba_continuation_defers_without_full_page(self):
+        # Less than one page of room: park the chunk rather than commit a sub-page
+        # length. The scheduler skips stashing a parked chunk (extend_range.end is
+        # unchanged), so nothing is lost and admission retries next pass.
+        adder, req = self._build_chunked_mamba_req(
+            page_size=16, rem_chunk=15, prefix_len=0, fill_len=307
+        )
+
+        self.assertIs(adder.add_chunked_req(req), req)
+        req.set_extend_range.assert_not_called()
+        self.assertEqual(adder.can_run_list, [])
+
+    def test_hybrid_mamba_continuation_keeps_untruncated_tail(self):
+        # Only *truncated* chunks are realigned; the final chunk of a request must
+        # still commit every remaining token, page-aligned or not.
+        adder, req = self._build_chunked_mamba_req(
+            page_size=16, rem_chunk=123, prefix_len=128, fill_len=143
+        )
+
+        self.assertIsNone(adder.add_chunked_req(req))
+        req.set_extend_range.assert_called_once_with(128, 143)
+
+    def test_hybrid_mamba_ignore_eos_prime_ends_on_full_kv_page(self):
+        # Parity with upstream: this branch needs a disabled tree cache (both
+        # ChunkCache and a disabled UnifiedRadixCache answer the `disable` gate),
+        # and a disabled cache donates nothing, so no Penny checkpoint/key is
+        # corrupted here. Aligned anyway so a hybrid cache built with the radix
+        # disabled cannot reintroduce the off-page continuation.
+        self.mock_tree_cache.supports_mamba.return_value = True
+        self.mock_token_allocator.available_size.return_value = 10_000
+        adder = self.create_adder(
+            self.create_running_batch(), page_size=16, rem_chunk_tokens=123
+        )
+        req = self.create_mock_req("prime", priority=0, max_new_tokens=0)
+        req.sampling_params.ignore_eos = True
+        req.origin_input_ids = list(range(307))
+        req.full_untruncated_fill_ids = list(range(307))
+        req.set_extend_range = MagicMock(
+            side_effect=lambda start, end: setattr(
+                req, "extend_range", Range(start, end)
+            )
+        )
+
+        adder.add_one_req_ignore_eos(req)
+        req.set_extend_range.assert_called_once_with(0, 112)
+
+    def test_non_hybrid_truncated_chunk_length_unchanged(self):
+        # Full-attention (non-Mamba) profile keeps the old commit: an unaligned
+        # chunk end costs a partial page, but no checkpoint can disagree with it.
+        adder, req = self._build_chunked_mamba_req(
+            page_size=16, rem_chunk=123, prefix_len=128, fill_len=307, mamba=False
+        )
+
+        self.assertIs(adder.add_chunked_req(req), req)
+        req.set_extend_range.assert_called_once_with(128, 251)
+
+    def _build_kv_budget_chunked_req(
+        self,
+        *,
+        decode_estimate,
+        available,
+        rem_chunk=4096,
+        prefix_len=4096,
+        tail_len=12288,
+    ):
+        """A continuing chunk at page64/chunk4096 whose commit is limited by the
+        real remaining-KV budget rather than by the chunk budget: available +
+        full_evictable minus one running request's decode reservation. This is the
+        shape the supported hybrid profile reaches under C4-C6 pressure."""
+        self.mock_tree_cache.supports_mamba.return_value = True
+        self.mock_token_allocator.available_size.return_value = available
+        self.mock_token_allocator.full_available_size.return_value = available
+        decoder = self.create_mock_req(
+            "decoding", priority=0, max_new_tokens=decode_estimate
+        )
+        adder = self.create_adder(
+            self.create_running_batch([decoder]),
+            page_size=64,
+            rem_chunk_tokens=rem_chunk,
+        )
+        req = self.create_mock_req("continuation", priority=0, max_new_tokens=128)
+        req.prefix_indices = list(range(prefix_len))
+        req.full_untruncated_fill_ids = list(range(tail_len))
+        # The chunk committed by the previous pass.
+        req.extend_range = Range(0, prefix_len)
+        req.set_extend_range = MagicMock(
+            side_effect=lambda start, end: setattr(
+                req, "extend_range", Range(start, end)
+            )
+        )
+        return adder, req
+
+    def test_hybrid_mamba_continuation_ends_on_page_when_kv_budget_limits(self):
+        # 128 free - 5 of decode reservation = 123 tokens of budget, so the KV
+        # budget (not the 4096 chunk budget) truncates and the raw commit would
+        # end 59 tokens inside the page at 4160.
+        adder, req = self._build_kv_budget_chunked_req(decode_estimate=5, available=128)
+
+        self.assertIs(adder.add_chunked_req(req), req)
+        req.set_extend_range.assert_called_once_with(4096, 4160)
+
+    def test_hybrid_mamba_continuation_parks_below_one_free_page(self):
+        # 128 - 65 = 63 tokens: not a whole page, so the chunk is parked rather
+        # than committed sub-page. extend_range keeps the previous pass's value,
+        # which is what tells the scheduler there is nothing new to stash.
+        adder, req = self._build_kv_budget_chunked_req(
+            decode_estimate=65, available=128
+        )
+
+        self.assertIs(adder.add_chunked_req(req), req)
+        req.set_extend_range.assert_not_called()
+        self.assertEqual((req.extend_range.start, req.extend_range.end), (0, 4096))
+        self.assertEqual(adder.can_run_list, [])
+        self.assertEqual(req.extend_range.end, len(req.prefix_indices))
+
+    def test_hybrid_mamba_parked_chunk_resumes_when_capacity_returns(self):
+        # Same request object, next pass: the running decode reserved less KV, so
+        # the parked chunk must be taken in full and page-aligned - parking must
+        # not stall the queue head.
+        adder, req = self._build_kv_budget_chunked_req(
+            decode_estimate=65, available=128
+        )
+        self.assertIs(adder.add_chunked_req(req), req)  # parked
+        decoder = self.create_mock_req("decoding", priority=0, max_new_tokens=5)
+        adder = self.create_adder(
+            self.create_running_batch([decoder]), page_size=64, rem_chunk_tokens=4096
+        )
+        self.mock_token_allocator.available_size.return_value = 100_000
+        self.mock_token_allocator.full_available_size.return_value = 100_000
+
+        self.assertIs(adder.add_chunked_req(req), req)  # chunk caught up, tail left
+        req.set_extend_range.assert_called_once_with(4096, 8192)
+        self.assertEqual(adder.can_run_list, [req])
 
     def _adder_with_extend_lens(self, extend_lens):
         adder = PrefillAdder.__new__(PrefillAdder)
