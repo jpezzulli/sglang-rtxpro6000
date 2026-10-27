@@ -588,8 +588,10 @@ class AnthropicServing:
         chat_request = ChatCompletionRequest(**request_data)
 
         if anthropic_request.thinking is not None:
-            # The protocol layer already enforces SDK shape:
-            #   enabled  -> budget_tokens required (>=1024), display optional
+            # The protocol layer already enforces SDK shape (with the
+            # compatibility exception that ``enabled`` may omit the budget):
+            #   enabled  -> budget_tokens optional (>=1024 when supplied),
+            #               display optional
             #   disabled -> neither budget_tokens nor display allowed
             #   adaptive -> budget_tokens forbidden, display optional
             # So by the time we get here ``budget_tokens`` can only be
