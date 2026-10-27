@@ -3294,13 +3294,15 @@ class Scheduler(
         # before its result finishes them, and update_running_batch may never run.
         running_bs = running_batch.batch_size()
         running_batch.filter_batch()
-        # The is_empty() term keeps the reset the replaced prefill-only block always
-        # applied: an empty batch has no request left to leave, and this fork has no
-        # empty-batch reset inside _get_new_batch_prefill_raw either, so a latched
-        # flag would stay shut after the last row of a session is freed.
-        if running_batch.batch_size() < running_bs or (
-            running_batch.is_prefill_only and running_batch.is_empty()
-        ):
+        # An empty batch is reset whatever it held: it has no request left to
+        # leave, so nothing can clear the latch, and this fork has no empty-batch
+        # reset inside _get_new_batch_prefill_raw either. The rows that filled it
+        # can be released from outside the batch (an idle streaming session is
+        # closed by Scheduler.close_session -> release_session, which frees the
+        # req_to_token row and touches no latch), and a latched flag would then
+        # starve the waiting queue forever. Non-empty batches still reset only on
+        # a shrink, so admission is not retried every step under load.
+        if running_batch.batch_size() < running_bs or running_batch.is_empty():
             running_batch.batch_is_full = False
 
         if self.dllm_config is not None:
