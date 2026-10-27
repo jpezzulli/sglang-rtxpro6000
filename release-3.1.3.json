@@ -1,0 +1,161 @@
+{
+  "schema": "release-notes/3.1.3",
+  "version": "3.1.3",
+  "status": {
+    "is_draft": true,
+    "publication_approved": false,
+    "published": false,
+    "container": "pending"
+  },
+  "source": {
+    "base": "742cbc5d6ea466d60280392e2dc232fa3079adfa",
+    "candidate": "ef3258749bbe022e38a5b18922a0085320a59928",
+    "integrated_runtime_revision": "ef3258749bbe022e38a5b18922a0085320a59928",
+    "runtime_code_parent": "1a6d2082766d3f11646bd972c1bc12effb304cb2",
+    "release_tag": "pennyroyal-v3.1.3",
+    "release_tag_status": "not yet published",
+    "release_url": null,
+    "integrated_commits": {
+      "45ebf993c121e1a1b61376dcbdafdd21c6d0baac": {
+        "issues": [124]
+      },
+      "15885c59934117f311d90f8865bc30d7cc718e17": {
+        "issues": []
+      },
+      "bef8cce23c16c690cebd96480829df473591b7c0": {
+        "issues": [122]
+      },
+      "12476c9a3cefcf940e8e972190f8cf190d686583": {
+        "issues": [123]
+      },
+      "ed54e16dc7064e5b57d1fcbd4e15365a577817a2": {
+        "issues": [109]
+      },
+      "1a6d2082766d3f11646bd972c1bc12effb304cb2": {
+        "issues": [126],
+        "note": "Selected part of #126; ownership and capacity handling are out of scope for this release."
+      }
+    },
+    "pull_requests": "One functional item per pull request is opened at the release checkpoint; no pull-request numbers are claimed here."
+  },
+  "container": {
+    "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3",
+    "digest": null,
+    "build_url": null,
+    "promotion_url": null,
+    "source_revision": "ef3258749bbe022e38a5b18922a0085320a59928",
+    "note": "Image named by the release defaults in this branch; the build has not run, so the tag does not exist yet. Digest, build and promotion identities are recorded when the image is published."
+  },
+  "changes": [
+    {
+      "commit": "45ebf993c121e1a1b61376dcbdafdd21c6d0baac",
+      "issues": [124],
+      "summary": "Accept absent or null budget_tokens for enabled thinking in the Anthropic route: the request uses the existing reasoning-enabled conversion. Explicit budgets keep their validation, and disabled/adaptive field rules are unchanged.",
+      "profiles": [
+        "Anthropic-compatible /v1/messages"
+      ]
+    },
+    {
+      "commit": "15885c59934117f311d90f8865bc30d7cc718e17",
+      "author": "John Pezzulli",
+      "summary": "A reasoning.effort supplied on a /v1/responses request now outranks the launch default through the existing request-first template policy. Nested overrides, omitted or null effort, summary-only schema defaults and explicit thinking-off controls keep their behavior; direct renderer precedence is retained for callers that do not opt in.",
+      "profiles": [
+        "Responses API",
+        "Chat completions renderer"
+      ]
+    },
+    {
+      "commit": "bef8cce23c16c690cebd96480829df473591b7c0",
+      "issues": [122],
+      "summary": "Reject incomplete FILE-backed NIXL restores: empty objects are lookup misses and each physical object is validated against its host-buffer byte count before a read. Missing, short and metadata-query failures return the existing failed-read result; complete and padded objects stay valid. Adapts sgl-project/sglang#46131 with bounded query-error handling for Penny prefetch workers.",
+      "profiles": [
+        "HiCache NIXL disk tier"
+      ]
+    },
+    {
+      "commit": "12476c9a3cefcf940e8e972190f8cf190d686583",
+      "issues": [123],
+      "summary": "QSA retains prefix index keys in narrow speculative windows: two pending index-key ring groups for speculative widths 2 through the compression ratio, allocation still tied to the launch maximum, undersized or unresolved verify geometry refused by the existing guard, and the group-partitioned layout from #40143 preserved. Adapts sgl-project/sglang#46125.",
+      "profiles": [
+        "Flash-Next QSA (narrow fixed-W4 speculative windows)"
+      ]
+    },
+    {
+      "commit": "ed54e16dc7064e5b57d1fcbd4e15365a577817a2",
+      "issues": [109],
+      "summary": "Truncated hybrid-Mamba prefill chunks are floored to the KV page size before commit, so a cached hybrid state is never named by a key shorter than the prefix it summarizes; a chunk with under one page of budget is parked and retried on the existing deferral path. No-op unless the cache holds Mamba state on a paged pool; untruncated tails and full-attention profiles are untouched. Restates sgl-project/sglang#45607 against this fork's PrefillAdder.",
+      "profiles": [
+        "Hybrid Mamba profiles under chunked prefill"
+      ]
+    },
+    {
+      "commit": "1a6d2082766d3f11646bd972c1bc12effb304cb2",
+      "issues": [126],
+      "summary": "Drop the prefill-only qualifier on the empty-batch reset of the batch_is_full latch, so a running batch that emptied through ordinary decode reopens admission instead of starving while freed request-to-token rows sit unused. Non-empty batches still reset only on a shrink. This is the selected hunk of #126; the ownership and capacity changes are not included.",
+      "profiles": [
+        "Scheduler admission, all profiles"
+      ]
+    },
+    {
+      "commit": "ef3258749bbe022e38a5b18922a0085320a59928",
+      "summary": "Maturity labeling corrected in current guidance: 27B + DFlash2 is established and qualified, and only the optional Flash-Next next-dflash2 profile keeps the experimental / alpha label. The draft's additional host cache stays documented on both DFlash2 profiles, separate from maturity. Labels and documentation only - no setting, default, launch line, runtime module or test changed."
+    }
+  ],
+  "defaults_unchanged": {
+    "native_mtp_width_policy": "tiered (block 8 at one running request, block 4 at two or more)",
+    "operator_local_selection": "adaptive width policy, medium reasoning effort, diagnostics off",
+    "launcher_default_reasoning_effort": "medium",
+    "local_diagnostics": "off",
+    "note": "No settings or default changes in this release; the width-policy rows in RESULTS.md were measured with adaptive selected."
+  },
+  "validation": {
+    "focused_cpu_checks": "2026-10-27 on this candidate, CPU only: integrated suite passed 409 tests with 404 subtests and 1 optional S3 skip. Documentation and release-identity preparation reran the focused setup/recipe/version checks and pinned formatting without rerunning runtime qualification.",
+    "review": "Each of the six fixes was reviewed individually and accepted; exact patch-id equality with the accepted contributions was verified.",
+    "regression": "The focused regressions for #109, #122, #123, #124 and the Responses effort fix are red on the 742cbc5 base and green with the fix.",
+    "cuda_regression": "Fixed-W4 QSA coverage ran on the production shape with retained-prefix residues of 1, 2 and 3 tokens, partial acceptance and fused compression; serving checks passed 9/9.",
+    "api_probes": "Both profiles passed 4/4 API probes, a sealed agentic run of 6 turns with 5 tool calls, vision checks, and correct 63,906-token and 489,921-token retrieval.",
+    "cache_restore": "Fresh-process 64K and 490K NIXL restores were correct on both profiles: 553,792 NIXL-backed KV tokens plus 4 Mamba states each, and additionally 4,096 sliding-window tokens on 27B. Both restart restores are valid. Duplicate replays answered from the device cache rather than four independent disk loads.",
+    "reasoning": "All 36 measured requests completed naturally with no confirmed loops; extended reasoning is not penalized. Blind scores: Flash-Next native MTP 95.36 (sequential) and 97.61 (three concurrent users); 27B DFlash2 98.67 and 99.23.",
+    "tools": "Not universal. Flash-Next native MTP: 30/30 parseable, 29/30 strict, 26/30 automatic; automatic misses include scorer/date substring behavior and mock-router behavior. 27B DFlash2: 30/30 scheduled, exact and parseable, 28/30 automatic; two invalid-date answers exhausted 512 tokens entirely in reasoning with empty visible answers, and one invoice answer added unwanted explanatory prose. Agentic and vision checks passed separately.",
+    "benchmarks": "Dated native mean/peak rates and cold TTFT for this candidate are recorded in RESULTS.md with the measured policy, configuration, source and interval counts. No matched-baseline speed-up claim is made and no new performance default changed.",
+    "nvme_serving": "not run",
+    "container_build": "Pending. The GPU container smoke check is still pending under separate publication coordination and is not claimed as passed here.",
+    "exceptions": [
+      "The first 27B four-request screen stopped with an Xid 109 GPU freeze; the unchanged retry after a host reboot completed. Cause unproven, no freeze fix claimed, detailed incident note kept as an internal observation.",
+      "Cache-pressure eviction rather than pure-host retention was accepted; host checkpoint reclamation and the disk-budget cleaner were both in play, so pure-host retention was not isolated. Not a blocker and not a testing instruction.",
+      "The on-GPU DFlash2 checkpoint-grid resume is still not exercised on either DFlash2 profile; the #115 arithmetic fix remains CPU-regression-covered."
+    ]
+  },
+  "contributors": [
+    {
+      "name": "John Pezzulli",
+      "url": "https://github.com/jpezzulli",
+      "contribution": "Responses API explicit reasoning-effort precedence"
+    },
+    {
+      "name": "andyl98",
+      "url": "https://github.com/andyl98",
+      "contribution": "Upstream retained-prefix ring sizing adapted for #123 (sgl-project/sglang#46125)"
+    },
+    {
+      "name": "AEGO-WRJ",
+      "url": "https://github.com/AEGO-WRJ",
+      "contribution": "Upstream NIXL file-backed restore validation adapted for #122 (sgl-project/sglang#46131)"
+    },
+    {
+      "name": "jongukc",
+      "url": "https://github.com/jongukc",
+      "contribution": "Upstream hybrid truncated-chunk page alignment restated for #109 (sgl-project/sglang#45607)"
+    },
+    {
+      "name": "aryatsc",
+      "url": "https://github.com/aryatsc",
+      "contribution": "Upstream admission-latch recovery narrowed for #126 (sgl-project/sglang#46643)"
+    },
+    {
+      "name": "Penny Royal",
+      "email": "Pennyroyal@agentmail.to",
+      "contribution": "Anthropic thinking-budget acceptance, QSA, NIXL, hybrid prefill and scheduler fixes; maturity labeling and release documentation"
+    }
+  ]
+}
