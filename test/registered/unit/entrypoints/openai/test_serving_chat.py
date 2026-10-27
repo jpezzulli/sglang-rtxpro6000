@@ -685,7 +685,7 @@ class ServingChatTestCase(unittest.TestCase):
                     self.assertEqual(kwargs["custom"], 7)
                     self.assertEqual(self.chat.default_chat_template_kwargs, defaults)
 
-    def test_shared_renderer_retains_responses_and_tokenize_precedence(self):
+    def test_shared_renderer_keeps_default_precedence_without_opt_in(self):
         self.template_manager.chat_template_name = None
         self.template_manager.jinja_template_content_format = "string"
         self.tm.tokenizer.apply_chat_template.return_value = "rendered"

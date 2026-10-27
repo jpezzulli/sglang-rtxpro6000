@@ -30,36 +30,109 @@ from sglang.test.test_utils import CustomTestCase
 register_cpu_ci(est_time=7, suite="base-a-test-cpu")
 
 
-class InputMessageConstructionTestCase(CustomTestCase):
-    def test_responses_effort_keeps_existing_template_precedence(self):
+class ReasoningEffortPrecedenceTestCase(CustomTestCase):
+    def _render(self, fields, defaults):
         serving = make_serving()
         serving.template_manager.chat_template_name = None
         serving.template_manager.jinja_template_content_format = "string"
         serving.tokenizer_manager.tokenizer.apply_chat_template.return_value = (
             "rendered"
         )
-        serving.default_chat_template_kwargs = {"reasoning_effort": "medium"}
-        for nested, expected in (
-            (None, "medium"),
-            ({"reasoning_effort": "high"}, "high"),
-        ):
+        serving.reasoning_parser = "qwen3"
+        serving.template_manager.reasoning_config = ReasoningToggleConfig(
+            toggle_param="enable_thinking", default_enabled=True
+        )
+        serving.default_chat_template_kwargs = defaults.copy() if defaults else None
+        request = ResponsesRequest(model="x", input="Hi", **fields)
+        original_reasoning = request.model_dump()["reasoning"]
+        _, _, _, processed = asyncio.run(
+            serving._make_request(request, None, serving.tokenizer_manager.tokenizer)
+        )
+        self.assertEqual(request.model_dump()["reasoning"], original_reasoning)
+        self.assertEqual(serving.default_chat_template_kwargs, defaults)
+        kwargs = (
+            serving.tokenizer_manager.tokenizer.apply_chat_template.call_args.kwargs
+        )
+        return kwargs, processed
+
+    def test_explicit_effort_overrides_server_default(self):
+        for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+            with self.subTest(effort=effort):
+                kwargs, _ = self._render(
+                    {"reasoning": {"effort": effort}},
+                    {"reasoning_effort": "low" if effort == "medium" else "medium"},
+                )
+                self.assertEqual(kwargs["reasoning_effort"], effort)
+
+    def test_nested_effort_keeps_precedence(self):
+        for nested in ("low", "high", "max", None):
             with self.subTest(nested=nested):
-                request = ResponsesRequest(
-                    model="x",
-                    input="Hi",
-                    reasoning={"effort": "low"},
-                    chat_template_kwargs=nested,
+                kwargs, _ = self._render(
+                    {
+                        "reasoning": {"effort": "xhigh"},
+                        "chat_template_kwargs": {"reasoning_effort": nested},
+                    },
+                    {"reasoning_effort": "medium"},
                 )
-                asyncio.run(
-                    serving._make_request(
-                        request, None, serving.tokenizer_manager.tokenizer
-                    )
-                )
-                kwargs = (
-                    serving.tokenizer_manager.tokenizer.apply_chat_template.call_args.kwargs
+                self.assertEqual(kwargs["reasoning_effort"], nested)
+
+    def test_absent_or_null_effort_keeps_server_default(self):
+        for fields in (
+            {},
+            {"reasoning": None},
+            {"reasoning": {}},
+            {"reasoning": {"summary": "auto"}},
+            {"reasoning": {"effort": None}},
+        ):
+            with self.subTest(fields=fields):
+                kwargs, _ = self._render(fields, {"reasoning_effort": "high"})
+                self.assertEqual(kwargs["reasoning_effort"], "high")
+
+    def test_schema_default_effort_is_preserved_without_server_default(self):
+        for fields, expected in (
+            ({}, None),
+            ({"reasoning": None}, None),
+            ({"reasoning": {}}, "medium"),
+            ({"reasoning": {"summary": "auto"}}, "medium"),
+            ({"reasoning": {"effort": None}}, None),
+            ({"reasoning": {"effort": "high"}}, "high"),
+        ):
+            with self.subTest(fields=fields):
+                kwargs, _ = self._render(fields, None)
+                if expected is None:
+                    self.assertNotIn("reasoning_effort", kwargs)
+                else:
+                    self.assertEqual(kwargs["reasoning_effort"], expected)
+
+    def test_explicit_thinking_off_survives_effort_precedence(self):
+        for fields, expected in (
+            ({"reasoning": {"effort": "none"}}, "none"),
+            (
+                {
+                    "reasoning": {"effort": "high"},
+                    "chat_template_kwargs": {"enable_thinking": False},
+                },
+                "high",
+            ),
+            (
+                {
+                    "reasoning": {"effort": "max"},
+                    "chat_template_kwargs": {"thinking": False},
+                },
+                "max",
+            ),
+        ):
+            with self.subTest(fields=fields):
+                kwargs, processed = self._render(
+                    fields, {"reasoning_effort": "medium", "enable_thinking": True}
                 )
                 self.assertEqual(kwargs["reasoning_effort"], expected)
+                self.assertIs(kwargs["enable_thinking"], False)
+                self.assertIs(kwargs["thinking"], False)
+                self.assertFalse(processed.require_reasoning)
 
+
+class InputMessageConstructionTestCase(CustomTestCase):
     def test_previous_response_replays_assistant_text_not_instructions(self):
         serving = make_serving()
         prev_response = Mock(id="resp_prev")
@@ -186,7 +259,9 @@ class ChatToolForwardingTestCase(CustomTestCase):
         serving = make_serving()
         seen = {}
 
-        def fake_process(chat_request, is_multimodal):
+        def fake_process(
+            chat_request, is_multimodal, *, request_first_reasoning_effort=False
+        ):
             seen["tools"] = chat_request.tools
             seen["tool_choice"] = chat_request.tool_choice
             seen["parallel_tool_calls"] = chat_request.parallel_tool_calls

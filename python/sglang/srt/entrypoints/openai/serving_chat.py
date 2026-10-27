@@ -1147,9 +1147,9 @@ class OpenAIServingChat(OpenAIServingBase):
         if self.default_chat_template_kwargs:
             ctk = dict(request.chat_template_kwargs or {})
             for k, v in self.default_chat_template_kwargs.items():
-                # Chat Completions normalized both explicit input forms above.
-                # Do not reinsert a default over that choice. Responses and
-                # tokenize call this renderer directly and retain their policy.
+                # Opted-in callers have selected an explicit API effort. Do not
+                # reinsert a default over that choice; direct callers such as
+                # tokenize retain default-first precedence unless they opt in.
                 if (
                     request_first_reasoning_effort
                     and k == "reasoning_effort"
