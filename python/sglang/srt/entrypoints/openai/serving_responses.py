@@ -601,7 +601,16 @@ class OpenAIServingResponses(OpenAIServingChat):
             raise _MediaInputValidationError(media_error)
 
         is_multimodal = self.tokenizer_manager.model_config.is_multimodal
-        processed_messages = self._process_messages(chat_request, is_multimodal)
+        processed_messages = self._process_messages(
+            chat_request,
+            is_multimodal,
+            # The schema materializes medium even for summary-only reasoning.
+            # Only an explicitly supplied effort may override launch defaults.
+            request_first_reasoning_effort=(
+                request.reasoning is not None
+                and "effort" in request.reasoning.model_fields_set
+            ),
+        )
 
         if is_multimodal:
             request_prompts = [processed_messages.prompt]
