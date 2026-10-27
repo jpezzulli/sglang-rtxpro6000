@@ -840,6 +840,27 @@ class PrefillAdder:
     def ceil_paged_tokens(self, tokens: int) -> int:
         return -(-tokens // self.page_size) * self.page_size
 
+    def _align_truncated_hybrid_chunk(self, prefix_len: int, chunk_len: int) -> int:
+        """Largest length that ends a *truncated* prefill chunk on a KV page
+        boundary, or 0 when not even one whole page fits.
+
+        The first chunk that ends off-page can still donate a page-aligned
+        checkpoint, because the checkpoint depth floors to the mamba grid. The
+        damage is one pass later: the tokens past that checkpoint stay private to
+        the request, so `len(req.prefix_indices)` is off-page and the NEXT chunk's
+        checkpoint depth is off-page too, while the key it is donated under is
+        floored to page_size. Only paged full-attention + Mamba is affected, and
+        `add_one_req` already aligns its truncated chunk.
+
+        Untruncated final chunks stay unrestricted: a request that keeps decoding
+        does not release its boundary page at commit time, so realigning the tail
+        would strand the tokens past the last checkpoint.
+        """
+        if not self.is_hybrid_ssm_cache or self.page_size == 1:
+            return chunk_len
+        end = (prefix_len + chunk_len) // self.page_size * self.page_size
+        return max(end - prefix_len, 0)
+
     def budget_state(self):
         no_token = self.rem_total_tokens <= 0 or self.cur_rem_tokens <= 0
         if not no_token and self.is_hybrid_swa:
@@ -1037,6 +1058,15 @@ class PrefillAdder:
         )
         truncated = cand_extend_input_len > _rem_tokens
         new_len = min(cand_extend_input_len, _rem_tokens)
+        if truncated:
+            new_len = self._align_truncated_hybrid_chunk(
+                len(req.prefix_indices), new_len
+            )
+            if new_len <= 0:
+                # No whole KV page fits: park the chunk (extend_range.end stays at
+                # len(prefix_indices), so the scheduler skips stashing it) and retry
+                # once running requests free KV. Same shape as the hybrid-SWA defer.
+                return req
         req.set_extend_range(len(req.prefix_indices), len(req.prefix_indices) + new_len)
         self.can_run_list.append(req)
         self._update_prefill_budget(
@@ -1185,8 +1215,16 @@ class PrefillAdder:
             if self.rem_chunk_tokens <= 0:
                 return AddReqResult.OTHER
 
-            # Chunked prefill
-            trunc_len = self.rem_chunk_tokens
+            # Chunked prefill. The alignment matters less here than in
+            # add_chunked_req: this branch is reached only with the tree cache
+            # disabled (ChunkCache reports supports_mamba() False), so nothing is
+            # donated and no checkpoint/key ownership stake exists. Kept for
+            # parity with upstream #45607 and for a hybrid cache built disabled.
+            trunc_len = self._align_truncated_hybrid_chunk(
+                len(req.prefix_indices), self.rem_chunk_tokens
+            )
+            if trunc_len <= 0:
+                return AddReqResult.OTHER
 
             if (tile_stop := self._check_prefill_tile_budget(trunc_len)) is not None:
                 return tile_stop
