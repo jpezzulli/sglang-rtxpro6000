@@ -222,11 +222,15 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         parse_constant=self._parse_finite_float,
                         parse_float=self._parse_finite_float,
                     )
-                    if isinstance(value, (dict, list)) and Draft202012Validator(
-                        parameters if parameters is not None else schema,
-                        registry=Registry(),
-                    ).evolve(schema=schema).is_valid(value):
-                        return value
+                    if isinstance(value, (dict, list)):
+                        validator = Draft202012Validator(
+                            parameters if parameters is not None else schema,
+                            registry=Registry(),
+                        )
+                        # Enter a parameter-local $id scope while retaining
+                        # enclosing definitions when the parameter has no $id.
+                        if next(validator.descend(value, schema), None) is None:
+                            return value
                 except Exception as exc:
                     logger.debug(
                         "Structured union conversion failed (%s); preserving the original string.",
