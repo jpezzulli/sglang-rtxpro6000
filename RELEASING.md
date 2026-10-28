@@ -29,6 +29,7 @@ qualification or reverse John's decision to reuse the 27B checks for 3.0.
 - [ ] The narrowed GPU build is integrated: RTX PRO 6000 Blackwell inference at TP1/TP2, with Ampere/Ada retained for sidecar image processing. Record actual image identity and size; do not invent a size reduction.
 - [ ] Fresh-install and upgrade instructions fetch the correct files, including setup updates made after a runtime release.
 - [ ] Version references, image defaults and compatibility hashes are updated.
+- [ ] Update the user-visible Penny Royal version for the release. Before publication, verify its actual output in both the native release environment and built candidate container; record the commands or endpoints and output on the release item. Identify any upstream SGLang package version separately.
 - [ ] Local diagnostics remain off in the published defaults and are not exposed as a public setup option.
 
 ## README and documentation
