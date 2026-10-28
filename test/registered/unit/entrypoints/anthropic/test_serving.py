@@ -1,7 +1,12 @@
 import asyncio
+import hashlib
 import json
+import pathlib
+import re
 import unittest
 from types import SimpleNamespace
+
+from pydantic import ValidationError
 
 from sglang.test.test_utils import maybe_stub_sgl_kernel
 
@@ -9,8 +14,10 @@ maybe_stub_sgl_kernel()  # must precede imports that may pull in sgl_kernel
 
 from fastapi.responses import JSONResponse  # noqa: E402
 from jinja2 import Environment  # noqa: E402
+from transformers.utils.chat_template_utils import _compile_jinja_template  # noqa: E402
 
 from sglang.srt.entrypoints.anthropic.protocol import (  # noqa: E402
+    AnthropicCountTokensRequest,
     AnthropicMessage,
     AnthropicMessagesRequest,
 )
@@ -19,12 +26,72 @@ from sglang.srt.entrypoints.openai.protocol import (  # noqa: E402
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
+from sglang.srt.entrypoints.openai.serving_chat import (  # noqa: E402
+    normalize_assistant_tool_call_arguments,
+    normalize_tool_content,
+)
+from sglang.srt.parser.jinja_template_utils import (  # noqa: E402
+    detect_jinja_template_content_format,
+    process_content_for_template_format,
+)
 from sglang.srt.parser.template_detection import (  # noqa: E402
     detect_inline_system_support,
+    detect_tool_reference_support,
 )
 from sglang.test.ci.ci_register import register_cpu_ci  # noqa: E402
 
 register_cpu_ci(est_time=1, suite="base-a-test-cpu")
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[5]
+_PENNYROYAL_CONFIGS = _REPO_ROOT / "configs" / "pennyroyal"
+
+
+def _pennyroyal_chat_template() -> str:
+    """Bytes of the chat template the Pennyroyal launchers pin.
+
+    ``configs/pennyroyal/chat-template.sh`` is the single shared pin every
+    launcher sources, so both supported profiles render through this one
+    template. Resolving the path through the helper keeps this test from
+    hardcoding a template version, and reading the file (rather than copying
+    it in) keeps the template itself unchanged.
+    """
+    helper = (_PENNYROYAL_CONFIGS / "chat-template.sh").read_text(encoding="utf-8")
+    pinned = re.search(r'pwd\)/([^"]+\.jinja)"', helper)
+    assert pinned, f"no pinned jinja template found in chat-template.sh: {helper}"
+    return (_PENNYROYAL_CONFIGS / pinned.group(1)).read_text(encoding="utf-8")
+
+
+def _render_chat_request(
+    template_text: str, chat_request: ChatCompletionRequest, *, tokenizer=None
+) -> str:
+    """Render a converted request the way the chat-completions route does."""
+    dump = chat_request.model_dump(exclude_none=True)
+    content_format = detect_jinja_template_content_format(template_text)
+    messages = []
+    for message in dump["messages"]:
+        normalize_assistant_tool_call_arguments(message)
+        if message.get("content") is None:
+            message["content"] = ""
+        processed = process_content_for_template_format(
+            message, content_format, [], [], [], []
+        )
+        processed["content"] = normalize_tool_content(
+            processed["role"], processed.get("content")
+        )
+        messages.append(processed)
+    if tokenizer is not None:
+        return tokenizer.apply_chat_template(
+            messages,
+            chat_template=template_text,
+            tools=dump.get("tools") or [],
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+    return _compile_jinja_template(template_text).render(
+        messages=messages,
+        tools=dump.get("tools") or [],
+        add_generation_prompt=True,
+    )
 
 
 class _FakeOpenAIServingChat:
@@ -1602,6 +1669,503 @@ class TestAnthropicServing(unittest.TestCase):
             any("content_filter" in rec for rec in log.output),
             f"expected a warning mentioning the unmapped finish_reason: {log.output}",
         )
+
+
+class _CountTokensOpenAI(_FakeOpenAIServingChat):
+    """OpenAI handler stub for ``/v1/messages/count_tokens``."""
+
+    def __init__(self, chat_template=None):
+        super().__init__(chat_template=chat_template)
+        self.tokenizer_manager.model_config = SimpleNamespace(is_multimodal=False)
+        self.converted: ChatCompletionRequest | None = None
+
+    def _process_messages(self, chat_request, is_multimodal):
+        self.converted = chat_request
+        _render_chat_request(
+            self.tokenizer_manager.tokenizer.chat_template, chat_request
+        )
+        return SimpleNamespace(prompt_ids=[1, 2, 3])
+
+
+class TestNestedToolReferenceCompatibility(unittest.TestCase):
+    """Nested ``tool_reference`` blocks against the real pinned Pennyroyal template.
+
+    The template is loaded as opaque bytes through the shared launcher pin (no
+    version is hardcoded here, no template is edited) and rendered with the same
+    content processing the chat-completions route applies. Assertions stay on
+    converted structures, indexes and hashes so a failure never prints a prompt.
+    """
+
+    ISSUE_137_PAYLOAD = {
+        "model": "pennyroyal",
+        "max_tokens": 8,
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "x", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [{"type": "tool_reference", "tool_name": "y"}],
+                    },
+                    {"type": "text", "text": "ok"},
+                ],
+            },
+        ],
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.template = _pennyroyal_chat_template()
+
+    def _serving(self, chat_template=None):
+        return AnthropicServing(_FakeOpenAIServingChat(chat_template=chat_template))
+
+    def _user_tool_turn(self, content, **overrides):
+        """The reporter conversation with ``content`` as the tool answer."""
+        payload = json.loads(json.dumps(self.ISSUE_137_PAYLOAD))
+        payload["messages"][2]["content"][0]["content"] = content
+        payload.update(overrides)
+        return AnthropicMessagesRequest.model_validate(payload)
+
+    def _messages(self, chat_request):
+        return chat_request.model_dump(exclude_none=True)["messages"]
+
+    def test_reporter_payload_renders_on_pinned_template(self):
+        request = AnthropicMessagesRequest.model_validate(self.ISSUE_137_PAYLOAD)
+        chat_request = self._serving(self.template)._convert_to_chat_completion_request(
+            request
+        )
+        # Precondition: this template takes structured content parts, so the
+        # reference part really does reach ``render_content``.
+        self.assertEqual(detect_jinja_template_content_format(self.template), "openai")
+        messages = self._messages(chat_request)
+        self.assertEqual(
+            [message["role"] for message in messages],
+            ["user", "assistant", "tool", "user"],
+        )
+        self.assertEqual(
+            messages[2],
+            {"role": "tool", "tool_call_id": "t1", "content": "Tool reference: y"},
+        )
+        prompt = _render_chat_request(self.template, chat_request)
+        self.assertTrue(
+            "Tool reference: y" in prompt,
+            "flattened reference is missing from the rendered prompt",
+        )
+        # The referenced tool has no schema anywhere in this request, and the
+        # adapter must not invent one for it.
+        self.assertNotIn("tools", chat_request.model_dump(exclude_none=True))
+
+    def test_reference_names_order_and_tool_call_association_survive(self):
+        request = self._user_tool_turn(
+            [
+                {"type": "text", "text": "before-marker"},
+                {"type": "tool_reference", "name": "alpha-marker"},
+                {"type": "tool_reference", "tool_name": "beta-marker"},
+                {"type": "text", "text": "after-marker"},
+            ],
+        )
+        messages = self._messages(
+            self._serving(self.template)._convert_to_chat_completion_request(request)
+        )
+        # One tool answer carrying every part in place, then the turn's own text.
+        self.assertEqual(
+            [message["role"] for message in messages],
+            ["user", "assistant", "tool", "user"],
+        )
+        self.assertEqual(
+            messages[2],
+            {
+                "role": "tool",
+                "tool_call_id": "t1",
+                "content": [
+                    {"type": "text", "text": "before-marker"},
+                    {"type": "text", "text": "Tool reference: alpha-marker"},
+                    {"type": "text", "text": "Tool reference: beta-marker"},
+                    {"type": "text", "text": "after-marker"},
+                ],
+            },
+        )
+        prompt = _render_chat_request(
+            self.template,
+            ChatCompletionRequest.model_validate(
+                {
+                    "model": "pennyroyal",
+                    "max_tokens": 8,
+                    "messages": messages,
+                }
+            ),
+        )
+        order = [
+            prompt.index(marker)
+            for marker in (
+                "before-marker",
+                "Tool reference: alpha-marker",
+                "Tool reference: beta-marker",
+                "after-marker",
+            )
+        ]
+        self.assertEqual(order, sorted(order), "reference parts lost their order")
+        self.assertLess(order[-1], prompt.index("ok"), "user text lost its position")
+
+    def test_capable_template_keeps_structured_reference_expansion(self):
+        """The distinction is what the selected template can render, not the
+        adapter's own preference: a capable template keeps the structured part
+        and expands the supplied schema."""
+        capable = TestAnthropicServing.GLM_TOOL_RESULT_TEMPLATE.replace(
+            "{{ tool.function.name }}", "{{ tool.function | tojson }}"
+        )
+        self.assertTrue(detect_tool_reference_support(capable))
+        self.assertFalse(detect_tool_reference_support(self.template))
+        request = self._user_tool_turn(
+            [{"type": "tool_reference", "tool_name": "Bash"}],
+            tools=[
+                {
+                    "name": "Bash",
+                    "description": "Run a shell command",
+                    "input_schema": {"type": "object", "properties": {}},
+                    "defer_loading": True,
+                }
+            ],
+        )
+        chat_request = self._serving(capable)._convert_to_chat_completion_request(
+            request
+        )
+        self.assertEqual(
+            self._messages(chat_request)[2]["content"],
+            [{"type": "tool_reference", "name": "Bash"}],
+        )
+        prompt = _render_chat_request(capable, chat_request)
+        expanded_schema = prompt.split("<tools>", 1)[1].split("</tools>", 1)[0]
+        self.assertEqual(
+            json.loads(expanded_schema), chat_request.tools[0].function.model_dump()
+        )
+        # The fallback does not remove supplied schemas: the pinned template
+        # already renders them even when it cannot render a reference part.
+        fallback = self._serving(self.template)._convert_to_chat_completion_request(
+            request
+        )
+        self.assertEqual(fallback.tools, chat_request.tools)
+        fallback_prompt = _render_chat_request(self.template, fallback)
+        self.assertTrue("Run a shell command" in fallback_prompt)
+        self.assertTrue("Tool reference: Bash" in fallback_prompt)
+
+    def test_native_expansion_uses_normalized_tool_history(self):
+        capable = (
+            TestDetectToolReferenceSupport.NORMALIZED_HISTORY_GUARD
+            + TestDetectToolReferenceSupport.NORMALIZED_TOOLS_GUARD
+            + TestAnthropicServing.GLM_TOOL_RESULT_TEMPLATE.replace(
+                "{{ tool.function.name }}", "{{ tool.function | tojson }}"
+            )
+        )
+        request = self._user_tool_turn(
+            [
+                {"type": "text", "text": "before-one"},
+                {"type": "text", "text": "before-two"},
+                {"type": "tool_reference", "tool_name": "Bash"},
+            ],
+            tools=[
+                {
+                    "name": "Bash",
+                    "description": "Supplied schema survives native rendering",
+                    "input_schema": {"type": "object", "properties": {}},
+                    "defer_loading": True,
+                }
+            ],
+        )
+        converted = self._serving(capable)._convert_to_chat_completion_request(request)
+        self.assertEqual(
+            self._messages(converted)[3]["content"],
+            [{"type": "tool_reference", "name": "Bash"}],
+        )
+        prompt = _render_chat_request(capable, converted)
+        self.assertTrue("before-one before-two" in prompt)
+        schema = prompt.split("<tools>", 1)[1].split("</tools>", 1)[0]
+        self.assertEqual(json.loads(schema), converted.tools[0].function.model_dump())
+
+    def test_native_expansion_receives_tokenizer_special_tokens(self):
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from transformers import PreTrainedTokenizerFast
+
+        capable = "{{ bos_token + 'prefix' }}" + (
+            TestAnthropicServing.GLM_TOOL_RESULT_TEMPLATE.replace(
+                "{{ tool.function.name }}", "{{ tool.function | tojson }}"
+            )
+        )
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=Tokenizer(
+                WordLevel({"[UNK]": 0, "[BOS]": 1}, unk_token="[UNK]")
+            ),
+            bos_token="[BOS]",
+            unk_token="[UNK]",
+            chat_template=capable,
+        )
+        openai_serving = _FakeOpenAIServingChat(chat_template=capable)
+        openai_serving.tokenizer_manager.tokenizer = tokenizer
+        request = self._user_tool_turn(
+            [{"type": "tool_reference", "tool_name": "Bash"}],
+            tools=[
+                {
+                    "name": "Bash",
+                    "description": "Schema expanded with tokenizer context",
+                    "input_schema": {"type": "object", "properties": {}},
+                    "defer_loading": True,
+                }
+            ],
+        )
+        # The real tokenizer renderer supports this template independently of
+        # whether the adapter's capability probe recognizes it.
+        native = self._serving()._convert_to_chat_completion_request(request)
+        prompt = _render_chat_request(capable, native, tokenizer=tokenizer)
+        self.assertTrue(prompt.startswith(tokenizer.bos_token + "prefix"))
+        schema = prompt.split("<tools>", 1)[1].split("</tools>", 1)[0]
+        self.assertEqual(json.loads(schema), native.tools[0].function.model_dump())
+
+        converted = AnthropicServing(
+            openai_serving
+        )._convert_to_chat_completion_request(request)
+        self.assertEqual(
+            self._messages(converted)[2]["content"],
+            [{"type": "tool_reference", "name": "Bash"}],
+        )
+        self.assertEqual(
+            _render_chat_request(capable, converted, tokenizer=tokenizer), prompt
+        )
+
+    def test_unaffected_requests_render_the_same_prompt(self):
+        """Text/image answers and the supplied tools are untouched, whether or
+        not the selected template renders references."""
+        request = self._user_tool_turn(
+            [
+                {"type": "text", "text": "plain answer"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "aGVsbG8=",
+                    },
+                },
+            ],
+            tools=[
+                {
+                    "name": "y",
+                    "input_schema": {"type": "object", "properties": {}},
+                    "defer_loading": True,
+                }
+            ],
+        )
+        flattening = self._serving(self.template)._convert_to_chat_completion_request(
+            request
+        )
+        structured = self._serving(
+            TestAnthropicServing.GLM_TOOL_RESULT_TEMPLATE
+        )._convert_to_chat_completion_request(request)
+        self.assertEqual(
+            flattening.model_dump(exclude_none=True),
+            structured.model_dump(exclude_none=True),
+        )
+        hashes = {
+            hashlib.sha256(
+                _render_chat_request(self.template, converted).encode()
+            ).hexdigest()
+            for converted in (flattening, structured)
+        }
+        self.assertEqual(
+            len(hashes), 1, "rendered prompt changed for a request with no reference"
+        )
+        dumped = flattening.model_dump(exclude_none=True)
+        self.assertEqual([tool["function"]["name"] for tool in dumped["tools"]], ["y"])
+        self.assertEqual(
+            [tool["function"]["parameters"] for tool in dumped["tools"]],
+            [{"type": "object", "properties": {}}],
+        )
+
+    def test_document_and_mcp_blocks_stay_validation_errors(self):
+        for block in (
+            {"type": "unknown", "data": "do not serialize unsupported blocks"},
+            {"type": "document", "source": {"type": "text", "data": "x"}},
+            {"type": "mcp_tool_use", "id": "t2", "name": "m", "input": {}},
+            {"type": "mcp_tool_result", "tool_use_id": "t2", "content": "x"},
+        ):
+            with self.subTest(block=block["type"]):
+                with self.assertRaises(ValidationError):
+                    self._user_tool_turn([block])
+                with self.assertRaises(ValidationError):
+                    AnthropicMessagesRequest.model_validate(
+                        {
+                            "model": "pennyroyal",
+                            "max_tokens": 8,
+                            "messages": [{"role": "user", "content": [block]}],
+                        }
+                    )
+
+    def test_count_tokens_conversion_shares_the_correction(self):
+        openai_serving = _CountTokensOpenAI(chat_template=self.template)
+        serving = AnthropicServing(openai_serving)
+        count_request = AnthropicCountTokensRequest.model_validate(
+            {
+                key: value
+                for key, value in self.ISSUE_137_PAYLOAD.items()
+                if key != "max_tokens"
+            }
+        )
+        response = asyncio.run(serving.handle_count_tokens(count_request, object()))
+        self.assertEqual(json.loads(response.body), {"input_tokens": 3})
+        self.assertEqual(
+            [
+                message["content"]
+                for message in openai_serving.converted.model_dump(exclude_none=True)[
+                    "messages"
+                ]
+                if message["role"] == "tool"
+            ],
+            ["Tool reference: y"],
+        )
+
+    def test_every_pennyroyal_profile_sources_the_shared_pin(self):
+        sourcing = {
+            path.name
+            for path in _PENNYROYAL_CONFIGS.glob("serve-*.sh")
+            if "chat-template.sh" in path.read_text(encoding="utf-8")
+        }
+        self.assertTrue(
+            any("flash-next" in name for name in sourcing)
+            and any("27b" in name for name in sourcing),
+            f"both supported profiles must source the shared template pin: {sorted(sourcing)}",
+        )
+
+
+class TestDetectToolReferenceSupport(unittest.TestCase):
+    """Template capability for nested ``tool_reference`` parts."""
+
+    NORMALIZED_HISTORY_GUARD = """
+{%- for message in messages -%}
+{%- if message.role == 'assistant' -%}
+{%- for call in message.tool_calls | default([]) -%}
+{%- for key, value in call.function.arguments.items() -%}
+{{- key }}={{ value }}
+{%- endfor -%}
+{%- endfor -%}
+{%- elif message.role == 'tool' and message.content is not string
+    and message.content[0].type == 'text' -%}
+{{- raise_exception('ordinary tool text must be a string') }}
+{%- endif -%}
+{%- endfor -%}
+"""
+
+    NORMALIZED_TOOLS_GUARD = """
+{%- for tool in tools -%}
+{%- if tool.function.defer_loading is not sameas true
+    or tool.function.strict is not sameas false
+    or tool.function.description is not string -%}
+{{- raise_exception('tool schema defaults must be normalized') }}
+{%- endif -%}
+{%- endfor -%}
+"""
+
+    EXPANDING = """
+{%- for message in messages -%}
+{%- if message.role == 'system' and 'image' in message.content -%}
+{{- raise_exception('system message cannot hold an image') }}
+{%- endif -%}
+{%- if message.role == 'tool' and message.content is not string -%}
+{%- for part in message.content -%}
+{%- if part.type == 'tool_reference' -%}
+{%- for tool in tools if tool.function.name == part.name -%}
+[ref:{{ tool.function.name }}]
+{%- endfor -%}
+{%- endif -%}
+{%- endfor -%}
+{%- endif -%}
+{%- endfor -%}
+"""
+
+    def test_expanding_template_is_supported(self):
+        # ``raise_exception`` above is a global the real renderer provides; a
+        # probe environment without it would call this template broken.
+        self.assertTrue(detect_tool_reference_support(self.EXPANDING))
+
+    def test_normalized_tool_history_is_supported(self):
+        self.assertTrue(
+            detect_tool_reference_support(
+                self.NORMALIZED_HISTORY_GUARD + self.EXPANDING
+            )
+        )
+
+    def test_normalized_deferred_tool_schema_is_supported(self):
+        deferred_expansion = self.EXPANDING.replace(
+            "tool.function.name == part.name",
+            "tool.function.name == part.name and tool.function.defer_loading",
+        )
+        self.assertTrue(
+            detect_tool_reference_support(
+                self.NORMALIZED_TOOLS_GUARD + deferred_expansion
+            )
+        )
+
+    def test_name_independent_placeholder_is_not_supported(self):
+        # Emits a fixed marker for any reference: the name is lost either way,
+        # so the caller's text fallback is the better prompt.
+        placeholder = self.EXPANDING.replace("[ref:{{ tool.function.name }}]", "[ref]")
+        self.assertFalse(detect_tool_reference_support(placeholder))
+
+    def test_silently_dropped_reference_is_not_supported(self):
+        dropping = (
+            "{%- for message in messages -%}"
+            "{%- if message.content is string -%}{{ message.content }}{%- endif -%}"
+            "{%- endfor -%}"
+        )
+        self.assertFalse(detect_tool_reference_support(dropping))
+
+    def test_raising_template_is_not_supported(self):
+        raising = "{{ raise_exception('no tool answers here') }}"
+        self.assertFalse(detect_tool_reference_support(raising))
+
+    def test_renderer_globals_and_extensions_are_available(self):
+        timing = self.EXPANDING + "{{ strftime_now('%f') }}"
+        self.assertTrue(detect_tool_reference_support(timing))
+        self.assertTrue(
+            detect_tool_reference_support(
+                "{% generation %}" + self.EXPANDING + "{% endgeneration %}"
+            )
+        )
+
+    def test_serialized_references_are_not_native_support(self):
+        for content in ("message.content", "message.content | tojson"):
+            with self.subTest(content=content):
+                self.assertFalse(
+                    detect_tool_reference_support(
+                        "{% for message in messages %}{{ " + content + " }}{% endfor %}"
+                    )
+                )
+
+    def test_globally_rendered_schema_names_are_not_native_support(self):
+        globally_listed = "{% for tool in tools %}{{ tool.function.name }}{% endfor %}"
+        self.assertFalse(detect_tool_reference_support(globally_listed))
+        self.assertTrue(detect_tool_reference_support(globally_listed + self.EXPANDING))
+
+    def test_failed_control_does_not_establish_support(self):
+        rejects_text = (
+            "{% for message in messages if message.role == 'tool' %}"
+            "{% if message.content is string %}"
+            "{{ raise_exception('text is unsupported') }}{% endif %}{% endfor %}"
+        )
+        self.assertFalse(detect_tool_reference_support(rejects_text + self.EXPANDING))
+
+    def test_no_template_is_not_supported(self):
+        self.assertFalse(detect_tool_reference_support(None))
+        self.assertFalse(detect_tool_reference_support(""))
+
+    def test_pinned_pennyroyal_template_is_not_supported(self):
+        self.assertFalse(detect_tool_reference_support(_pennyroyal_chat_template()))
 
 
 class TestDetectInlineSystemSupport(unittest.TestCase):
