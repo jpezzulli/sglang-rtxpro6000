@@ -53,7 +53,10 @@ from sglang.srt.entrypoints.openai.protocol import (
     ToolChoiceFuncName,
 )
 from sglang.srt.observability.req_time_stats import monotonic_time
-from sglang.srt.parser.template_detection import detect_inline_system_support
+from sglang.srt.parser.template_detection import (
+    detect_inline_system_support,
+    detect_tool_reference_support,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -190,8 +193,19 @@ class AnthropicServing:
 
     def __init__(self, openai_serving_chat: OpenAIServingChat):
         self.openai_serving_chat = openai_serving_chat
-        self._merge_inline_system = not detect_inline_system_support(
-            self._chat_template()
+        chat_template = self._chat_template()
+        tokenizer_manager = getattr(openai_serving_chat, "tokenizer_manager", None)
+        tokenizer = getattr(tokenizer_manager, "tokenizer", None)
+        self._merge_inline_system = not detect_inline_system_support(chat_template)
+        # Preserve GLM's deferred-schema expansion where the template renders
+        # references. Other templates need text before content rendering; with
+        # no selected template, preserve the existing structured conversion.
+        self._renders_tool_reference = (
+            chat_template is None
+            or detect_tool_reference_support(
+                chat_template,
+                special_tokens_map=getattr(tokenizer, "special_tokens_map", None),
+            )
         )
 
     def _chat_template(self) -> Optional[str]:
@@ -330,9 +344,20 @@ class AnthropicServing:
                         # matches on `name`. Translate at the boundary.
                         ref_name = item.get("tool_name") or item.get("name")
                         if ref_name:
-                            tool_content_parts.append(
-                                {"type": "tool_reference", "name": ref_name}
-                            )
+                            if self._renders_tool_reference:
+                                tool_content_parts.append(
+                                    {"type": "tool_reference", "name": ref_name}
+                                )
+                            else:
+                                # No native renderer: keep the referenced name as
+                                # text. The surrounding tool message still carries
+                                # tool_call_id, and appending in place keeps the
+                                # original part order.
+                                text = f"Tool reference: {ref_name}"
+                                tool_text_parts.append(text)
+                                tool_content_parts.append(
+                                    {"type": "text", "text": text}
+                                )
                     elif item_type == "search_result":
                         search_text = _text_from_search_result(item)
                         if search_text:

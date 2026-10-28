@@ -627,6 +627,95 @@ def detect_inline_system_support(chat_template: Optional[str]) -> bool:
         return False
 
 
+def detect_tool_reference_support(
+    chat_template: Optional[str], *, special_tokens_map: Optional[dict] = None
+) -> bool:
+    """Whether nested references select and render their named tool.
+
+    Compare with a successfully rendered text control: globally listed schemas
+    alone do not prove reference support. An extra opaque field distinguishes
+    native rendering from dumping the content block as JSON or Python text.
+    """
+    if not chat_template:
+        return False
+    from transformers.utils.chat_template_utils import _compile_jinja_template
+
+    from sglang.srt.entrypoints.openai.protocol import Tool
+
+    referenced = ("__sglang_tool_reference_a__", "__sglang_tool_reference_b__")
+    opaque = "__sglang_unrendered_reference_field__"
+    messages = [
+        {"role": "user", "content": "t"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "__sglang_tool_reference_call__",
+                        "arguments": {},
+                    },
+                }
+            ],
+        },
+    ]
+    tools = [
+        # Match the forwarded schema, including nested defer_loading and the
+        # function defaults that native deferred-schema renderers may require.
+        Tool(
+            type="function",
+            defer_loading=True,
+            function={
+                "name": name,
+                "description": "",
+                "parameters": {"type": "object"},
+            },
+        ).model_dump(exclude_none=True)
+        for name in referenced
+    ]
+
+    def _render(content) -> str:
+        probe_messages = messages + [
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": content,
+            }
+        ]
+        # apply_chat_template supplies these tokenizer-owned values; inventing
+        # missing tokens would claim support the actual renderer does not have.
+        return template.render(
+            messages=probe_messages,
+            tools=tools,
+            add_generation_prompt=False,
+            **(special_tokens_map or {}),
+        )
+
+    try:
+        # Reuse the real renderer's sandbox, globals, filters and extensions.
+        template = _compile_jinja_template(chat_template)
+        # OpenAI history normalization parses arguments into a mapping and
+        # flattens pure tool-text parts to a string before template rendering.
+        # Probing the wire shapes would falsely reject templates relying on it.
+        control = _render("t")
+        for name, other in (referenced, referenced[::-1]):
+            rendered = _render(
+                [{"type": "tool_reference", "name": name, "probe_metadata": opaque}]
+            )
+            if (
+                opaque in rendered
+                or rendered.count(name) <= control.count(name)
+                or rendered.count(other) != control.count(other)
+            ):
+                return False
+        return True
+    except Exception:
+        # A failed control or reference render cannot establish native support.
+        return False
+
+
 def _detect_auto_parser(
     attr: str,
     ctx: TemplateDetectionContext,
