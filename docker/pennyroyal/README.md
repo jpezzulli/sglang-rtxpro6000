@@ -55,6 +55,10 @@ is copied out of the image and no image rebuild is needed.
 Use matching published source and image tags. Download the small launch-file
 set; a full source checkout is optional. `RELEASE_REF` names the published tag
 (see [release-3.1.3.json](../../release-3.1.3.json) for the 3.1.3 identity).
+3.1.4 is prepared but not yet published, so the `pennyroyal-v3.1.3` source and
+`v3.1.3` image below stay the currently available published pair; at
+publication, set `RELEASE_REF` to `pennyroyal-v3.1.4` and the image tag to
+`v3.1.4` together.
 
 ```bash
 RELEASE_REF='pennyroyal-v3.1.3'
@@ -149,7 +153,7 @@ the target checkpoint; add `--startup config/start-flash-next-dflash2.sh`
 for the optional DFlash2 profile, which also needs its draft checkpoint:
 
 ```bash
-IMAGE='ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3'   # published identity recorded in the release notes
+IMAGE='ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3'   # the published image for the launch files above; switch to v3.1.4 only when that image publishes
 ./run.sh --image "$IMAGE"
 ```
 
