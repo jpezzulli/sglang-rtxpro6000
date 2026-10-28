@@ -105,6 +105,32 @@ def test_array_only_control(width):
     )
 
 
+@pytest.mark.parametrize("raw", ["null", "NULL", "Null"])
+def test_declared_string_keeps_literal_null_text(raw, width):
+    check_value(STRING, raw, raw, width)
+
+
+@pytest.mark.parametrize("raw", ["null", "NULL", "Null"])
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"anyOf": [STRING_ARRAY, {"type": "null"}]},
+        {"anyOf": [STRING, {"type": "null"}]},
+        {"type": "integer"},
+        {},
+    ],
+)
+def test_null_coercion_remains_for_other_schemas(schema, raw, width):
+    check_value(schema, raw, None, width)
+
+
+@pytest.mark.parametrize("raw", ["null", "NULL", "Null"])
+def test_null_coercion_remains_for_unknown_parameter(raw, width):
+    tools = tools_for(STRING)
+    tools[0].function.parameters["properties"].clear()
+    assert parse(tool_call(raw), tools, width) == ("", [("record", {"value": None})])
+
+
 @pytest.mark.parametrize("keyword", ["anyOf", "oneOf"])
 @pytest.mark.parametrize("string_first", [True, False])
 @pytest.mark.parametrize(
