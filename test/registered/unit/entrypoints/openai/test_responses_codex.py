@@ -4,6 +4,7 @@ import asyncio
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from utils import StreamFixture, engine_chunk, make_serving
 
@@ -680,6 +681,271 @@ class CodexBoundaryTest(CustomTestCase):
             add_generation_prompt=True,
         )
         self.assertEqual(prompts[0].encode(), expected.encode())
+
+    def test_malformed_replayed_call_identity_returns_400(self):
+        for kind in ("function_call", "custom_tool_call"):
+            for identity in (
+                {},
+                {"name": None},
+                {"name": ""},
+                {"name": 3},
+                {"name": ["run"]},
+                {"name": "run", "namespace": 3},
+            ):
+                with self.subTest(kind=kind, identity=identity):
+                    serving = make_serving()
+                    req = request(
+                        input=[
+                            {
+                                "type": kind,
+                                "call_id": "call_bad",
+                                "arguments": "{}",
+                                "input": "payload",
+                                **identity,
+                            }
+                        ]
+                    )
+                    result = asyncio.run(serving.create_responses(req))
+                    self.assertEqual(result.status_code, 400)
+                    self.assertIn(
+                        b"namespace" if "namespace" in identity else b"name",
+                        result.body,
+                    )
+                    serving.tokenizer_manager.generate_request.assert_not_called()
+
+    def test_malformed_plaintext_agent_content_returns_400(self):
+        for fields in (
+            {"content": ["plaintext"]},
+            {"content": "plaintext"},
+            {"content": [{"type": "input_text", "text": 3}]},
+            {"content": [{"type": "input_text", "text": "hello"}], "agent": "reviewer"},
+        ):
+            with self.subTest(fields=fields):
+                serving = make_serving()
+                result = asyncio.run(
+                    serving.create_responses(
+                        request(input=[{"type": "agent_message", **fields}])
+                    )
+                )
+                self.assertEqual(result.status_code, 400)
+                self.assertIn(b"agent_message", result.body)
+                serving.tokenizer_manager.generate_request.assert_not_called()
+
+    def test_custom_replay_rejects_nonstring_input(self):
+        for payload in (None, 0, ["code"], {"code": "print(42)"}):
+            with self.subTest(payload=payload):
+                serving = make_serving()
+                result = asyncio.run(
+                    serving.create_responses(
+                        request(
+                            input=[
+                                {
+                                    "type": "custom_tool_call",
+                                    "call_id": "call_bad",
+                                    "name": "exec",
+                                    "input": payload,
+                                }
+                            ]
+                        )
+                    )
+                )
+                self.assertEqual(result.status_code, 400)
+                self.assertIn(b"string input", result.body)
+                serving.tokenizer_manager.generate_request.assert_not_called()
+
+    def test_inline_rebinding_uses_latest_schema_and_keeps_other_members(self):
+        from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
+
+        old = function(
+            "A",
+            description="old_schema",
+            parameters={"type": "object", "properties": {"value": {"type": "string"}}},
+        )
+        new = function(
+            "A",
+            description="new_schema",
+            parameters={"type": "object", "properties": {"value": {"type": "integer"}}},
+        )
+        serving = qwen_serving(is_multimodal=True)
+        captured = {}
+        install_engine_reply(serving, qwen_call("N.A", {"value": "7"}), captured)
+        req = request(
+            input=[
+                {"role": "user", "content": "before"},
+                {
+                    "type": "additional_tools",
+                    "tools": [namespace("N", old, function("B"))],
+                },
+                {"role": "assistant", "content": "between"},
+                {"type": "additional_tools", "tools": [namespace("N", new)]},
+                {"role": "user", "content": "after"},
+            ]
+        )
+        result = asyncio.run(serving.create_responses(req))
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(json.loads(result.output[0].arguments), {"value": 7})
+        prompt = captured["request"].text
+        self.assertLess(prompt.index("old_schema"), prompt.index("between"))
+        self.assertLess(prompt.index("between"), prompt.index("new_schema"))
+        self.assertLess(prompt.index("new_schema"), prompt.index("after"))
+        messages = serving._construct_input_messages(req)
+        current = serving._effective_tools(
+            ChatCompletionRequest(model="x", messages=messages)
+        )
+        self.assertEqual([tool.function.name for tool in current], ["N.A", "N.B"])
+        self.assertEqual(
+            current[0].function.parameters["properties"]["value"]["type"], "integer"
+        )
+
+    def test_restored_inline_tool_and_stored_rebinding_are_accepted(self):
+        old = function(
+            "A",
+            description="original_schema",
+            parameters={"type": "object", "properties": {"value": {"type": "string"}}},
+        )
+        serving = qwen_serving(is_multimodal=True)
+        captured = {}
+        install_engine_reply(serving, "ready", captured)
+        first = request(
+            store=True,
+            input=[
+                {"role": "user", "content": "before"},
+                {"type": "additional_tools", "tools": [namespace("N", old)]},
+                {"role": "user", "content": "restore"},
+                {"type": "additional_tools", "tools": [namespace("N", old)]},
+            ],
+        )
+        first_response = asyncio.run(serving.create_responses(first))
+        self.assertEqual(first_response.status, "completed")
+        new = function(
+            "A",
+            description="revised_schema",
+            parameters={"type": "object", "properties": {"value": {"type": "integer"}}},
+        )
+        second = request(
+            previous_response_id=first_response.id,
+            input=[
+                {"type": "additional_tools", "tools": [namespace("N", new)]},
+                {"role": "user", "content": "call A"},
+            ],
+        )
+        install_engine_reply(serving, qwen_call("N.A", {"value": "7"}), captured)
+        second_response = asyncio.run(serving.create_responses(second))
+        self.assertEqual(second_response.status, "completed")
+        self.assertEqual(json.loads(second_response.output[0].arguments), {"value": 7})
+        self.assertEqual(captured["request"].text.count("original_schema"), 2)
+        self.assertLess(
+            captured["request"].text.rindex("original_schema"),
+            captured["request"].text.index("revised_schema"),
+        )
+
+    def test_duplicate_identity_inside_single_inventory_returns_400(self):
+        for tools in (
+            [function(), function()],
+            [namespace("N", function("A"), function("A"))],
+            [namespace("N", function("A")), namespace("N", function("A"))],
+        ):
+            with self.subTest(tools=tools):
+                serving = make_serving()
+                result = asyncio.run(
+                    serving.create_responses(
+                        request(
+                            input=[
+                                {"role": "user", "content": "before"},
+                                {"type": "additional_tools", "tools": tools},
+                            ]
+                        )
+                    )
+                )
+                self.assertEqual(result.status_code, 400)
+
+    def _stream_custom_arguments(self, arguments, *, close_during_decode=False):
+        from sglang.srt.function_call.core_types import ToolCallItem
+
+        serving = make_serving()
+        serving.tool_call_parser = "qwen3_coder"
+        req = request(tools=[{"type": "custom", "name": "exec"}])
+        parser = Mock()
+        parser.detector.supports_structural_tag.return_value = True
+        parser.parse_stream_chunk.return_value = (
+            "",
+            [ToolCallItem(tool_index=0, name="exec", parameters=arguments)],
+        )
+        parser.parse_stream_end.return_value = ("", [])
+        chunks = [engine_chunk("tool arguments")]
+        if close_during_decode:
+            parser.parse_stream_chunk.side_effect = [
+                parser.parse_stream_chunk.return_value,
+                ("following text", []),
+            ]
+            chunks.append(engine_chunk("tool arguments and following text"))
+        with patch(
+            "sglang.srt.entrypoints.openai.serving_responses.FunctionCallParser",
+            return_value=parser,
+        ):
+            return StreamFixture(serving, req).run_seq(chunks)
+
+    def test_custom_prefix_ignores_nested_and_nonstring_input_fields(self):
+        from sglang.srt.entrypoints.openai.responses_adapters import (
+            decode_custom_tool_input_prefix,
+        )
+
+        self.assertEqual(
+            decode_custom_tool_input_prefix(
+                '{"other":{"input":"nested"},"input":"real"}'
+            ),
+            "real",
+        )
+        self.assertEqual(
+            decode_custom_tool_input_prefix('{"input":123,"other":"value"}'), ""
+        )
+
+    def test_custom_fallback_without_streamed_conflict_matches_completed_input(self):
+        from sglang.srt.entrypoints.openai.responses_adapters import (
+            decode_custom_tool_input,
+        )
+
+        for arguments in (
+            '{"other":{"input":"nested"},"input":"real"}',
+            '{"input":123,"other":"value"}',
+            '{"payload":"freeform"}',
+            "bare payload",
+        ):
+            with self.subTest(arguments=arguments):
+                seq = self._stream_custom_arguments(arguments)
+                self.assertEqual(seq[-1][0], "response.completed")
+                displayed = "".join(
+                    payload["delta"]
+                    for kind, payload in seq
+                    if kind == "response.custom_tool_call_input.delta"
+                )
+                executed = next(
+                    payload["item"]["input"]
+                    for kind, payload in seq
+                    if kind == "response.output_item.done"
+                )
+                self.assertEqual(displayed, executed)
+                self.assertEqual(executed, decode_custom_tool_input(arguments))
+
+    def test_conflicting_custom_input_fails_before_any_completed_call(self):
+        for arguments in ('{"input":"prefix"', '{"input":"first","input":"last"}'):
+            for close_during_decode in (False, True):
+                with self.subTest(
+                    arguments=arguments, close_during_decode=close_during_decode
+                ):
+                    seq = self._stream_custom_arguments(
+                        arguments, close_during_decode=close_during_decode
+                    )
+                    self.assertEqual(seq[-1][0], "response.failed")
+                    self.assertEqual(seq[-1][1]["response"]["status"], "failed")
+                    self.assertNotIn(
+                        "response.custom_tool_call_input.done",
+                        [kind for kind, _ in seq],
+                    )
+                    self.assertNotIn(
+                        "response.output_item.done", [kind for kind, _ in seq]
+                    )
+                    self.assertNotIn("response.completed", [kind for kind, _ in seq])
 
 
 if __name__ == "__main__":

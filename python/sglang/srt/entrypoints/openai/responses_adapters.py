@@ -136,15 +136,44 @@ def decode_custom_tool_input(arguments: str) -> str:
 
 
 def _payload_start(buffer: str) -> Optional[int]:
-    key = f'"{CUSTOM_TOOL_INPUT_KEY}"'
-    key_at = buffer.find(key)
-    if key_at < 0:
+    # Skip complete top-level fields with the standard decoder. Searching for a
+    # key substring would mistake nested input fields or a later key's quotes
+    # after a non-string input value for the custom payload.
+    decoder = json.JSONDecoder()
+
+    def skip_space(index):
+        while index < len(buffer) and buffer[index] in " \t\r\n":
+            index += 1
+        return index
+
+    index = skip_space(0)
+    if index >= len(buffer) or buffer[index] != "{":
         return None
-    colon = buffer.find(":", key_at + len(key))
-    if colon < 0:
-        return None
-    quote = buffer.find('"', colon + 1)
-    return quote + 1 if quote >= 0 else None
+    index = skip_space(index + 1)
+    while index < len(buffer):
+        try:
+            key, index = decoder.raw_decode(buffer, index)
+        except ValueError:
+            return None
+        index = skip_space(index)
+        if not isinstance(key, str) or index >= len(buffer) or buffer[index] != ":":
+            return None
+        index = skip_space(index + 1)
+        if (
+            key == CUSTOM_TOOL_INPUT_KEY
+            and index < len(buffer)
+            and buffer[index] == '"'
+        ):
+            return index + 1
+        try:
+            _, index = decoder.raw_decode(buffer, index)
+        except ValueError:
+            return None
+        index = skip_space(index)
+        if index >= len(buffer) or buffer[index] != ",":
+            return None
+        index = skip_space(index + 1)
+    return None
 
 
 def _unicode_escape(buffer: str, i: int) -> Optional[Tuple[str, int]]:
