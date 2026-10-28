@@ -2,53 +2,142 @@
 """Responses tools mapped onto the existing chat function-call path.
 
 Custom input shims are adapted from upstream PR38690 (Dovis01, JustinTong0323).
-Namespace inventory handling follows PR41178 (harmya), with escaped internal
-names so a top-level name cannot alias a namespaced member.
+Namespace inventory handling follows PR41178 (harmya).
+
+The chat function-call path has one flat name space, so a namespaced member
+needs a derived single name. Callers document that name with the generic MCP
+convention (``mcp__server__tool``), so the derivation prefers that spelling and
+keeps an explicit reversible binding for every declaration: prompt, named and
+required ``tool_choice``, parsed calls and replayed history all read the same
+table. Ordinary flat names are never rewritten, and a name the model produced
+that is not in the table is passed through instead of being guessed apart.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from sglang.srt.entrypoints.openai.protocol import ResponseTool
 
 CUSTOM_TOOL_INPUT_KEY = "input"
 
+#: Generic MCP naming convention: server, two underscores, tool.
+IDENTITY_SEPARATOR = "__"
 
-def internal_tool_name(name: str, namespace: Optional[str] = None) -> str:
-    """Keep ordinary names intact and reserve unescaped dots as separators.
+WireIdentity = Tuple[Optional[str], str]
 
-    Escaping percent first makes this injective even for a flat ``a.b`` tool,
-    namespace ``a`` / member ``b``, and names containing literal escapes.
-    The mapping is stateless, so replay needs only the wire identity.
+
+def _escape_part(value: str) -> str:
+    """Escape everything a derived spelling can be split back apart on.
+
+    Percent goes first, which keeps this injective for names that already
+    contain literal escapes.
     """
-
-    def escape(value):
-        return value.replace("%", "%25").replace(".", "%2E")
-
-    leaf = escape(name)
-    return f"{escape(namespace)}.{leaf}" if namespace is not None else leaf
+    return value.replace("%", "%25").replace(".", "%2E").replace("__", "%5F%5F")
 
 
-def tool_call_identity(name: str) -> dict[str, str]:
-    def unescape(value):
-        return value.replace("%2E", ".").replace("%25", "%")
+def identity_spelling(
+    name: str, namespace: Optional[str] = None, collision_level: int = 0
+) -> str:
+    """One model-visible spelling for one declared identity.
 
-    if "." in name:
-        namespace, leaf = name.split(".", 1)
-        return {"name": unescape(leaf), "namespace": unescape(namespace)}
-    return {"name": unescape(name)}
+    Level 0 is the generic convention. A contested level-0 spelling escalates
+    to the escaped ``namespace.leaf`` form and then re-escapes it per level, so
+    every level denotes exactly one identity.
+    """
+    if collision_level == 0:
+        return name if namespace is None else f"{namespace}{IDENTITY_SEPARATOR}{name}"
+    spelling = _escape_part(name)
+    if namespace is not None:
+        spelling = f"{_escape_part(namespace)}.{spelling}"
+    for _ in range(collision_level - 1):
+        spelling = _escape_part(spelling)
+    return spelling
 
 
-def expand_tool_namespaces(tools):
-    # Import here: protocol's named-choice translation uses internal_tool_name.
-    from sglang.srt.entrypoints.openai.protocol import ResponseTool
+class ToolIdentities:
+    """Declaration-derived bindings between wire identities and model names."""
 
-    expanded = []
+    def __init__(self, declarations: Iterable[Tuple[Optional[str], str, str]] = ()):
+        # ``type`` only distinguishes custom shims from function calls.
+        declared: Dict[WireIdentity, str] = {}
+        for namespace, name, tool_type in declarations:
+            declared[(namespace, name)] = tool_type
+        self._types: Dict[str, str] = {}
+        self._wire_of_name: Dict[str, WireIdentity] = {}
+        self._name_of_wire: Dict[WireIdentity, str] = {}
+        # Flat declarations claim their own spelling first, so an ordinary name
+        # survives no matter what a namespace flattens to; the rest is keyed by
+        # identity, never by the order an inventory arrived in.
+        for wire in sorted(
+            declared, key=lambda i: (i[0] is not None, i[0] or "", i[1])
+        ):
+            namespace, name = wire
+            level = 0
+            spelling = identity_spelling(name, namespace, level)
+            while spelling in self._wire_of_name:
+                level += 1
+                spelling = identity_spelling(name, namespace, level)
+            self._wire_of_name[spelling] = wire
+            self._name_of_wire[wire] = spelling
+            self._types[spelling] = declared[wire]
+
+    def model_name(self, name: str, namespace: Optional[str] = None) -> str:
+        """Spelling advertised for ``namespace``/``name``, declared here or not.
+
+        A replayed call for a tool this request no longer declares still has to
+        render as one deterministic name, and it cannot steal a spelling that a
+        live declaration already owns.
+        """
+        known = self._name_of_wire.get((namespace, name))
+        if known is not None:
+            return known
+        level = 0
+        spelling = identity_spelling(name, namespace, level)
+        while spelling in self._wire_of_name:
+            level += 1
+            spelling = identity_spelling(name, namespace, level)
+        return spelling
+
+    def declares(self, name: str, namespace: Optional[str] = None) -> bool:
+        return (namespace, name) in self._name_of_wire
+
+    def wire_identity(self, model_name: str) -> Optional[dict[str, str]]:
+        """Wire ``name``/``namespace`` of a model-emitted name, or None when the
+        request never advertised it: no identity is guessed out of a string."""
+        wire = self._wire_of_name.get(model_name)
+        if wire is None:
+            return None
+        namespace, name = wire
+        return {"name": name, "namespace": namespace} if namespace else {"name": name}
+
+    def is_custom(self, model_name: str) -> bool:
+        return self._types.get(model_name) == "custom"
+
+
+def tool_identities(tools) -> ToolIdentities:
+    """Build the bindings for one set of Responses tool declarations."""
+    declarations = []
+    for tool in tools:
+        if tool.type == "namespace":
+            declarations.extend(
+                (tool.name, child["name"], child["type"]) for child in tool.tools
+            )
+        elif tool.type in ("function", "custom"):
+            declarations.append((None, tool.name, tool.type))
+    return ToolIdentities(declarations)
+
+
+def expand_tool_namespaces(tools, identities: Optional[ToolIdentities] = None):
+    if identities is None:
+        identities = tool_identities(tools)
+    expanded: List[Any] = []
     for tool in tools:
         if tool.type == "namespace":
             for definition in tool.tools:
                 child = ResponseTool.model_validate(definition)
-                child.name = internal_tool_name(child.name, tool.name)
+                child.name = identities.model_name(child.name, tool.name)
                 child.description = (
                     "\n\n".join(
                         text for text in (tool.description, child.description) if text
@@ -58,7 +147,7 @@ def expand_tool_namespaces(tools):
                 expanded.append(child)
         elif tool.type in ("function", "custom"):
             expanded.append(
-                tool.model_copy(update={"name": internal_tool_name(tool.name)})
+                tool.model_copy(update={"name": identities.model_name(tool.name)})
             )
     return expanded
 

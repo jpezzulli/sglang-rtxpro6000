@@ -1866,9 +1866,15 @@ class ResponsesRequest(BaseModel):
         namespace = tool_choice.get("namespace")
         if namespace is not None and not isinstance(namespace, str):
             raise ValueError("Named tool_choice namespace must be a string or null.")
-        from sglang.srt.entrypoints.openai.responses_adapters import internal_tool_name
-
-        return {"type": "function", "name": internal_tool_name(name, namespace)}
+        # The wire identity stays intact here; the single flat name the chat
+        # path needs is derived from the request's declarations at that
+        # boundary, so a renamed leaf cannot desynchronise selection, history
+        # and parsed calls. The declared type carries through so the echoed
+        # choice matches the one the client sent.
+        identity = {"type": tool_choice["type"], "name": name}
+        if namespace is not None:
+            identity["namespace"] = namespace
+        return identity
 
     def to_sampling_params(
         self,
@@ -2082,17 +2088,9 @@ class ResponsesResponse(BaseModel):
                 {"format": {"type": "text"}} if _is_text_only(output) else None
             )
 
+        # A named selection echoes as the declared wire identity, so the
+        # internal flat name never leaks back onto the Responses surface.
         tool_choice = request.effective_tool_choice()
-        if isinstance(tool_choice, dict):
-            from sglang.srt.entrypoints.openai.responses_adapters import (
-                tool_call_identity,
-            )
-
-            # Internal qualified/escaped names belong only to the chat boundary.
-            tool_choice = {
-                "type": request.tool_choice["type"],
-                **tool_call_identity(tool_choice["name"]),
-            }
 
         return cls(
             id=request.request_id,
