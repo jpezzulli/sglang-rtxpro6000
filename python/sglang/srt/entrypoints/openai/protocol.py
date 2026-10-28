@@ -36,6 +36,7 @@ from typing import (
 )
 
 from openai.types.responses import (
+    ResponseCustomToolCall,
     ResponseFunctionToolCall,
     ResponseInputItemParam,
     ResponseOutputItem,
@@ -1591,8 +1592,8 @@ class ResponseReasoningParam(BaseModel):
     )
 
 
-# Only ``function`` / ``web_search*`` / ``code_interpreter`` are wired to
-# execution paths; the rest pass validation so clients aren't rejected.
+# Function/custom tools and namespace members use the chat tool-call path.
+# Built-ins retain their existing execution paths.
 RESPONSE_TOOL_TYPES = Literal[
     "function",
     "web_search",
@@ -1619,11 +1620,37 @@ class ResponseTool(BaseModel):
     strict: bool = False
     # Inner schemas for ``namespace`` tools.
     tools: Optional[List[Dict[str, Any]]] = None
+    format: Optional[Dict[str, Any]] = None
+    defer_loading: Optional[bool] = None
 
     @model_validator(mode="after")
     def validate_function_tool(self) -> ResponseTool:
-        if self.type == "function" and not self.name:
-            raise ValueError("Function tools must include a name.")
+        if self.type in ("function", "custom", "namespace") and not self.name:
+            raise ValueError(f"{self.type.capitalize()} tools must include a name.")
+        if self.type == "namespace":
+            if self.tools is None:
+                raise ValueError("Namespace tools must include a tools list.")
+            for child in self.tools:
+                if child.get("type") not in ("function", "custom"):
+                    raise ValueError(
+                        "Namespace entries must be function or custom tools."
+                    )
+                ResponseTool.model_validate(child)
+        return self
+
+
+class ResponseAdditionalTools(BaseModel):
+    type: Literal["additional_tools"]
+    tools: List[ResponseTool]
+
+    @model_validator(mode="after")
+    def validate_tools(self) -> ResponseAdditionalTools:
+        if any(
+            tool.type not in ("function", "custom", "namespace") for tool in self.tools
+        ):
+            raise ValueError(
+                "additional_tools supports function, custom and namespace tools."
+            )
         return self
 
 
@@ -1631,6 +1658,7 @@ ResponseInputOutputItem: TypeAlias = Union[
     ResponseInputItemParam,
     "ResponseReasoningItem",
     ResponseFunctionToolCall,
+    ResponseCustomToolCall,
 ]
 
 
@@ -1653,7 +1681,9 @@ class ResponsesRequest(BaseModel):
     ] = None
     # Accept dict-shaped items as the loose arm; downstream normalization
     # handles replayed shapes that don't satisfy every openai TypedDict.
-    input: Union[str, List[ResponseInputOutputItem], List[Dict[str, Any]]]
+    # Prefer the open wire object arm: SDK TypedDicts discard newer fields such
+    # as namespace, breaking callback replay even when validation succeeds.
+    input: Union[str, List[Union[Dict[str, Any], ResponseInputOutputItem]]]
     instructions: Optional[str] = None
     max_output_tokens: Optional[int] = None
     max_tool_calls: Optional[int] = None
@@ -1759,6 +1789,11 @@ class ResponsesRequest(BaseModel):
         if not isinstance(item, dict):
             return item
 
+        if item.get("type") == "additional_tools":
+            return ResponseAdditionalTools.model_validate(item).model_dump(
+                exclude_none=True
+            )
+
         # an output item replayed into input carries a string id; without this it'd
         # be read as an item-reference, drop its content, and fail as an empty {}.
         # input-item ids aren't resolved server-side, so just drop it.
@@ -1811,16 +1846,23 @@ class ResponsesRequest(BaseModel):
 
     def effective_tool_choice(self) -> Union[str, Dict[str, Any]]:
         """``tool_choice`` reduced to what the server can actually honor: of the
-        object forms only a named ``function`` survives, the rest (web_search,
-        mcp, ...) can't be forced through the tool-call parser."""
+        object forms a named function/custom tool (including namespace members)
+        survives; built-ins cannot be forced through the tool-call parser."""
         tool_choice = self.tool_choice
         if not isinstance(tool_choice, dict):
             return tool_choice
         name = tool_choice.get("name") or (tool_choice.get("function") or {}).get(
             "name"
         )
-        if tool_choice.get("type") == "function" and name:
-            return {"type": "function", "name": name}
+        if tool_choice.get("type") in ("function", "custom") and name:
+            from sglang.srt.entrypoints.openai.responses_adapters import (
+                internal_tool_name,
+            )
+
+            return {
+                "type": "function",
+                "name": internal_tool_name(name, tool_choice.get("namespace")),
+            }
         return "auto"
 
     def to_sampling_params(
@@ -2028,6 +2070,18 @@ class ResponsesResponse(BaseModel):
                 {"format": {"type": "text"}} if _is_text_only(output) else None
             )
 
+        tool_choice = request.effective_tool_choice()
+        if isinstance(tool_choice, dict):
+            from sglang.srt.entrypoints.openai.responses_adapters import (
+                tool_call_identity,
+            )
+
+            # Internal qualified/escaped names belong only to the chat boundary.
+            tool_choice = {
+                "type": request.tool_choice["type"],
+                **tool_call_identity(tool_choice["name"]),
+            }
+
         return cls(
             id=request.request_id,
             created_at=created_time,
@@ -2040,7 +2094,7 @@ class ResponsesResponse(BaseModel):
                 if request.parallel_tool_calls is not None
                 else True
             ),
-            tool_choice=request.effective_tool_choice(),
+            tool_choice=tool_choice,
             tools=request.tools,
             # fields for parity with v1/responses
             error=None,

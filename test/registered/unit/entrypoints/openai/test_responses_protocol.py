@@ -81,7 +81,17 @@ class ResponsesRequestTestCase(CustomTestCase):
             request = ResponsesRequest(
                 model="x",
                 input="hi",
-                tools=[{"type": tool_type}],
+                tools=[
+                    {
+                        "type": tool_type,
+                        **(
+                            {"name": "named"}
+                            if tool_type in ("custom", "namespace")
+                            else {}
+                        ),
+                        **({"tools": []} if tool_type == "namespace" else {}),
+                    }
+                ],
                 store=False,
             )
             self.assertEqual(request.tools[0].type, tool_type)
