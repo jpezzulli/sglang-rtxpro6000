@@ -1234,6 +1234,182 @@ class CodexToolIdentityTest(CustomTestCase):
             ["mcp__tavily__tavily_search"],
         )
 
+    def replayed(self, *identities, tools=None, position=1):
+        """History items for retired tools, with the inventory of the turn that
+        recorded them already gone."""
+        return [
+            {"role": "user", "content": "before"},
+            *(
+                {
+                    "type": "function_call",
+                    "name": name,
+                    "namespace": namespace,
+                    "arguments": "{}",
+                    "call_id": f"call_{index}",
+                }
+                for index, (namespace, name) in enumerate(identities)
+            ),
+            *(
+                {
+                    "type": "function_call_output",
+                    "call_id": f"call_{index}",
+                    "output": "done",
+                }
+                for index in range(len(identities))
+            ),
+            {"role": "user", "content": "after"},
+        ]
+
+    def test_retired_namespaced_identities_keep_distinct_replay_spellings(self):
+        """Two tools whose flattening collides must not share one name just
+        because neither is declared any more."""
+        serving = make_serving()
+        retired = (("a", "b__c"), ("a__b", "c"))
+        req = request(tools=[function("current")], input=self.replayed(*retired))
+        identities = serving._tool_identities(req)
+        names = [
+            call["function"]["name"]
+            for message in serving._construct_input_messages(req)
+            for call in message.get("tool_calls") or []
+        ]
+        self.assertEqual(len(set(names)), len(names))
+        self.assertEqual(
+            sorted(names),
+            sorted(identities.model_name(name, ns) for ns, name in retired),
+        )
+        # A retired identity renders identically whatever the call order was, and
+        # the live inventory keeps the convention either way.
+        reversed_req = request(
+            tools=[function("current")], input=self.replayed(*reversed(retired))
+        )
+        reversed_identities = serving._tool_identities(reversed_req)
+        self.assertEqual(
+            {
+                identities.model_name(name, ns) for ns, name in retired
+            },  # spellings belong to identities, not to history order
+            {reversed_identities.model_name(name, ns) for ns, name in retired},
+        )
+        self.assertEqual(identities.model_name("b__c", "a"), "a__b__c")
+        self.assertEqual(identities.model_name("c", "a__b"), "a%5F%5Fb.c")
+        self.assertEqual(identities.model_name("current"), "current")
+        # History is not an inventory: retired tools stay unselectable and
+        # receive no parsed output.
+        for namespace, name in retired:
+            self.assertFalse(identities.declares(name, namespace))
+        self.assertIsNone(identities.wire_identity("a%5F%5Fb.c"))
+        self.assertFalse(identities.is_custom("a%5F%5Fb.c"))
+        for spelling in ("a__b__c", "a%5F%5Fb.c"):
+            self.assertEqual(
+                OpenAIServingResponses._make_tool_call_item(
+                    spelling, "{}", identities
+                ).name,
+                spelling,
+            )
+        for namespace, name in retired:
+            with self.subTest(retired=(namespace, name)):
+                rejected = request(
+                    tools=[function("current")],
+                    tool_choice={
+                        "type": "function",
+                        "namespace": namespace,
+                        "name": name,
+                    },
+                    input=self.replayed(*retired),
+                )
+                result = asyncio.run(serving.create_responses(rejected))
+                self.assertEqual(result.status_code, 400)
+                self.assertIn(b"tool_choice", result.body)
+
+    def test_stored_replay_keeps_the_spellings_the_model_was_given(self):
+        """Retirement across a previous_response_id must not rename history."""
+        serving = qwen_serving()
+        engine = {}
+        install_engine_reply(
+            serving,
+            qwen_call("a__b__c", {}) + "\n" + qwen_call("a%5F%5Fb.c", {}),
+            engine,
+        )
+        first = request(
+            store=True,
+            tools=[namespace("a", function("b__c")), namespace("a__b", function("c"))],
+        )
+        first_identities = serving._tool_identities(first)
+        advertised = {
+            ("a", "b__c"): first_identities.model_name("b__c", "a"),
+            ("a__b", "c"): first_identities.model_name("c", "a__b"),
+        }
+        self.assertEqual(
+            advertised, {("a", "b__c"): "a__b__c", ("a__b", "c"): "a%5F%5Fb.c"}
+        )
+        first_response = asyncio.run(serving.create_responses(first))
+        self.assertEqual(
+            [(item.name, item.namespace) for item in first_response.output],
+            [("b__c", "a"), ("c", "a__b")],
+        )
+        install_engine_reply(serving, "answered", engine)
+        second = request(
+            previous_response_id=first_response.id,
+            tools=[function("current")],
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": "done",
+                }
+                for item in first_response.output
+            ],
+        )
+        second_identities = serving._tool_identities(second, first_response)
+        names = [
+            call["function"]["name"]
+            for message in serving._construct_input_messages(second, first_response)
+            for call in message.get("tool_calls") or []
+        ]
+        # The retired calls replay under the names the model was shown, and the
+        # live declaration keeps its own.
+        self.assertEqual(sorted(names), sorted(advertised.values()))
+        self.assertEqual(second_identities.model_name("current"), "current")
+        for namespace_name, name in advertised:
+            self.assertFalse(second_identities.declares(name, namespace_name))
+
+    def test_history_bindings_never_move_a_declaration(self):
+        """The callable half of the table is computed before any history half, so
+        adding retired calls cannot rename a live tool."""
+        from sglang.srt.entrypoints.openai.responses_adapters import ToolIdentities
+
+        declarations = [
+            (None, "current", "function"),
+            ("a", "b__c", "function"),
+            ("functions", "exec", "custom"),
+        ]
+        replayed = [
+            ("a__b", "c"),
+            ("a", "b__c"),
+            (None, "current"),
+            ("functions", "exec"),
+        ]
+        with_history = ToolIdentities(declarations, replayed)
+        without_history = ToolIdentities(declarations)
+        for namespace_name, name, _ in declarations:
+            self.assertEqual(
+                with_history.model_name(name, namespace_name),
+                without_history.model_name(name, namespace_name),
+            )
+            self.assertTrue(with_history.declares(name, namespace_name))
+        # A retired identity that wants a live tool's spelling takes the next one.
+        self.assertEqual(with_history.model_name("c", "a__b"), "a%5F%5Fb.c")
+        self.assertFalse(with_history.declares("c", "a__b"))
+        # Retired identities still may not collide with each other.
+        self.assertEqual(
+            len(
+                {
+                    with_history.model_name(name, namespace_name)
+                    for namespace_name, name in replayed
+                }
+            ),
+            len(replayed),
+        )
+
     def test_bindings_are_injective_and_ignore_inventory_order(self):
         identities = self.identities()
         reversed_identities = self.identities(list(reversed(self.DECLARATIONS)))

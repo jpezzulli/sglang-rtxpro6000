@@ -57,38 +57,55 @@ def identity_spelling(
 
 
 class ToolIdentities:
-    """Declaration-derived bindings between wire identities and model names."""
+    """Declaration-derived bindings between wire identities and model names.
 
-    def __init__(self, declarations: Iterable[Tuple[Optional[str], str, str]] = ()):
-        # ``type`` only distinguishes custom shims from function calls.
+    Replayed history can still name a tool the request no longer declares, so
+    those identities are bound to a spelling too: retired tools cannot collapse
+    onto one shared name. History bindings stay history-only -- never selectable
+    and never the destination of a parsed call -- because appearing in a
+    transcript does not make a tool callable again.
+    """
+
+    def __init__(
+        self,
+        declarations: Iterable[Tuple[Optional[str], str, str]] = (),
+        replayed: Iterable[WireIdentity] = (),
+    ):
+        # ``type`` only distinguishes custom shims from function calls, and only
+        # callable declarations carry one.
         declared: Dict[WireIdentity, str] = {}
         for namespace, name, tool_type in declarations:
             declared[(namespace, name)] = tool_type
+        replay_only = [wire for wire in dict.fromkeys(replayed) if wire not in declared]
+        self._declared = set(declared)
         self._types: Dict[str, str] = {}
         self._wire_of_name: Dict[str, WireIdentity] = {}
         self._name_of_wire: Dict[WireIdentity, str] = {}
-        # Flat declarations claim their own spelling first, so an ordinary name
-        # survives no matter what a namespace flattens to; the rest is keyed by
-        # identity, never by the order an inventory arrived in.
-        for wire in sorted(
-            declared, key=lambda i: (i[0] is not None, i[0] or "", i[1])
-        ):
-            namespace, name = wire
-            level = 0
-            spelling = identity_spelling(name, namespace, level)
-            while spelling in self._wire_of_name:
-                level += 1
+        # Callables claim first -- flat declarations before namespace members, so
+        # an ordinary name survives no matter what a namespace flattens to -- and
+        # retired tools land in the spellings left over. Both passes are keyed by
+        # identity, never by the order an inventory or a history arrived in.
+        for wires, callable_ in ((declared, True), (replay_only, False)):
+            for wire in sorted(
+                wires, key=lambda i: (i[0] is not None, i[0] or "", i[1])
+            ):
+                namespace, name = wire
+                level = 0
                 spelling = identity_spelling(name, namespace, level)
-            self._wire_of_name[spelling] = wire
-            self._name_of_wire[wire] = spelling
-            self._types[spelling] = declared[wire]
+                while spelling in self._wire_of_name:
+                    level += 1
+                    spelling = identity_spelling(name, namespace, level)
+                self._wire_of_name[spelling] = wire
+                self._name_of_wire[wire] = spelling
+                if callable_:
+                    self._types[spelling] = declared[wire]
 
     def model_name(self, name: str, namespace: Optional[str] = None) -> str:
-        """Spelling advertised for ``namespace``/``name``, declared here or not.
+        """Spelling bound to ``namespace``/``name``, callable or history-only.
 
-        A replayed call for a tool this request no longer declares still has to
-        render as one deterministic name, and it cannot steal a spelling that a
-        live declaration already owns.
+        An identity this object never learned about still renders as one
+        deterministic name and cannot take a spelling something else already
+        holds.
         """
         known = self._name_of_wire.get((namespace, name))
         if known is not None:
@@ -101,23 +118,28 @@ class ToolIdentities:
         return spelling
 
     def declares(self, name: str, namespace: Optional[str] = None) -> bool:
-        return (namespace, name) in self._name_of_wire
+        return (namespace, name) in self._declared
 
     def wire_identity(self, model_name: str) -> Optional[dict[str, str]]:
-        """Wire ``name``/``namespace`` of a model-emitted name, or None when the
-        request never advertised it: no identity is guessed out of a string."""
-        wire = self._wire_of_name.get(model_name)
-        if wire is None:
+        """Wire ``name``/``namespace`` of a model-emitted name, or None when this
+        request never declared that tool callable: no identity is guessed out of a
+        string, and a name that only survives in history routes nowhere.
+        """
+        if model_name not in self._types:
             return None
-        namespace, name = wire
+        namespace, name = self._wire_of_name[model_name]
         return {"name": name, "namespace": namespace} if namespace else {"name": name}
 
     def is_custom(self, model_name: str) -> bool:
         return self._types.get(model_name) == "custom"
 
 
-def tool_identities(tools) -> ToolIdentities:
-    """Build the bindings for one set of Responses tool declarations."""
+def tool_identities(tools, replayed: Iterable[WireIdentity] = ()) -> ToolIdentities:
+    """Build the bindings for one set of Responses tool declarations.
+
+    ``replayed`` takes the explicit wire identities of replayed call items, so a
+    retired tool keeps a spelling of its own without becoming callable.
+    """
     declarations = []
     for tool in tools:
         if tool.type == "namespace":
@@ -126,7 +148,7 @@ def tool_identities(tools) -> ToolIdentities:
             )
         elif tool.type in ("function", "custom"):
             declarations.append((None, tool.name, tool.type))
-    return ToolIdentities(declarations)
+    return ToolIdentities(declarations, replayed)
 
 
 def expand_tool_namespaces(tools, identities: Optional[ToolIdentities] = None):

@@ -303,7 +303,7 @@ class OpenAIServingResponses(OpenAIServingChat):
             prev_response = None
 
         try:
-            identities = self._tool_identities(request)
+            identities = self._tool_identities(request, prev_response)
             response_tools = expand_tool_namespaces(
                 self._effective_response_tools(request), identities
             )
@@ -607,7 +607,7 @@ class OpenAIServingResponses(OpenAIServingChat):
         prev_response: Optional[ResponsesResponse],
         tokenizer: Any,
     ):
-        identities = self._tool_identities(request)
+        identities = self._tool_identities(request, prev_response)
         messages = self._construct_input_messages(request, prev_response, identities)
 
         chat_tools = self._response_tools_to_chat_tools(request.tools, identities)
@@ -1133,12 +1133,47 @@ class OpenAIServingResponses(OpenAIServingChat):
             }.values()
         )
 
-    def _tool_identities(self, request: ResponsesRequest) -> ToolIdentities:
+    def _tool_identities(
+        self,
+        request: ResponsesRequest,
+        prev_response: Optional[ResponsesResponse] = None,
+    ) -> ToolIdentities:
         """One binding table per request: every history position, the parser
         inventory, ``tool_choice`` and the output items must agree on how a
         declared tool is spelled, so they all derive it from the same merged
-        inventory rather than from the one each call happens to hold."""
-        return tool_identities(self._effective_response_tools(request))
+        inventory rather than from the one each call happens to hold. Replayed
+        calls for retired tools join the table as history-only bindings."""
+        return tool_identities(
+            self._effective_response_tools(request),
+            self._replayed_tool_identities(request, prev_response),
+        )
+
+    def _replayed_tool_identities(
+        self,
+        request: ResponsesRequest,
+        prev_response: Optional[ResponsesResponse] = None,
+    ) -> list:
+        """Explicit wire identities named by replayed call items.
+
+        Only the client's own ``name``/``namespace`` pair is read here: history
+        never declares a tool again, so these become bindings, not callables.
+        """
+        replayed = []
+        for item in self._response_input_history(request, prev_response):
+            if hasattr(item, "model_dump"):
+                item = item.model_dump(exclude_none=True)
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") not in ("function_call", "custom_tool_call"):
+                continue
+            name, namespace = item.get("name"), item.get("namespace")
+            if (
+                isinstance(name, str)
+                and name
+                and (namespace is None or isinstance(namespace, str))
+            ):
+                replayed.append((namespace, name))
+        return replayed
 
     def _response_tools_to_chat_tools(self, tools, identities=None) -> list[Tool]:
         tools = (
@@ -1485,7 +1520,7 @@ class OpenAIServingResponses(OpenAIServingChat):
         identities: Optional[ToolIdentities] = None,
     ) -> list[ChatCompletionMessageParam]:
         messages: list[ChatCompletionMessageParam] = []
-        identities = identities or self._tool_identities(request)
+        identities = identities or self._tool_identities(request, prev_response)
         if request.instructions:
             messages.append(
                 {
