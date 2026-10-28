@@ -179,6 +179,26 @@ def test_references_use_enclosing_schema(keyword, raw, expected, width):
     check_value(schema, raw, expected, width, definitions)
 
 
+@pytest.mark.parametrize("keyword", ["anyOf", "oneOf"])
+@pytest.mark.parametrize(
+    "local_scope", [False, True], ids=["root-defs", "parameter-defs"]
+)
+@pytest.mark.parametrize(
+    "raw,expected", [(' ["owner/one"] ', ["owner/one"]), ("[123]", "[123]")]
+)
+def test_references_respect_parameter_id_scope(
+    keyword, local_scope, raw, expected, width
+):
+    definitions = {"Array": STRING_ARRAY}
+    schema = {keyword: [STRING, {"$ref": "#/$defs/Array"}]}
+    if local_scope:
+        schema.update({"$id": "urn:example:value", "$defs": definitions})
+        # Conflicting root definitions expose both missed conversions and
+        # values incorrectly accepted outside the parameter's resource scope.
+        definitions = {"Array": {"type": "array", "items": {"type": "integer"}}}
+    check_value(schema, raw, expected, width, definitions)
+
+
 @pytest.mark.parametrize(
     "branch,raw",
     [
