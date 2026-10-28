@@ -302,33 +302,30 @@ class OpenAIServingResponses(OpenAIServingChat):
         else:
             prev_response = None
 
-        response_tools = expand_tool_namespaces(self._effective_response_tools(request))
-        names = [tool.name for tool in response_tools]
-        if len(names) != len(set(names)):
-            return self.create_error_response(
-                "Callable tool names must be unique within each namespace.",
-                param="tools",
-            )
-        if request.tool_choice == "required" and not response_tools:
-            return self.create_error_response(
-                'tool_choice="required" requires at least one function or custom tool.'
-            )
-        choice = request.effective_tool_choice()
-        if isinstance(choice, dict) and choice["name"] not in names:
-            return self.create_error_response(
-                "Named tool_choice must refer to a declared callable tool.",
-                param="tool_choice",
-            )
-        if self.use_harmony and any(
-            tool.type in ("custom", "namespace")
-            for tool in self._effective_response_tools(request)
-        ):
-            return self.create_error_response(
-                "Custom and namespace tools are not supported with Harmony.",
-                param="tools",
-            )
-
         try:
+            response_tools = expand_tool_namespaces(
+                self._effective_response_tools(request)
+            )
+            names = [tool.name for tool in response_tools]
+            if request.tool_choice == "required" and not response_tools:
+                return self.create_error_response(
+                    'tool_choice="required" requires at least one function or custom tool.'
+                )
+            choice = request.effective_tool_choice()
+            if isinstance(choice, dict) and choice["name"] not in names:
+                return self.create_error_response(
+                    "Named tool_choice must refer to a declared callable tool.",
+                    param="tool_choice",
+                )
+            if self.use_harmony and any(
+                tool.type in ("custom", "namespace")
+                for tool in self._effective_response_tools(request)
+            ):
+                return self.create_error_response(
+                    "Custom and namespace tools are not supported with Harmony.",
+                    param="tools",
+                )
+
             model_name = request.model
             tokenizer = self.tokenizer_manager.tokenizer
             processed_messages: Optional[MessageProcessingResult] = None
@@ -1078,11 +1075,49 @@ class OpenAIServingResponses(OpenAIServingChat):
         )
 
     def _effective_response_tools(self, request: ResponsesRequest):
-        tools = list(request.tools)
+        inventories = [request.tools]
         for item in self._response_input_history(request):
             if isinstance(item, dict) and item.get("type") == "additional_tools":
-                tools.extend(ResponseAdditionalTools.model_validate(item).tools)
-        return tools
+                inventories.append(ResponseAdditionalTools.model_validate(item).tools)
+
+        bindings = {}
+        builtins = []
+        for inventory in inventories:
+            seen = set()
+            for tool in inventory:
+                if tool.type == "namespace":
+                    entries = [
+                        (
+                            (tool.name, child["name"]),
+                            tool.model_copy(update={"tools": [child]}),
+                        )
+                        for child in tool.tools
+                    ]
+                elif tool.type in ("function", "custom"):
+                    entries = [((None, tool.name), tool)]
+                else:
+                    builtins.append(tool)
+                    continue
+                for identity, declaration in entries:
+                    if identity in seen:
+                        raise ValueError(
+                            "Callable tool names must be unique within each inventory and namespace."
+                        )
+                    seen.add(identity)
+                    # Codex emits later additions and changed/restored definitions.
+                    # Rebind one leaf without dropping unmentioned namespace members;
+                    # historical declarations still render at their original positions.
+                    bindings[identity] = declaration
+        return [*bindings.values(), *builtins]
+
+    def _effective_tools(self, request: ChatCompletionRequest) -> list[Tool]:
+        # The chat renderer keeps message.tools in history. Its constraint and
+        # parser inventory must use the same latest bindings as Responses output.
+        return list(
+            {
+                tool.function.name: tool for tool in super()._effective_tools(request)
+            }.values()
+        )
 
     def _response_tools_to_chat_tools(self, request) -> list[Tool]:
         tools = (
@@ -1172,27 +1207,43 @@ class OpenAIServingResponses(OpenAIServingChat):
 
         msg_type = message.get("type")
         if msg_type in ("function_call", "custom_tool_call"):
+            name = message.get("name")
+            namespace = message.get("namespace")
+            if not isinstance(name, str) or not name:
+                raise ValueError(f"{msg_type} must include a non-empty string name.")
+            if namespace is not None and not isinstance(namespace, str):
+                raise ValueError(f"{msg_type} namespace must be a string or null.")
             message = {
                 **message,
-                "name": internal_tool_name(message["name"], message.get("namespace")),
+                "name": internal_tool_name(name, namespace),
             }
         if msg_type == "agent_message":
             # Plaintext inter-agent messages are conversation content. Routing
             # and orchestration remain the client's responsibility (PR35216).
+            content = message.get("content")
+            if not isinstance(content, list):
+                raise ValueError(
+                    "agent_message content must be a list of input_text parts."
+                )
             texts = []
-            for part in message.get("content") or []:
-                if part.get("type") != "input_text":
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != "input_text":
                     raise ValueError(
                         "Only plaintext input_text agent_message content is supported."
                     )
-                texts.append(part.get("text", ""))
+                if not isinstance(part.get("text"), str):
+                    raise ValueError(
+                        "agent_message input_text parts must include a string text."
+                    )
+                texts.append(part["text"])
             if not texts:
                 raise ValueError(
                     "agent_message must contain plaintext input_text content."
                 )
-            author = message.get("author") or (message.get("agent") or {}).get(
-                "agent_name"
-            )
+            agent = message.get("agent")
+            if agent is not None and not isinstance(agent, dict):
+                raise ValueError("agent_message agent must be an object or null.")
+            author = message.get("author") or (agent or {}).get("agent_name")
             recipient = message.get("recipient")
             header = "[agent message"
             if author:
@@ -1201,10 +1252,12 @@ class OpenAIServingResponses(OpenAIServingChat):
                 header += f" to {recipient}"
             return {"role": "user", "content": header + "]\n" + "\n".join(texts)}
         if msg_type == "custom_tool_call":
+            if not isinstance(message.get("input"), str):
+                raise ValueError("custom_tool_call must include a string input.")
             message = {
                 **message,
                 "type": "function_call",
-                "arguments": encode_custom_tool_input(message.get("input") or ""),
+                "arguments": encode_custom_tool_input(message["input"]),
             }
             msg_type = "function_call"
         if msg_type == "function_call":
@@ -2382,6 +2435,13 @@ class OpenAIServingResponses(OpenAIServingChat):
             }
             if state["custom"]:
                 payload = completed_item.input
+                if not payload.startswith(state["payload"]):
+                    # Streamed input cannot be retracted. A malformed shim or
+                    # duplicate key must not execute a payload different from
+                    # the one the client already displayed.
+                    raise ValueError(
+                        "Custom tool input conflicts with its streamed prefix."
+                    )
                 remainder = payload[len(state["payload"]) :]
                 if remainder:
                     events.append(
@@ -2425,6 +2485,19 @@ class OpenAIServingResponses(OpenAIServingChat):
             emitted_items.append(completed_item)
             state["done"] = True
             return events
+
+        def _failed_stream_event(error):
+            failed = ResponsesResponse.from_request(
+                request,
+                sampling_params,
+                model_name=model_name,
+                created_time=created_time,
+                output=[],
+                status="failed",
+                usage=None,
+            ).model_dump()
+            failed["error"] = {"code": "server_error", "message": str(error)}
+            return _send_event({"type": "response.failed", "response": failed})
 
         try:
             async for ctx in result_generator:
@@ -2713,26 +2786,23 @@ class OpenAIServingResponses(OpenAIServingChat):
                     yield ev
         except Exception as e:
             logger.exception("Error while streaming /v1/responses")
-            failed = ResponsesResponse.from_request(
-                request,
-                sampling_params,
-                model_name=model_name,
-                created_time=created_time,
-                output=[],
-                status="failed",
-                usage=None,
-            ).model_dump()
-            failed["error"] = {"code": "server_error", "message": str(e)}
-            yield _send_event({"type": "response.failed", "response": failed})
+            yield _failed_stream_event(e)
             return
 
-        for ev in _close_reasoning_item():
-            yield ev
-        for ev in _close_message_item():
-            yield ev
-        for tool_index in list(tool_call_states):
-            for ev in _close_tool_call_state(tool_index):
+        try:
+            for ev in _close_reasoning_item():
                 yield ev
+            for ev in _close_message_item():
+                yield ev
+            for tool_index in list(tool_call_states):
+                for ev in _close_tool_call_state(tool_index):
+                    yield ev
+        except ValueError as e:
+            # Final chunks can leave a malformed custom shim open even without
+            # another decode increment. Preserve the same failed terminal wire
+            # behavior as a conflict detected while decoding.
+            yield _failed_stream_event(e)
+            return
 
         final_output_items = list(emitted_items)
 
