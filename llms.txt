@@ -23,7 +23,14 @@ The 27B FP8 DFlash2 profile
 is unchanged at fixed block 8. Native width routing ships as the bundled
 tiered policy (block 8 at one running request, block 4 at two or more);
 since 3.1.2 the policy is selectable with `PENNY_MTP_POLICY` and `tiered`
-remains the default. The current release is Penny Royal 3.1.3, six accepted
+remains the default. The prepared release is Penny Royal 3.1.4, one Anthropic
+fix awaiting publication: histories carrying recognized nested
+`tool_reference` blocks that returned HTTP 500 on the bundled Froggeric v22.5
+template now render safely, preserving names, order and IDs, keeping native
+structured handling where supported, with unsupported blocks still returning a
+clean HTTP 400, the chat template unchanged and no default, setting or sampling
+movement (issue #137, PR #138, reported by @BoneGoat). Until that tag and image
+publish, the current release is Penny Royal 3.1.3, six accepted
 correctness fixes over the 3.1.2 source: Anthropic thinking accepted without a
 `budget_tokens` figure (#124), an explicit `reasoning.effort` on the Responses
 API outranking the launch default, incomplete NIXL file-backed restores refused
@@ -161,6 +168,8 @@ actual answer grading on the qualified sources; extended or repetitive
 reasoning is not penalized and `ask_user` is a valid tool choice. Recorded
 deviations are listed with the measurements.
 
+- [3.1.4 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.4.md): Anthropic nested `tool_reference` fix; tag, image build and digest pending publication.
+- [3.1.4 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.4.json): fix identity, reused validation evidence and pending publication fields.
 - [3.1.3 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.3.md): six accepted correctness fixes, the 27B DFlash2 maturity correction, reused validation evidence and open exceptions.
 - [3.1.3 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.3.json): Fix identities, validation scope and published image identity.
 - [3.1.2 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.2.md): native-MTP width-policy setting, DFlash2 checkpoint-tracking fix, EPD idle-sleep fix, DFlash2 alpha labeling and contributor acknowledgements.

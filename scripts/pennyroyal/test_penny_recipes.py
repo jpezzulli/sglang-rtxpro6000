@@ -36,7 +36,7 @@ ADAPTIVE_NEXT_V302_SHA256 = (
 ADAPTIVE_NEXT_FIXED_W4_SHA256 = (
     "51644008674cd048adda2a38355a8302a032ce31c7f7d9dd9319b5cd4c3db3cd"
 )
-RELEASED_IMAGE = "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3"
+RELEASED_IMAGE = "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.4"
 TOKEN_MAP_SHA256 = "becfa41d394b86c26c632bea8f3c6ea64bbb76d7b238d8673c06afae21269f25"
 # The approved fixed width-routing policy for the Flash-Next DFlash2 profile:
 # one candidate per tier, block 6 at batch 1 and block 4 at batch 2 or more.

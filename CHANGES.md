@@ -1,5 +1,20 @@
 # Penny Royal release history
 
+## 3.1.4 — Anthropic nested tool references rendered safely (publication pending)
+
+Prepared as the single-fix release for issue #137 / PR #138. The
+`pennyroyal-v3.1.4` tag and the `v3.1.4` image are not published yet; pending
+fields are in [release-3.1.4.json](release-3.1.4.json).
+
+- Anthropic histories carrying recognized nested `tool_reference` blocks
+  returned HTTP 500 on the bundled Froggeric v22.5 template, which has no
+  native reference expansion. The adapter now renders recognized references as
+  text — names, order and IDs preserved — and keeps native structured handling
+  where supported: the reported reproduction returns HTTP 200, ordinary prompt
+  bytes are unchanged and unsupported blocks still return a clean HTTP 400.
+  The chat template, defaults, settings and sampling behavior are unchanged
+  (head `7a5e449c`; reported by @BoneGoat).
+
 ## 3.1.3 — Six correctness fixes and the 27B DFlash2 maturity correction
 
 Published October 27, 2026 as `pennyroyal-v3.1.3`: merged PRs #127-#133, with

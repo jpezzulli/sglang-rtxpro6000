@@ -1,0 +1,83 @@
+{
+  "schema": "release-notes/3.1.4",
+  "version": "3.1.4",
+  "status": {
+    "is_draft": true,
+    "publication_approved": false,
+    "published": false,
+    "container": "pending",
+    "note": "Prepared, not published: the pennyroyal-v3.1.4 tag and the v3.1.4 image do not exist yet. Until the tag, image build, digest verification and host-native banner check complete, 3.1.3 remains the published release."
+  },
+  "source": {
+    "tested_base": "177697b3d10fc0a4bcb17b3d84a378eecc828f68",
+    "integration_base": "441c6d9c288f35591c94de7014528f1dde50dac8",
+    "integration_note": "These release assets sit on a local integration of PR #138 head 7a5e449cb8b3ba9d2a773a165df6534ba55318f0 onto main; the canonical merge and tag happen at publication.",
+    "release_tag": "pennyroyal-v3.1.4",
+    "release_tag_status": "pending",
+    "release_url": "https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v3.1.4",
+    "integrated_commits": {
+      "7a5e449cb8b3ba9d2a773a165df6534ba55318f0": {
+        "issues": [137],
+        "pr": 138,
+        "merge_commit": null
+      }
+    },
+    "pull_requests": [
+      {
+        "number": 138,
+        "head": "7a5e449cb8b3ba9d2a773a165df6534ba55318f0",
+        "merge_commit": null,
+        "fixes": "Anthropic nested tool_reference blocks returned HTTP 500 on the bundled Froggeric v22.5 template (#137)"
+      }
+    ]
+  },
+  "container": {
+    "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.4",
+    "candidate_image": null,
+    "digest": null,
+    "build_url": null,
+    "source_revision": null,
+    "note": "No image has been built or verified for 3.1.4. The currently published image remains ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3, digest sha256:cdba5f8d72098813454aa552bad35873d65b2ba8cd72f93f3ae3ed7057c0636a, recorded in release-3.1.3.json."
+  },
+  "changes": [
+    {
+      "commit": "7a5e449cb8b3ba9d2a773a165df6534ba55318f0",
+      "pr": 138,
+      "issues": [137],
+      "summary": "Anthropic requests whose histories carry recognized nested tool_reference blocks are adapted to the template's support: rendered as text preserving names, order and IDs on templates without native reference expansion (the bundled Froggeric v22.5 template is unchanged), with native structured handling retained where supported. The reported 500 reproduction returns 200, ordinary prompt bytes are unchanged, and unsupported blocks keep the clean HTTP 400. The chat template, defaults, configuration and sampling behavior are unchanged.",
+      "profiles": [
+        "Anthropic-compatible /v1/messages"
+      ]
+    }
+  ],
+  "defaults_unchanged": {
+    "native_mtp_width_policy": "tiered (block 8 at one running request, block 4 at two or more)",
+    "operator_local_selection": "adaptive width policy, medium reasoning effort, diagnostics off",
+    "launcher_default_reasoning_effort": "medium",
+    "local_diagnostics": "off",
+    "note": "No settings, defaults or sampling changes; the DFlash2 maturity labels and the draft host-RAM guidance (measured 24.83 GB beyond the 96 GB target/Mamba budget on 27B) carry over unchanged."
+  },
+  "validation": {
+    "review": "Three sequential reviews of PR #138, final clean.",
+    "focused_cpu_checks": "Accepted run on head 7a5e449c over the published 3.1.3 base 177697b3: 145 CPU tests with 68 subtests passed; one unrelated uncached external-tokenizer test deselected. Reused evidence, not rerun.",
+    "ci": "Contributor CI run 40745879894 green.",
+    "live_checks": "22 live checks passed across both 27B FP8/DFlash2 and Flash-Next NVFP4/native NEXTN, including the original 500-to-200 reproduction, streaming, mixed references, token counts, expected HTTP 400s, and generation/parallel-tool requests; no Xid in that window. The original 3.1.3 candidate ef3258749bbe022e38a5b18922a0085320a59928 was restored afterwards and passed 5/5 restoration checks.",
+    "container_build": "pending: no image built, no digest verified. Image verification and the host-native banner check are open publication gates.",
+    "nvme_serving": "not run",
+    "exceptions": [
+      "Publication, container build, digest verification and host-native runtime verification are all pending gates; nothing here asserts a published 3.1.4 tag or image."
+    ]
+  },
+  "contributors": [
+    {
+      "name": "BoneGoat",
+      "url": "https://github.com/BoneGoat",
+      "contribution": "Report and reproduction for issue #137"
+    },
+    {
+      "name": "Penny Royal",
+      "email": "Pennyroyal@agentmail.to",
+      "contribution": "Anthropic nested tool-reference adaptation (PR #138) and release documentation"
+    }
+  ]
+}
