@@ -8,11 +8,16 @@ from unittest.mock import Mock, patch
 
 from utils import StreamFixture, engine_chunk, make_serving
 
-from sglang.srt.entrypoints.openai.protocol import ResponsesRequest, ResponsesResponse
+from sglang.srt.entrypoints.openai.protocol import (
+    ResponsesRequest,
+    ResponsesResponse,
+    ResponseTool,
+)
+from sglang.srt.entrypoints.openai.serving_responses import OpenAIServingResponses
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
-register_cpu_ci(est_time=8, suite="base-a-test-cpu")
+register_cpu_ci(est_time=12, suite="base-a-test-cpu")
 
 
 def function(name="run", **kwargs):
@@ -287,9 +292,9 @@ class CodexBoundaryTest(CustomTestCase):
             ]
         )
         text = (
-            qwen_call("functions.exec", {"input": payload})
+            qwen_call("functions__exec", {"input": payload})
             + "\n"
-            + qwen_call("functions.wait", {})
+            + qwen_call("functions__wait", {})
         )
         full = serving._make_response_output_items(
             req, text, serving.tokenizer_manager.tokenizer, require_reasoning=False
@@ -379,14 +384,14 @@ class CodexBoundaryTest(CustomTestCase):
             tokenize=False,
             add_generation_prompt=True,
         )
-        self.assertLess(prompt.index("before_inventory"), prompt.index("later.search"))
-        self.assertLess(prompt.index("later.search"), prompt.index("middle_marker"))
+        self.assertLess(prompt.index("before_inventory"), prompt.index("later__search"))
+        self.assertLess(prompt.index("later__search"), prompt.index("middle_marker"))
         self.assertLess(
             prompt.index("middle_marker"), prompt.index("Additional tools:\n[]")
         )
         self.assertEqual(
             [t.function.name for t in serving._effective_tools(chat)],
-            ["initial", "later.search"],
+            ["initial", "later__search"],
         )
         self.assertTrue(processed.prompt_ids)
 
@@ -441,10 +446,10 @@ class CodexBoundaryTest(CustomTestCase):
         self.assertEqual(len(tools), 3)
         by_name = {tool.function.name: tool.function for tool in tools}
         self.assertEqual(
-            by_name["mcp__tavily.tavily_search"].parameters["required"], ["query"]
+            by_name["mcp__tavily__tavily_search"].parameters["required"], ["query"]
         )
         self.assertEqual(
-            by_name["mcp__tavily.tavily_extract"].parameters["properties"]["urls"],
+            by_name["mcp__tavily__tavily_extract"].parameters["properties"]["urls"],
             req.tools[1].tools[0]["parameters"]["properties"]["urls"],
         )
         for name in by_name:
@@ -457,7 +462,7 @@ class CodexBoundaryTest(CustomTestCase):
         adapted = make_serving()._response_tools_to_chat_tools(req)
         self.assertEqual(len(adapted), 1)
         self.assertEqual(
-            adapted[0].function.name, "mcp__codex_apps__github._search_issues"
+            adapted[0].function.name, "mcp__codex_apps__github___search_issues"
         )
         self.assertEqual(adapted[0].function.parameters, tool["tools"][0]["parameters"])
         types = adapted[0].function.parameters["properties"]["repository_full_name"][
@@ -566,7 +571,7 @@ class CodexBoundaryTest(CustomTestCase):
                 captured = {}
                 install_engine_reply(
                     serving,
-                    qwen_call("functions.exec", {"input": "print(42)"}),
+                    qwen_call("functions__exec", {"input": "print(42)"}),
                     captured,
                 )
                 req = request(
@@ -587,7 +592,7 @@ class CodexBoundaryTest(CustomTestCase):
                 self.assertEqual(result.status, "completed")
                 self.assertEqual(result.output[0].type, "custom_tool_call")
                 self.assertEqual(result.output[0].input, "print(42)")
-                self.assertIn("functions.exec", captured["sampling"]["structural_tag"])
+                self.assertIn("functions__exec", captured["sampling"]["structural_tag"])
                 if isinstance(choice, dict):
                     self.assertEqual(result.tool_choice, choice)
 
@@ -624,7 +629,7 @@ class CodexBoundaryTest(CustomTestCase):
         serving = qwen_serving(is_multimodal=True)
         captured = {}
         install_engine_reply(
-            serving, qwen_call("functions.exec", {"input": "print(42)"}), captured
+            serving, qwen_call("functions__exec", {"input": "print(42)"}), captured
         )
         first = request(
             store=True,
@@ -651,7 +656,7 @@ class CodexBoundaryTest(CustomTestCase):
         )
         second_response = asyncio.run(serving.create_responses(second))
         self.assertEqual(second_response.status, "completed")
-        self.assertIn("functions.exec", captured["request"].text)
+        self.assertIn("functions__exec", captured["request"].text)
         self.assertIn("print(42)", captured["request"].text)
         self.assertIn("42", captured["request"].text)
         self.assertEqual(
@@ -660,7 +665,9 @@ class CodexBoundaryTest(CustomTestCase):
         third = request(previous_response_id=second_response.id, input="Continue")
         third_response = asyncio.run(serving.create_responses(third))
         self.assertEqual(third_response.status, "completed")
-        self.assertEqual(captured["request"].text.count("<function=functions.exec>"), 1)
+        self.assertEqual(
+            captured["request"].text.count("<function=functions__exec>"), 1
+        )
 
     def test_ordinary_text_prompt_matches_direct_chat_rendering(self):
         serving = qwen_serving(is_multimodal=True)
@@ -768,7 +775,7 @@ class CodexBoundaryTest(CustomTestCase):
         )
         serving = qwen_serving(is_multimodal=True)
         captured = {}
-        install_engine_reply(serving, qwen_call("N.A", {"value": "7"}), captured)
+        install_engine_reply(serving, qwen_call("N__A", {"value": "7"}), captured)
         req = request(
             input=[
                 {"role": "user", "content": "before"},
@@ -792,7 +799,7 @@ class CodexBoundaryTest(CustomTestCase):
         current = serving._effective_tools(
             ChatCompletionRequest(model="x", messages=messages)
         )
-        self.assertEqual([tool.function.name for tool in current], ["N.A", "N.B"])
+        self.assertEqual([tool.function.name for tool in current], ["N__A", "N__B"])
         self.assertEqual(
             current[0].function.parameters["properties"]["value"]["type"], "integer"
         )
@@ -829,7 +836,7 @@ class CodexBoundaryTest(CustomTestCase):
                 {"role": "user", "content": "call A"},
             ],
         )
-        install_engine_reply(serving, qwen_call("N.A", {"value": "7"}), captured)
+        install_engine_reply(serving, qwen_call("N__A", {"value": "7"}), captured)
         second_response = asyncio.run(serving.create_responses(second))
         self.assertEqual(second_response.status, "completed")
         self.assertEqual(json.loads(second_response.output[0].arguments), {"value": 7})
@@ -970,27 +977,27 @@ class CodexBoundaryTest(CustomTestCase):
                 self.assertIn(b"tool_choice", result.body)
                 serving.tokenizer_manager.generate_request.assert_not_called()
 
-    def test_dotted_and_namespaced_named_selection_controls(self):
+    def test_delimiter_bearing_names_and_named_selection_controls(self):
         tools = [
             function("flat.name"),
             namespace("space.dot", function("leaf.name")),
             namespace("custom.ns", {"type": "custom", "name": "exec.name"}),
         ]
         for choice, internal, parameters in (
-            ({"type": "function", "name": "flat.name"}, "flat%2Ename", {}),
+            ({"type": "function", "name": "flat.name"}, "flat.name", {}),
             (
                 {"type": "function", "function": {"name": "flat.name"}},
-                "flat%2Ename",
+                "flat.name",
                 {},
             ),
             (
                 {"type": "function", "namespace": "space.dot", "name": "leaf.name"},
-                "space%2Edot.leaf%2Ename",
+                "space.dot__leaf.name",
                 {},
             ),
             (
                 {"type": "custom", "namespace": "custom.ns", "name": "exec.name"},
-                "custom%2Ens.exec%2Ename",
+                "custom.ns__exec.name",
                 {"input": "code"},
             ),
         ):
@@ -1023,7 +1030,7 @@ class CodexBoundaryTest(CustomTestCase):
             with self.subTest(payload=payload):
                 result = serving._make_response_output_items(
                     req,
-                    qwen_call("functions.exec", {"input": payload}),
+                    qwen_call("functions__exec", {"input": payload}),
                     serving.tokenizer_manager.tokenizer,
                     require_reasoning=False,
                 )
@@ -1036,7 +1043,7 @@ class CodexBoundaryTest(CustomTestCase):
         )
         for payload in ("null", "NULL", "Null"):
             with self.subTest(payload=payload):
-                text = qwen_call("functions.exec", {"input": payload})
+                text = qwen_call("functions__exec", {"input": payload})
                 chunks = [engine_chunk(text[:i]) for i in range(1, len(text), 3)] + [
                     engine_chunk(text, finish=True)
                 ]
@@ -1054,6 +1061,296 @@ class CodexBoundaryTest(CustomTestCase):
                 self.assertEqual(displayed, payload)
                 self.assertEqual(completed, payload)
                 self.assertEqual(seq[-1][0], "response.completed")
+
+
+class CodexToolIdentityTest(CustomTestCase):
+    """Declaration-derived tool identity: declarations, selection, replayed
+    history and parsed calls all agree on one model-visible name."""
+
+    DECLARATIONS = [
+        ("mcp__tavily", "tavily_search", "function"),
+        ("one", "run", "function"),
+        ("two", "run", "function"),
+        ("a", "b__c", "function"),
+        ("a__b", "c", "function"),
+        ("space.dot", "leaf.name", "function"),
+        ("pct", "100%-loaded", "function"),
+        ("functions", "exec", "custom"),
+        (None, "run", "function"),
+        (None, "one.run", "function"),
+        (None, "mcp__tavily__tavily_search", "function"),
+    ]
+
+    def tools(self, declarations=None):
+        declarations = declarations or self.DECLARATIONS
+        return [
+            ResponseTool.model_validate(
+                namespace(namespace_name, {**function(name), "type": tool_type})
+                if namespace_name is not None
+                else {**function(name), "type": tool_type}
+            )
+            for namespace_name, name, tool_type in declarations
+        ]
+
+    def identities(self, declarations=None):
+        # Imported per call so an older tree fails inside the focused test that
+        # needs the binding table, not during collection of the whole module.
+        from sglang.srt.entrypoints.openai.responses_adapters import tool_identities
+
+        return tool_identities(self.tools(declarations))
+
+    def model_name(self, name, namespace_name=None, tool_type="function"):
+        return self.identities([(namespace_name, name, tool_type)]).model_name(
+            name, namespace_name
+        )
+
+    def test_generic_naming_advertises_the_double_underscore_identity(self):
+        """The captured request only states the convention: nothing names this
+        tool, so the advertised identity has to satisfy the guidance itself."""
+        captured = fixture("codex_generic_mcp_naming.json")["request"]
+        guidance = captured["instructions"]
+        self.assertEqual(guidance.count("mcp__server__tool"), 2)
+        self.assertNotIn("tavily", guidance)
+
+        req = ResponsesRequest.model_validate(captured)
+        serving = qwen_serving(is_multimodal=True)
+        by_name = {
+            tool.function.name: tool.function
+            for tool in serving._response_tools_to_chat_tools(req)
+        }
+        self.assertEqual(list(by_name), ["mcp__tavily__tavily_search"])
+        self.assertEqual(
+            by_name["mcp__tavily__tavily_search"].parameters["required"], ["query"]
+        )
+        _, prompts, _, _ = asyncio.run(
+            serving._make_request(req, None, serving.tokenizer_manager.tokenizer)
+        )
+        self.assertIn("mcp__tavily__tavily_search", prompts[0])
+        self.assertNotIn("mcp__tavily.tavily_search", prompts[0])
+
+    def test_generic_guidance_routes_full_stream_and_named_selection(self):
+        captured = fixture("codex_generic_mcp_naming.json")["request"]
+        call = qwen_call("mcp__tavily__tavily_search", {"query": "pathlib"})
+        for choice in (
+            "auto",
+            "required",
+            {"type": "function", "namespace": "mcp__tavily", "name": "tavily_search"},
+        ):
+            with self.subTest(tool_choice=choice):
+                serving = qwen_serving(is_multimodal=True)
+                engine = {}
+                install_engine_reply(serving, call, engine)
+                result = asyncio.run(
+                    serving.create_responses(
+                        ResponsesRequest.model_validate(
+                            {**captured, "tool_choice": choice}
+                        )
+                    )
+                )
+                self.assertEqual(result.status, "completed")
+                item = result.output[0].model_dump(exclude_none=True)
+                self.assertEqual(
+                    {
+                        "type": "function_call",
+                        "name": "tavily_search",
+                        "namespace": "mcp__tavily",
+                    },
+                    {key: item[key] for key in ("type", "name", "namespace")},
+                )
+                if isinstance(choice, dict):
+                    self.assertEqual(result.tool_choice, choice)
+                self.assertIn("mcp__tavily__tavily_search", engine["request"].text)
+
+                serving = qwen_serving()
+                seq = StreamFixture(
+                    serving,
+                    ResponsesRequest.model_validate(
+                        {**captured, "tool_choice": choice}
+                    ),
+                ).run_seq([engine_chunk(call, finish=True)])
+                self.assertNotIn("response.failed", [kind for kind, _ in seq])
+                for kind in (
+                    "response.output_item.added",
+                    "response.output_item.done",
+                ):
+                    wire = next(payload["item"] for t, payload in seq if t == kind)
+                    self.assertEqual(
+                        (wire["name"], wire["namespace"]),
+                        ("tavily_search", "mcp__tavily"),
+                    )
+                done = next(
+                    payload
+                    for kind, payload in seq
+                    if kind == "response.function_call_arguments.done"
+                )
+                self.assertEqual(
+                    (done["name"], done["namespace"]), ("tavily_search", "mcp__tavily")
+                )
+                self.assertEqual(
+                    seq[-1][1]["response"]["output"][0]["namespace"], "mcp__tavily"
+                )
+
+    def test_stored_and_inline_replay_keep_the_advertised_identity(self):
+        serving = qwen_serving()
+        engine = {}
+        install_engine_reply(serving, "ready", engine)
+        inline = {
+            "type": "additional_tools",
+            "tools": [namespace("mcp__tavily", function("tavily_search"))],
+        }
+        first = request(
+            store=True,
+            input=[{"role": "user", "content": "before"}, inline],
+        )
+        first_response = asyncio.run(serving.create_responses(first))
+        call = OpenAIServingResponses._make_tool_call_item(
+            "mcp__tavily__tavily_search",
+            '{"query":"pathlib"}',
+            self.identities([("mcp__tavily", "tavily_search", "function")]),
+            call_id="call_search",
+            item_id="fc_search",
+        )
+        second = request(
+            previous_response_id=first_response.id,
+            input=[
+                {"type": "function_call", **call.model_dump(exclude_none=True)},
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_search",
+                    "output": "found",
+                },
+                inline,
+            ],
+        )
+        messages = serving._construct_input_messages(second, first_response)
+        rendered = json.dumps(messages, ensure_ascii=False)
+        self.assertIn("mcp__tavily__tavily_search", rendered)
+        self.assertNotIn("mcp__tavily.tavily_search", rendered)
+        tool_calls = [
+            call for message in messages for call in message.get("tool_calls") or []
+        ]
+        self.assertEqual(
+            [call["function"]["name"] for call in tool_calls],
+            ["mcp__tavily__tavily_search"],
+        )
+
+    def test_bindings_are_injective_and_ignore_inventory_order(self):
+        identities = self.identities()
+        reversed_identities = self.identities(list(reversed(self.DECLARATIONS)))
+        spellings = {
+            (namespace_name, name): identities.model_name(name, namespace_name)
+            for namespace_name, name, _ in self.DECLARATIONS
+        }
+        self.assertEqual(len(set(spellings.values())), len(spellings))
+        self.assertEqual(
+            spellings,
+            {
+                (namespace_name, name): reversed_identities.model_name(
+                    name, namespace_name
+                )
+                for namespace_name, name, _ in self.DECLARATIONS
+            },
+        )
+        for (namespace_name, name), spelling in spellings.items():
+            with self.subTest(identity=(namespace_name, name)):
+                expected = {"name": name}
+                if namespace_name is not None:
+                    expected["namespace"] = namespace_name
+                self.assertEqual(identities.wire_identity(spelling), expected)
+                # Ordinary flat names keep their declared spelling.
+                if namespace_name is None:
+                    self.assertEqual(spelling, name)
+        self.assertEqual(spellings[("one", "run")], "one__run")
+        self.assertEqual(spellings[("two", "run")], "two__run")
+        self.assertEqual(spellings[("functions", "exec")], "functions__exec")
+        self.assertEqual(spellings[("space.dot", "leaf.name")], "space.dot__leaf.name")
+        self.assertEqual(spellings[("pct", "100%-loaded")], "pct__100%-loaded")
+        # A contested flattening escalates deterministically instead of routing
+        # two declared tools through one name.
+        self.assertEqual(spellings[("a", "b__c")], "a__b__c")
+        self.assertEqual(spellings[("a__b", "c")], "a%5F%5Fb.c")
+        self.assertEqual(
+            spellings[("mcp__tavily", "tavily_search")],
+            "mcp%5F%5Ftavily.tavily_search",
+        )
+
+    def test_every_advertised_name_routes_back_to_its_own_declaration(self):
+        serving = qwen_serving()
+        req = request(tools=self.tools())
+        identities = serving._tool_identities(req)
+        for namespace_name, name, tool_type in self.DECLARATIONS:
+            with self.subTest(identity=(namespace_name, name)):
+                parameters = {"input": "code"} if tool_type == "custom" else {}
+                items = serving._make_response_output_items(
+                    req,
+                    qwen_call(identities.model_name(name, namespace_name), parameters),
+                    serving.tokenizer_manager.tokenizer,
+                    require_reasoning=False,
+                )
+                wire_type = {"custom": "custom_tool_call", "function": "function_call"}[
+                    tool_type
+                ]
+                self.assertEqual([item.type for item in items], [wire_type])
+                wire = items[0].model_dump(exclude_none=True)
+                self.assertEqual(wire["name"], name)
+                self.assertEqual(wire.get("namespace"), namespace_name)
+                if tool_type == "custom":
+                    self.assertEqual(items[0].input, "code")
+
+    def test_undeclared_names_are_passed_through_instead_of_guessed(self):
+        identities = self.identities([("mcp__tavily", "tavily_search", "function")])
+        for emitted in (
+            "mcp__tavily.tavily_search",
+            "mcp__tavily__tavily__search",
+            "functions.exec",
+            "run",
+        ):
+            with self.subTest(emitted=emitted):
+                self.assertIsNone(identities.wire_identity(emitted))
+                item = OpenAIServingResponses._make_tool_call_item(
+                    emitted, "{}", identities
+                )
+                self.assertEqual(item.type, "function_call")
+                self.assertEqual(item.name, emitted)
+                self.assertIsNone(item.model_dump(exclude_none=True).get("namespace"))
+
+    def test_schema_rebinding_keeps_the_spelling(self):
+        old = function(
+            "search",
+            description="old_schema",
+            parameters={"type": "object", "properties": {"q": {"type": "string"}}},
+        )
+        new = function(
+            "search",
+            description="new_schema",
+            parameters={"type": "object", "properties": {"q": {"type": "integer"}}},
+        )
+        serving = make_serving()
+        req = request(
+            input=[
+                {"role": "user", "content": "before"},
+                {"type": "additional_tools", "tools": [namespace("mcp__tavily", old)]},
+                {"role": "assistant", "content": "between"},
+                {"type": "additional_tools", "tools": [namespace("mcp__tavily", new)]},
+                {"role": "user", "content": "after"},
+            ]
+        )
+        identities = serving._tool_identities(req)
+        self.assertEqual(
+            identities.model_name("search", "mcp__tavily"),
+            self.model_name("search", "mcp__tavily"),
+        )
+        by_name = {
+            tool.function.name: tool.function
+            for tool in serving._response_tools_to_chat_tools(req, identities)
+        }
+        self.assertEqual(list(by_name), ["mcp__tavily__search"])
+        # The latest declaration wins, as it did before the rename.
+        self.assertEqual(by_name["mcp__tavily__search"].description, "new_schema")
+        self.assertEqual(
+            by_name["mcp__tavily__search"].parameters["properties"]["q"]["type"],
+            "integer",
+        )
 
 
 if __name__ == "__main__":

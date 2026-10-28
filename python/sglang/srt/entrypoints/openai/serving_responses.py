@@ -75,14 +75,14 @@ from sglang.srt.entrypoints.openai.protocol import (
     UsageInfo,
 )
 from sglang.srt.entrypoints.openai.responses_adapters import (
+    ToolIdentities,
     custom_tool_description,
     custom_tool_parameters,
     decode_custom_tool_input,
     decode_custom_tool_input_prefix,
     encode_custom_tool_input,
     expand_tool_namespaces,
-    internal_tool_name,
-    tool_call_identity,
+    tool_identities,
 )
 from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
 from sglang.srt.entrypoints.openai.tool_server import MCPToolServer, ToolServer
@@ -303,16 +303,18 @@ class OpenAIServingResponses(OpenAIServingChat):
             prev_response = None
 
         try:
+            identities = self._tool_identities(request)
             response_tools = expand_tool_namespaces(
-                self._effective_response_tools(request)
+                self._effective_response_tools(request), identities
             )
-            names = [tool.name for tool in response_tools]
             if request.tool_choice == "required" and not response_tools:
                 return self.create_error_response(
                     'tool_choice="required" requires at least one function or custom tool.'
                 )
             choice = request.effective_tool_choice()
-            if isinstance(choice, dict) and choice["name"] not in names:
+            if isinstance(choice, dict) and not identities.declares(
+                choice["name"], choice.get("namespace")
+            ):
                 return self.create_error_response(
                     "Named tool_choice must refer to a declared callable tool.",
                     param="tool_choice",
@@ -605,17 +607,18 @@ class OpenAIServingResponses(OpenAIServingChat):
         prev_response: Optional[ResponsesResponse],
         tokenizer: Any,
     ):
-        messages = self._construct_input_messages(request, prev_response)
+        identities = self._tool_identities(request)
+        messages = self._construct_input_messages(request, prev_response, identities)
 
-        chat_tools = self._response_tools_to_chat_tools(request.tools)
+        chat_tools = self._response_tools_to_chat_tools(request.tools, identities)
         chat_request = ChatCompletionRequest(
             model=request.model,
             messages=messages,
             stream=request.stream,
             tools=chat_tools or None,
             tool_choice=(
-                self._chat_tool_choice(request.effective_tool_choice())
-                if self._response_tools_to_chat_tools(request)
+                self._chat_tool_choice(request.effective_tool_choice(), identities)
+                if self._response_tools_to_chat_tools(request, identities)
                 else "none"
             ),
             parallel_tool_calls=(
@@ -892,12 +895,8 @@ class OpenAIServingResponses(OpenAIServingChat):
         *,
         require_reasoning: bool,
     ):
-        chat_tools = self._response_tools_to_chat_tools(request)
-        custom_names = {
-            tool.name
-            for tool in expand_tool_namespaces(self._effective_response_tools(request))
-            if tool.type == "custom"
-        }
+        identities = self._tool_identities(request)
+        chat_tools = self._response_tools_to_chat_tools(request, identities)
         if self.reasoning_parser:
             reasoning_parser = ReasoningParser(
                 model_type=self.reasoning_parser,
@@ -976,7 +975,7 @@ class OpenAIServingResponses(OpenAIServingChat):
                     for call_info in call_info_list:
                         tool_call_items.append(
                             self._make_tool_call_item(
-                                call_info.name, call_info.parameters or "", custom_names
+                                call_info.name, call_info.parameters or "", identities
                             )
                         )
                     parsed_via_native = bool(call_info_list)
@@ -1003,7 +1002,7 @@ class OpenAIServingResponses(OpenAIServingChat):
                         )
                         tool_call_items.append(
                             self._make_tool_call_item(
-                                tool["name"], arguments, custom_names
+                                tool["name"], arguments, identities
                             )
                         )
                     content = ""
@@ -1044,20 +1043,35 @@ class OpenAIServingResponses(OpenAIServingChat):
         return output_items
 
     @staticmethod
-    def _chat_tool_choice(tool_choice: Any) -> Any:
-        """Nest an ``effective_tool_choice()`` result the way chat expects:
+    def _chat_tool_choice(tool_choice: Any, identities: ToolIdentities) -> Any:
+        """Nest an ``effective_tool_choice()`` identity the way chat expects:
         ``{"type":"function","name":X}`` -> ``{...,"function":{"name":X}}``."""
         if not isinstance(tool_choice, dict):
             return tool_choice
-        return {"type": "function", "function": {"name": tool_choice["name"]}}
+        return {
+            "type": "function",
+            "function": {
+                "name": identities.model_name(
+                    tool_choice["name"], tool_choice.get("namespace")
+                )
+            },
+        }
 
     @staticmethod
     def _make_tool_call_item(
-        name, arguments, custom_names, *, call_id=None, item_id=None, status="completed"
+        name,
+        arguments,
+        identities: ToolIdentities,
+        *,
+        call_id=None,
+        item_id=None,
+        status="completed",
     ):
-        identity = tool_call_identity(name)
+        # A name the model produced that this request never advertised stays
+        # verbatim: identities come from declarations, not from guessing.
+        identity = identities.wire_identity(name) or {"name": name}
         call_id = call_id or f"call_{random_uuid()[:24]}"
-        if name in custom_names:
+        if identities.is_custom(name):
             return ResponseCustomToolCall(
                 type="custom_tool_call",
                 id=item_id or f"ctc_{random_uuid()[:8]}",
@@ -1119,14 +1133,23 @@ class OpenAIServingResponses(OpenAIServingChat):
             }.values()
         )
 
-    def _response_tools_to_chat_tools(self, request) -> list[Tool]:
+    def _tool_identities(self, request: ResponsesRequest) -> ToolIdentities:
+        """One binding table per request: every history position, the parser
+        inventory, ``tool_choice`` and the output items must agree on how a
+        declared tool is spelled, so they all derive it from the same merged
+        inventory rather than from the one each call happens to hold."""
+        return tool_identities(self._effective_response_tools(request))
+
+    def _response_tools_to_chat_tools(self, tools, identities=None) -> list[Tool]:
         tools = (
-            self._effective_response_tools(request)
-            if isinstance(request, ResponsesRequest)
-            else request
+            self._effective_response_tools(tools)
+            if isinstance(tools, ResponsesRequest)
+            else tools
         )
+        if identities is None:
+            identities = tool_identities(tools)
         chat_tools = []
-        for tool in expand_tool_namespaces(tools):
+        for tool in expand_tool_namespaces(tools, identities):
             is_custom = tool.type == "custom"
             chat_tools.append(
                 Tool(
@@ -1193,7 +1216,9 @@ class OpenAIServingResponses(OpenAIServingChat):
         return content_part
 
     @classmethod
-    def _normalize_response_message_for_chat(cls, message: Any) -> Any:
+    def _normalize_response_message_for_chat(
+        cls, message: Any, identities: Optional[ToolIdentities] = None
+    ) -> Any:
         """Convert one Responses-API input item to a chat-completions message."""
         if hasattr(message, "model_dump"):
             message = message.model_dump(exclude_none=True)
@@ -1215,7 +1240,10 @@ class OpenAIServingResponses(OpenAIServingChat):
                 raise ValueError(f"{msg_type} namespace must be a string or null.")
             message = {
                 **message,
-                "name": internal_tool_name(name, namespace),
+                # Replayed history renders under the same bindings the model
+                # was shown, including an inventory restored from a stored
+                # response or an inline ``additional_tools`` item.
+                "name": (identities or ToolIdentities()).model_name(name, namespace),
             }
         if msg_type == "agent_message":
             # Plaintext inter-agent messages are conversation content. Routing
@@ -1454,8 +1482,10 @@ class OpenAIServingResponses(OpenAIServingChat):
         self,
         request: ResponsesRequest,
         prev_response: Optional[ResponsesResponse] = None,
+        identities: Optional[ToolIdentities] = None,
     ) -> list[ChatCompletionMessageParam]:
         messages: list[ChatCompletionMessageParam] = []
+        identities = identities or self._tool_identities(request)
         if request.instructions:
             messages.append(
                 {
@@ -1473,7 +1503,9 @@ class OpenAIServingResponses(OpenAIServingChat):
                 inventory = ResponseAdditionalTools.model_validate(input_item)
                 tools = [
                     tool.model_dump(exclude_none=True)
-                    for tool in self._response_tools_to_chat_tools(inventory.tools)
+                    for tool in self._response_tools_to_chat_tools(
+                        inventory.tools, identities
+                    )
                 ]
                 messages.append(
                     {
@@ -1491,7 +1523,9 @@ class OpenAIServingResponses(OpenAIServingChat):
                 )
                 has_inline_tools = True
             else:
-                normalized = self._normalize_response_message_for_chat(input_item)
+                normalized = self._normalize_response_message_for_chat(
+                    input_item, identities
+                )
                 if normalized is not None:
                     messages.append(normalized)  # type: ignore
 
@@ -2189,12 +2223,8 @@ class OpenAIServingResponses(OpenAIServingChat):
             {"type": "response.in_progress", "response": initial_response}
         )
 
-        chat_tools = self._response_tools_to_chat_tools(request)
-        custom_names = {
-            tool.name
-            for tool in expand_tool_namespaces(self._effective_response_tools(request))
-            if tool.type == "custom"
-        }
+        identities = self._tool_identities(request)
+        chat_tools = self._response_tools_to_chat_tools(request, identities)
         is_required = request.tool_choice == "required" or isinstance(
             request.effective_tool_choice(), dict
         )
@@ -2424,7 +2454,7 @@ class OpenAIServingResponses(OpenAIServingChat):
             completed_item = self._make_tool_call_item(
                 state["name"],
                 arguments,
-                custom_names,
+                identities,
                 call_id=state["call_id"],
                 item_id=state["item_id"],
             )
@@ -2469,7 +2499,10 @@ class OpenAIServingResponses(OpenAIServingChat):
                             "type": "response.function_call_arguments.done",
                             **common,
                             "arguments": arguments,
-                            **tool_call_identity(state["name"]),
+                            **(
+                                identities.wire_identity(state["name"])
+                                or {"name": state["name"]}
+                            ),
                         }
                     )
                 )
@@ -2665,7 +2698,7 @@ class OpenAIServingResponses(OpenAIServingChat):
                                 "output_index": current_output_index,
                                 "name": call.name or "",
                                 "arguments": "",
-                                "custom": (call.name or "") in custom_names,
+                                "custom": identities.is_custom(call.name or ""),
                                 "payload": "",
                                 "added": False,
                                 "done": False,
@@ -2676,7 +2709,7 @@ class OpenAIServingResponses(OpenAIServingChat):
                             added_item = self._make_tool_call_item(
                                 state["name"],
                                 "",
-                                custom_names,
+                                identities,
                                 call_id=state["call_id"],
                                 item_id=state["item_id"],
                                 status="in_progress",

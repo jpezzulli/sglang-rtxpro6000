@@ -1031,15 +1031,28 @@ class BuildOutputTextLogprobsTestCase(CustomTestCase):
 
 class ChatToolChoiceConversionTestCase(CustomTestCase):
     def test_conversion(self):
+        from sglang.srt.entrypoints.openai.responses_adapters import ToolIdentities
+
         fn = OpenAIServingResponses._chat_tool_choice
+        identities = ToolIdentities((("mcp", "run", "function"),))
         for s in ("auto", "required", "none"):
-            self.assertEqual(fn(s), s)
+            self.assertEqual(fn(s, identities), s)
         # Input is an effective_tool_choice() result, so the only object form
         # reaching here is a named function; degrading the rest to "auto"
         # happens there, once, so the echoed and the honored value agree.
         self.assertEqual(
-            fn({"type": "function", "name": "get_weather"}),
+            fn({"type": "function", "name": "get_weather"}, identities),
             {"type": "function", "function": {"name": "get_weather"}},
+        )
+        # A namespace member is named by the declaration-derived spelling, not
+        # by the raw wire pair.
+        self.assertEqual(
+            fn({"type": "function", "name": "run", "namespace": "mcp"}, identities),
+            {"type": "function", "function": {"name": "mcp__run"}},
+        )
+        self.assertEqual(
+            fn({"type": "custom", "name": "exec"}, identities),
+            {"type": "function", "function": {"name": "exec"}},
         )
 
 
