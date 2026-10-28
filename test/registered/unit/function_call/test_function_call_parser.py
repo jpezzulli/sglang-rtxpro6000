@@ -2590,6 +2590,7 @@ class TestQwen3CoderDetector(unittest.TestCase):
             "",
             "null",
             "NULL",
+            "Null",
             "nul",
             "nullish",
             "\n",
@@ -2613,6 +2614,8 @@ class TestQwen3CoderDetector(unittest.TestCase):
                 .calls[0]
                 .parameters
             )
+            if value.lower() == "null":
+                self.assertEqual(expected["content"], value)
             for width in (1, 2, 7, 41, len(source)):
                 with self.subTest(value=value, width=width):
                     detector = Qwen3CoderDetector()

@@ -193,9 +193,12 @@ class Qwen3CoderDetector(BaseFormatDetector):
         parameters: Optional[dict] = None,
     ) -> Any:
         """Convert parameter value based on its type in the schema."""
-        # Handle null value for any type
+        # Explicit string parameters carry literal text. Preserve legacy null
+        # coercion for nullable, other, and missing parameter schemas.
         if param_value.lower() == "null":
-            return None
+            schema = param_config.get(param_name)
+            if not isinstance(schema, dict) or schema.get("type") != "string":
+                return None
 
         if param_name not in param_config:
             if param_config != {}:
@@ -619,8 +622,8 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 chunk = chunk[:-1]
             advance = end + consume
         else:
-            # A trailing LF may be stripped on completion; a possible "null"
-            # and any split delimiter must also remain undecided until then.
+            # A trailing LF may be stripped on completion, and any split
+            # delimiter must also remain undecided until then.
             keep = max(len(token) for token, _ in delimiters) + len("null")
             advance = max(0, len(value) - keep)
             if not advance:
@@ -635,12 +638,9 @@ class Qwen3CoderDetector(BaseFormatDetector):
             if self.current_tool_param_count:
                 fragment += ", "
             fragment += json.dumps(state["name"]) + ": "
-            if complete and chunk.lower() == "null":
-                fragment += "null"
-            else:
-                fragment += '"' + json.dumps(chunk, ensure_ascii=False)[1:-1]
-                if complete:
-                    fragment += '"'
+            fragment += '"' + json.dumps(chunk, ensure_ascii=False)[1:-1]
+            if complete:
+                fragment += '"'
             state["opened"] = True
         else:
             fragment += json.dumps(chunk, ensure_ascii=False)[1:-1]
