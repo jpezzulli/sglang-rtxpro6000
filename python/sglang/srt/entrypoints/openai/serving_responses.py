@@ -18,6 +18,7 @@ import orjson
 from fastapi import Request
 from fastapi.responses import ORJSONResponse
 from openai.types.responses import (
+    ResponseCustomToolCall,
     ResponseOutputMessage,
     ResponseOutputText,
     ResponseReasoningItem,
@@ -67,10 +68,21 @@ from sglang.srt.entrypoints.openai.protocol import (
     MessageProcessingResult,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
+    ResponseAdditionalTools,
     ResponsesRequest,
     ResponsesResponse,
     Tool,
     UsageInfo,
+)
+from sglang.srt.entrypoints.openai.responses_adapters import (
+    custom_tool_description,
+    custom_tool_parameters,
+    decode_custom_tool_input,
+    decode_custom_tool_input_prefix,
+    encode_custom_tool_input,
+    expand_tool_namespaces,
+    internal_tool_name,
+    tool_call_identity,
 )
 from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
 from sglang.srt.entrypoints.openai.tool_server import MCPToolServer, ToolServer
@@ -249,15 +261,6 @@ class OpenAIServingResponses(OpenAIServingChat):
         # FIXME: If the engine is dead, raise an error
         # This is required for the streaming case
 
-        # ``tool_choice="required"`` only works with ``function`` tools.
-        if request.tool_choice == "required" and not any(
-            tool.type == "function" for tool in (request.tools or [])
-        ):
-            return self.create_error_response(
-                'tool_choice="required" requires at least one tool with '
-                'type="function"; other built-in tool types cannot be forced.'
-            )
-
         # harmony emits raw tokens; per-token logprobs aren't wired there.
         if self.use_harmony and request.is_include_output_logprobs():
             return self.create_error_response(
@@ -298,6 +301,32 @@ class OpenAIServingResponses(OpenAIServingChat):
                 return self._make_not_found_error(prev_response_id)
         else:
             prev_response = None
+
+        response_tools = expand_tool_namespaces(self._effective_response_tools(request))
+        names = [tool.name for tool in response_tools]
+        if len(names) != len(set(names)):
+            return self.create_error_response(
+                "Callable tool names must be unique within each namespace.",
+                param="tools",
+            )
+        if request.tool_choice == "required" and not response_tools:
+            return self.create_error_response(
+                'tool_choice="required" requires at least one function or custom tool.'
+            )
+        choice = request.effective_tool_choice()
+        if isinstance(choice, dict) and choice["name"] not in names:
+            return self.create_error_response(
+                "Named tool_choice must refer to a declared callable tool.",
+                param="tool_choice",
+            )
+        if self.use_harmony and any(
+            tool.type in ("custom", "namespace")
+            for tool in self._effective_response_tools(request)
+        ):
+            return self.create_error_response(
+                "Custom and namespace tools are not supported with Harmony.",
+                param="tools",
+            )
 
         try:
             model_name = request.model
@@ -489,7 +518,13 @@ class OpenAIServingResponses(OpenAIServingChat):
 
             # Store the input messages
             if request.store:
-                self.msg_store[request.request_id] = messages
+                # Retain wire history: chat shims lose custom-tool identity and
+                # inline inventory metadata needed by the next response.
+                self.msg_store[request.request_id] = (
+                    messages
+                    if self.use_harmony
+                    else self._response_input_history(request, prev_response)
+                )
 
             if request.background and not request.stream:
                 created_time = int(time.time())
@@ -575,7 +610,7 @@ class OpenAIServingResponses(OpenAIServingChat):
     ):
         messages = self._construct_input_messages(request, prev_response)
 
-        chat_tools = self._response_tools_to_chat_tools(request)
+        chat_tools = self._response_tools_to_chat_tools(request.tools)
         chat_request = ChatCompletionRequest(
             model=request.model,
             messages=messages,
@@ -583,7 +618,7 @@ class OpenAIServingResponses(OpenAIServingChat):
             tools=chat_tools or None,
             tool_choice=(
                 self._chat_tool_choice(request.effective_tool_choice())
-                if chat_tools
+                if self._response_tools_to_chat_tools(request)
                 else "none"
             ),
             parallel_tool_calls=(
@@ -861,6 +896,11 @@ class OpenAIServingResponses(OpenAIServingChat):
         require_reasoning: bool,
     ):
         chat_tools = self._response_tools_to_chat_tools(request)
+        custom_names = {
+            tool.name
+            for tool in expand_tool_namespaces(self._effective_response_tools(request))
+            if tool.type == "custom"
+        }
         if self.reasoning_parser:
             reasoning_parser = ReasoningParser(
                 model_type=self.reasoning_parser,
@@ -909,8 +949,12 @@ class OpenAIServingResponses(OpenAIServingChat):
             )
             output_items.append(reasoning_item)
 
-        is_required = request.tool_choice == "required"
-        tool_call_items: list[ResponseFunctionToolCall] = []
+        is_required = request.tool_choice == "required" or isinstance(
+            request.effective_tool_choice(), dict
+        )
+        tool_call_items: list[
+            Union[ResponseFunctionToolCall, ResponseCustomToolCall]
+        ] = []
         parsed_via_native = False
         detector_owns_format = False
         if (
@@ -934,13 +978,8 @@ class OpenAIServingResponses(OpenAIServingChat):
                     content, call_info_list = parser.parse_non_stream(content)
                     for call_info in call_info_list:
                         tool_call_items.append(
-                            ResponseFunctionToolCall(
-                                arguments=call_info.parameters or "",
-                                call_id=f"call_{random_uuid()[:24]}",
-                                type="function_call",
-                                name=call_info.name,
-                                id=f"fc_{random_uuid()[:8]}",
-                                status="completed",
+                            self._make_tool_call_item(
+                                call_info.name, call_info.parameters or "", custom_names
                             )
                         )
                     parsed_via_native = bool(call_info_list)
@@ -966,13 +1005,8 @@ class OpenAIServingResponses(OpenAIServingChat):
                             tool.get("parameters", {}), ensure_ascii=False
                         )
                         tool_call_items.append(
-                            ResponseFunctionToolCall(
-                                arguments=arguments,
-                                call_id=f"call_{random_uuid()[:24]}",
-                                type="function_call",
-                                name=tool["name"],
-                                id=f"fc_{random_uuid()[:8]}",
-                                status="completed",
+                            self._make_tool_call_item(
+                                tool["name"], arguments, custom_names
                             )
                         )
                     content = ""
@@ -1021,20 +1055,59 @@ class OpenAIServingResponses(OpenAIServingChat):
         return {"type": "function", "function": {"name": tool_choice["name"]}}
 
     @staticmethod
-    def _response_tools_to_chat_tools(request: ResponsesRequest) -> list[Tool]:
-        # Only ``function`` tools flow to chat; built-ins go through harmony.
+    def _make_tool_call_item(
+        name, arguments, custom_names, *, call_id=None, item_id=None, status="completed"
+    ):
+        identity = tool_call_identity(name)
+        call_id = call_id or f"call_{random_uuid()[:24]}"
+        if name in custom_names:
+            return ResponseCustomToolCall(
+                type="custom_tool_call",
+                id=item_id or f"ctc_{random_uuid()[:8]}",
+                call_id=call_id,
+                **identity,
+                input=decode_custom_tool_input(arguments),
+            )
+        return ResponseFunctionToolCall(
+            type="function_call",
+            id=item_id or f"fc_{random_uuid()[:8]}",
+            call_id=call_id,
+            **identity,
+            arguments=arguments,
+            status=status,
+        )
+
+    def _effective_response_tools(self, request: ResponsesRequest):
+        tools = list(request.tools)
+        for item in self._response_input_history(request):
+            if isinstance(item, dict) and item.get("type") == "additional_tools":
+                tools.extend(ResponseAdditionalTools.model_validate(item).tools)
+        return tools
+
+    def _response_tools_to_chat_tools(self, request) -> list[Tool]:
+        tools = (
+            self._effective_response_tools(request)
+            if isinstance(request, ResponsesRequest)
+            else request
+        )
         chat_tools = []
-        for tool in request.tools:
-            if tool.type != "function":
-                continue
+        for tool in expand_tool_namespaces(tools):
+            is_custom = tool.type == "custom"
             chat_tools.append(
                 Tool(
                     type="function",
                     function=Function(
                         name=tool.name,
-                        description=tool.description,
-                        parameters=tool.parameters,
+                        description=(
+                            custom_tool_description(tool.description, tool.format)
+                            if is_custom
+                            else tool.description
+                        ),
+                        parameters=(
+                            custom_tool_parameters() if is_custom else tool.parameters
+                        ),
                         strict=tool.strict,
+                        defer_loading=tool.defer_loading,
                     ),
                 )
             )
@@ -1098,6 +1171,42 @@ class OpenAIServingResponses(OpenAIServingChat):
             message = {**message, "role": "system"}
 
         msg_type = message.get("type")
+        if msg_type in ("function_call", "custom_tool_call"):
+            message = {
+                **message,
+                "name": internal_tool_name(message["name"], message.get("namespace")),
+            }
+        if msg_type == "agent_message":
+            # Plaintext inter-agent messages are conversation content. Routing
+            # and orchestration remain the client's responsibility (PR35216).
+            texts = []
+            for part in message.get("content") or []:
+                if part.get("type") != "input_text":
+                    raise ValueError(
+                        "Only plaintext input_text agent_message content is supported."
+                    )
+                texts.append(part.get("text", ""))
+            if not texts:
+                raise ValueError(
+                    "agent_message must contain plaintext input_text content."
+                )
+            author = message.get("author") or (message.get("agent") or {}).get(
+                "agent_name"
+            )
+            recipient = message.get("recipient")
+            header = "[agent message"
+            if author:
+                header += f" from {author}"
+            if recipient:
+                header += f" to {recipient}"
+            return {"role": "user", "content": header + "]\n" + "\n".join(texts)}
+        if msg_type == "custom_tool_call":
+            message = {
+                **message,
+                "type": "function_call",
+                "arguments": encode_custom_tool_input(message.get("input") or ""),
+            }
+            msg_type = "function_call"
         if msg_type == "function_call":
             # Coerce ``arguments`` to a valid JSON-object string so the chat
             # template's unconditional ``orjson.loads`` survives truncated or
@@ -1127,12 +1236,13 @@ class OpenAIServingResponses(OpenAIServingChat):
                     }
                 ],
             }
-        if msg_type == "function_call_output":
-            # ``output`` may be a string or an array of content parts (OpenAI
-            # allows both); the chat tool message needs a string, so flatten.
+        if msg_type in ("function_call_output", "custom_tool_call_output"):
+            # Keep multimodal results in order for shared chat media validation.
             out = message.get("output", "")
             if isinstance(out, list):
-                out = "".join(p.get("text", "") for p in out if isinstance(p, dict))
+                out = [
+                    cls._normalize_response_content_part_for_chat(part) for part in out
+                ]
             return {
                 "role": "tool",
                 "tool_call_id": message.get("call_id"),
@@ -1266,6 +1376,27 @@ class OpenAIServingResponses(OpenAIServingChat):
             merged.append(msg)
         return merged
 
+    def _response_input_history(self, request, prev_response=None):
+        history = []
+        if request.previous_response_id is not None:
+            history.extend(self.msg_store[request.previous_response_id])
+            previous = prev_response or self.response_store.get(
+                request.previous_response_id
+            )
+            if previous is not None:
+                for output_item in previous.output:
+                    assistant_text = self._output_message_text(output_item)
+                    history.append(
+                        {"role": "assistant", "content": assistant_text}
+                        if assistant_text is not None
+                        else output_item
+                    )
+        if isinstance(request.input, str):
+            history.append({"role": "user", "content": request.input})
+        else:
+            history.extend(request.input)
+        return history
+
     def _construct_input_messages(
         self,
         request: ResponsesRequest,
@@ -1280,24 +1411,33 @@ class OpenAIServingResponses(OpenAIServingChat):
                 }
             )
 
-        # Prepend the conversation history
-        if prev_response is not None:
-            # Add the previous messages
-            prev_msg = self.msg_store[prev_response.id]
-            messages.extend(prev_msg)
-
-            for output_item in prev_response.output:
-                assistant_text = self._output_message_text(output_item)
-                if assistant_text is None:
-                    continue
-                messages.append({"role": "assistant", "content": assistant_text})
-
-        # Append the new input
-        # Responses API supports simple text inputs without chat format
-        if isinstance(request.input, str):
-            messages.append({"role": "user", "content": request.input})
-        else:
-            for input_item in request.input:
+        has_inline_tools = False
+        for input_item in self._response_input_history(request, prev_response):
+            if (
+                isinstance(input_item, dict)
+                and input_item.get("type") == "additional_tools"
+            ):
+                inventory = ResponseAdditionalTools.model_validate(input_item)
+                tools = [
+                    tool.model_dump(exclude_none=True)
+                    for tool in self._response_tools_to_chat_tools(inventory.tools)
+                ]
+                messages.append(
+                    {
+                        "role": "system",
+                        # Native encoders consume message.tools; Jinja templates
+                        # need the inventory in content at this history position.
+                        "content": (
+                            ""
+                            if self.chat_encoding_spec is not None
+                            else "Additional tools:\n"
+                            + json.dumps(tools, ensure_ascii=False)
+                        ),
+                        "tools": tools,
+                    }
+                )
+                has_inline_tools = True
+            else:
                 normalized = self._normalize_response_message_for_chat(input_item)
                 if normalized is not None:
                     messages.append(normalized)  # type: ignore
@@ -1306,6 +1446,13 @@ class OpenAIServingResponses(OpenAIServingChat):
         # (message + function_call(s)); collapse them into one chat message
         # so chat templates render a single assistant block per turn.
         messages = self._merge_consecutive_assistant_messages(messages)
+
+        if has_inline_tools:
+            # A later inventory must never migrate into the initial system
+            # prompt. Empty inventories also retain their position.
+            if request.tools and "tools" in messages[0]:
+                messages.insert(0, {"role": "system", "content": ""})
+            return messages
 
         # Most chat templates expect a single leading ``system`` message;
         # coalesce any ``instructions`` + interleaved ``developer`` entries.
@@ -1961,50 +2108,43 @@ class OpenAIServingResponses(OpenAIServingChat):
 
         def _send_event(event):
             nonlocal sequence_number
-            if hasattr(event, "sequence_number"):
-                event.sequence_number = sequence_number
+            if isinstance(event, dict):
+                event = {**event, "sequence_number": sequence_number}
+                event_type = event["type"]
+                payload = json.dumps(event, ensure_ascii=False)
+            else:
+                if hasattr(event, "sequence_number"):
+                    event.sequence_number = sequence_number
+                event_type = event.type
+                payload = event.model_dump_json(indent=None, serialize_as_any=True)
             sequence_number += 1
-            event_type = getattr(event, "type", "unknown")
-            return (
-                f"event: {event_type}\n"
-                f"data: {event.model_dump_json(indent=None)}\n\n"
-            )
+            return f"event: {event_type}\ndata: {payload}\n\n"
 
-        # The streaming Response* event models echo ``tools`` through a
-        # narrower OpenAI SDK Tool union; strip it to avoid pydantic
-        # validation failures on extended tool types.
-        def _sanitize_response_dict(d: dict) -> dict:
-            d["tools"] = []
-            return d
-
-        initial_response = _sanitize_response_dict(
-            ResponsesResponse.from_request(
-                request,
-                sampling_params,
-                model_name=model_name,
-                created_time=created_time,
-                output=[],
-                status="in_progress",
-                usage=None,
-            ).model_dump()
-        )
+        # Serialize response snapshots directly: the SDK's narrower nested
+        # tool unions can discard namespace metadata during revalidation.
+        initial_response = ResponsesResponse.from_request(
+            request,
+            sampling_params,
+            model_name=model_name,
+            created_time=created_time,
+            output=[],
+            status="in_progress",
+            usage=None,
+        ).model_dump()
+        yield _send_event({"type": "response.created", "response": initial_response})
         yield _send_event(
-            openai_responses_types.ResponseCreatedEvent(
-                type="response.created",
-                sequence_number=-1,
-                response=initial_response,
-            )
-        )
-        yield _send_event(
-            openai_responses_types.ResponseInProgressEvent(
-                type="response.in_progress",
-                sequence_number=-1,
-                response=initial_response,
-            )
+            {"type": "response.in_progress", "response": initial_response}
         )
 
         chat_tools = self._response_tools_to_chat_tools(request)
-        is_required = request.tool_choice == "required"
+        custom_names = {
+            tool.name
+            for tool in expand_tool_namespaces(self._effective_response_tools(request))
+            if tool.type == "custom"
+        }
+        is_required = request.tool_choice == "required" or isinstance(
+            request.effective_tool_choice(), dict
+        )
         tool_parser: Optional[Union[FunctionCallParser, JsonArrayParser]] = None
         if chat_tools and request.tool_choice != "none":
             native_supports_structural_tag = False
@@ -2228,34 +2368,60 @@ class OpenAIServingResponses(OpenAIServingChat):
             if state is None or state.get("done"):
                 return []
             arguments = state["arguments"]
-            completed_item = ResponseFunctionToolCall(
-                arguments=arguments,
+            completed_item = self._make_tool_call_item(
+                state["name"],
+                arguments,
+                custom_names,
                 call_id=state["call_id"],
-                name=state["name"] or "",
-                type="function_call",
-                id=state["item_id"],
-                status="completed",
+                item_id=state["item_id"],
             )
-            events = [
-                _send_event(
-                    openai_responses_types.ResponseFunctionCallArgumentsDoneEvent(
-                        type="response.function_call_arguments.done",
-                        sequence_number=-1,
-                        item_id=state["item_id"],
-                        output_index=state["output_index"],
-                        arguments=arguments,
-                        name=state["name"] or "",
+            events = []
+            common = {
+                "item_id": state["item_id"],
+                "output_index": state["output_index"],
+            }
+            if state["custom"]:
+                payload = completed_item.input
+                remainder = payload[len(state["payload"]) :]
+                if remainder:
+                    events.append(
+                        _send_event(
+                            {
+                                "type": "response.custom_tool_call_input.delta",
+                                **common,
+                                "delta": remainder,
+                            }
+                        )
                     )
-                ),
-                _send_event(
-                    openai_responses_types.ResponseOutputItemDoneEvent(
-                        type="response.output_item.done",
-                        sequence_number=-1,
-                        output_index=state["output_index"],
-                        item=completed_item,
+                events.append(
+                    _send_event(
+                        {
+                            "type": "response.custom_tool_call_input.done",
+                            **common,
+                            "input": payload,
+                        }
                     )
-                ),
-            ]
+                )
+            else:
+                events.append(
+                    _send_event(
+                        {
+                            "type": "response.function_call_arguments.done",
+                            **common,
+                            "arguments": arguments,
+                            **tool_call_identity(state["name"]),
+                        }
+                    )
+                )
+            events.append(
+                _send_event(
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": state["output_index"],
+                        "item": completed_item.model_dump(exclude_none=True),
+                    }
+                )
+            )
             emitted_items.append(completed_item)
             state["done"] = True
             return events
@@ -2426,38 +2592,50 @@ class OpenAIServingResponses(OpenAIServingChat):
                                 "output_index": current_output_index,
                                 "name": call.name or "",
                                 "arguments": "",
+                                "custom": (call.name or "") in custom_names,
+                                "payload": "",
                                 "added": False,
                                 "done": False,
                             }
                             tool_call_states[tool_index] = state
                         if not state["added"]:
                             state["added"] = True
+                            added_item = self._make_tool_call_item(
+                                state["name"],
+                                "",
+                                custom_names,
+                                call_id=state["call_id"],
+                                item_id=state["item_id"],
+                                status="in_progress",
+                            )
                             yield _send_event(
-                                openai_responses_types.ResponseOutputItemAddedEvent(
-                                    type="response.output_item.added",
-                                    sequence_number=-1,
-                                    output_index=state["output_index"],
-                                    item=ResponseFunctionToolCall(
-                                        arguments="",
-                                        call_id=state["call_id"],
-                                        name=state["name"],
-                                        type="function_call",
-                                        id=state["item_id"],
-                                        status="in_progress",
-                                    ),
-                                )
+                                {
+                                    "type": "response.output_item.added",
+                                    "output_index": state["output_index"],
+                                    "item": added_item.model_dump(exclude_none=True),
+                                }
                             )
                         if call.parameters:
                             state["arguments"] += call.parameters
-                            yield _send_event(
-                                openai_responses_types.ResponseFunctionCallArgumentsDeltaEvent(
-                                    type="response.function_call_arguments.delta",
-                                    sequence_number=-1,
-                                    item_id=state["item_id"],
-                                    output_index=state["output_index"],
-                                    delta=call.parameters,
+                            if state["custom"]:
+                                payload = decode_custom_tool_input_prefix(
+                                    state["arguments"]
                                 )
-                            )
+                                delta = payload[len(state["payload"]) :]
+                                state["payload"] = payload
+                                event_type = "response.custom_tool_call_input.delta"
+                            else:
+                                delta = call.parameters
+                                event_type = "response.function_call_arguments.delta"
+                            if delta:
+                                yield _send_event(
+                                    {
+                                        "type": event_type,
+                                        "item_id": state["item_id"],
+                                        "output_index": state["output_index"],
+                                        "delta": delta,
+                                    }
+                                )
 
                 def _emit_normal_text():
                     if normal_text and _should_emit_normal_text_as_message(
@@ -2535,25 +2713,17 @@ class OpenAIServingResponses(OpenAIServingChat):
                     yield ev
         except Exception as e:
             logger.exception("Error while streaming /v1/responses")
-            failed = _sanitize_response_dict(
-                ResponsesResponse.from_request(
-                    request,
-                    sampling_params,
-                    model_name=model_name,
-                    created_time=created_time,
-                    output=[],
-                    status="failed",
-                    usage=None,
-                ).model_dump()
-            )
+            failed = ResponsesResponse.from_request(
+                request,
+                sampling_params,
+                model_name=model_name,
+                created_time=created_time,
+                output=[],
+                status="failed",
+                usage=None,
+            ).model_dump()
             failed["error"] = {"code": "server_error", "message": str(e)}
-            yield _send_event(
-                openai_responses_types.ResponseFailedEvent(
-                    type="response.failed",
-                    sequence_number=-1,
-                    response=failed,
-                )
-            )
+            yield _send_event({"type": "response.failed", "response": failed})
             return
 
         for ev in _close_reasoning_item():
@@ -2594,9 +2764,13 @@ class OpenAIServingResponses(OpenAIServingChat):
                 if stored is None or stored.status != "cancelled":
                     self.response_store[final_response.id] = final_response
 
-        response_dict = _sanitize_response_dict(final_response.model_dump())
-
-        yield _send_event(self._terminal_stream_event(response_dict))
+        response_dict = final_response.model_dump()
+        yield _send_event(
+            {
+                "type": f"response.{final_response.status}",
+                "response": response_dict,
+            }
+        )
 
     async def _generate_with_builtin_tools(
         self,
