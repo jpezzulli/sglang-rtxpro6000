@@ -1851,19 +1851,24 @@ class ResponsesRequest(BaseModel):
         tool_choice = self.tool_choice
         if not isinstance(tool_choice, dict):
             return tool_choice
-        name = tool_choice.get("name") or (tool_choice.get("function") or {}).get(
-            "name"
+        if tool_choice.get("type") not in ("function", "custom"):
+            return "auto"
+        function = tool_choice.get("function")
+        if function is not None and not isinstance(function, dict):
+            raise ValueError("tool_choice.function must be an object or null.")
+        name = (
+            tool_choice["name"]
+            if "name" in tool_choice
+            else (function or {}).get("name")
         )
-        if tool_choice.get("type") in ("function", "custom") and name:
-            from sglang.srt.entrypoints.openai.responses_adapters import (
-                internal_tool_name,
-            )
+        if not isinstance(name, str) or not name:
+            raise ValueError("Named tool_choice must include a non-empty string name.")
+        namespace = tool_choice.get("namespace")
+        if namespace is not None and not isinstance(namespace, str):
+            raise ValueError("Named tool_choice namespace must be a string or null.")
+        from sglang.srt.entrypoints.openai.responses_adapters import internal_tool_name
 
-            return {
-                "type": "function",
-                "name": internal_tool_name(name, tool_choice.get("namespace")),
-            }
-        return "auto"
+        return {"type": "function", "name": internal_tool_name(name, namespace)}
 
     def to_sampling_params(
         self,

@@ -947,6 +947,114 @@ class CodexBoundaryTest(CustomTestCase):
                     )
                     self.assertNotIn("response.completed", [kind for kind, _ in seq])
 
+    def test_malformed_named_selection_returns_400(self):
+        for choice in (
+            {"type": "function", "name": 3},
+            {"type": "custom", "name": 3},
+            {"type": "function", "name": "run", "namespace": 3},
+            {"type": "custom", "name": "exec", "namespace": ["N"]},
+            {"type": "function", "function": "run"},
+            {"type": "function", "function": ["run"]},
+            {"type": "function", "function": {"name": 3}},
+            {"type": "function", "name": "run", "function": "ignored"},
+            {"type": "function"},
+        ):
+            with self.subTest(choice=choice):
+                serving = make_serving()
+                req = request(
+                    tools=[function(), {"type": "custom", "name": "exec"}],
+                    tool_choice=choice,
+                )
+                result = asyncio.run(serving.create_responses(req))
+                self.assertEqual(result.status_code, 400)
+                self.assertIn(b"tool_choice", result.body)
+                serving.tokenizer_manager.generate_request.assert_not_called()
+
+    def test_dotted_and_namespaced_named_selection_controls(self):
+        tools = [
+            function("flat.name"),
+            namespace("space.dot", function("leaf.name")),
+            namespace("custom.ns", {"type": "custom", "name": "exec.name"}),
+        ]
+        for choice, internal, parameters in (
+            ({"type": "function", "name": "flat.name"}, "flat%2Ename", {}),
+            (
+                {"type": "function", "function": {"name": "flat.name"}},
+                "flat%2Ename",
+                {},
+            ),
+            (
+                {"type": "function", "namespace": "space.dot", "name": "leaf.name"},
+                "space%2Edot.leaf%2Ename",
+                {},
+            ),
+            (
+                {"type": "custom", "namespace": "custom.ns", "name": "exec.name"},
+                "custom%2Ens.exec%2Ename",
+                {"input": "code"},
+            ),
+        ):
+            with self.subTest(choice=choice):
+                serving = qwen_serving()
+                captured = {}
+                install_engine_reply(serving, qwen_call(internal, parameters), captured)
+                result = asyncio.run(
+                    serving.create_responses(request(tools=tools, tool_choice=choice))
+                )
+                self.assertEqual(result.status, "completed")
+                expected = {
+                    "type": choice["type"],
+                    "name": choice.get("name") or choice["function"]["name"],
+                }
+                if "namespace" in choice:
+                    expected["namespace"] = choice["namespace"]
+                self.assertEqual(result.tool_choice, expected)
+                item = result.output[0].model_dump()
+                self.assertEqual(item["name"], expected["name"])
+                self.assertEqual(item.get("namespace"), expected.get("namespace"))
+                self.assertIn(internal, captured["sampling"]["structural_tag"])
+
+    def test_custom_literal_null_spellings_preserved_full(self):
+        serving = qwen_serving()
+        req = request(
+            tools=[namespace("functions", {"type": "custom", "name": "exec"})]
+        )
+        for payload in ("null", "NULL", "Null"):
+            with self.subTest(payload=payload):
+                result = serving._make_response_output_items(
+                    req,
+                    qwen_call("functions.exec", {"input": payload}),
+                    serving.tokenizer_manager.tokenizer,
+                    require_reasoning=False,
+                )
+                self.assertEqual(result[0].input, payload)
+
+    def test_custom_literal_null_spellings_preserved_stream(self):
+        serving = qwen_serving()
+        req = request(
+            tools=[namespace("functions", {"type": "custom", "name": "exec"})]
+        )
+        for payload in ("null", "NULL", "Null"):
+            with self.subTest(payload=payload):
+                text = qwen_call("functions.exec", {"input": payload})
+                chunks = [engine_chunk(text[:i]) for i in range(1, len(text), 3)] + [
+                    engine_chunk(text, finish=True)
+                ]
+                seq = StreamFixture(serving, req).run_seq(chunks)
+                displayed = "".join(
+                    part["delta"]
+                    for kind, part in seq
+                    if kind == "response.custom_tool_call_input.delta"
+                )
+                completed = next(
+                    part["item"]["input"]
+                    for kind, part in seq
+                    if kind == "response.output_item.done"
+                )
+                self.assertEqual(displayed, payload)
+                self.assertEqual(completed, payload)
+                self.assertEqual(seq[-1][0], "response.completed")
+
 
 if __name__ == "__main__":
     unittest.main()
