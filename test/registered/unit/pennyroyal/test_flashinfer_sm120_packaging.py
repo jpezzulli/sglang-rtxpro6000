@@ -37,6 +37,7 @@ PACKAGE_DIR = REPO / "scripts" / "pennyroyal" / "flashinfer"
 INSTALLER = PACKAGE_DIR / "install.py"
 MANIFEST = PACKAGE_DIR / "accepted-sources.json"
 DOCKERFILE = REPO / "docker" / "pennyroyal" / "Dockerfile"
+BASELINE = REPO / "docker" / "pennyroyal" / "native-baseline.json"
 CHECK = REPO / "docker/pennyroyal/check_install.py"
 BUILD_GUIDE = REPO / "BUILD.md"
 NEXT_SCRIPTS = (
@@ -329,9 +330,15 @@ def test_accepted_pin_matches_every_dependency_pin():
         in (REPO / "python/pyproject.toml").read_text()
     )
     dockerfile = DOCKERFILE.read_text()
-    assert f"'flashinfer-jit-cache=={version}+cu130'" in dockerfile
-    assert f"'flashinfer-jit-cache-sm120f=={version}+cu130'" in dockerfile
-    assert f'"flashinfer-python": "{version}"' in CHECK.read_text()
+    # The provider pins live in the dependency baseline, which is the one list of
+    # versions a release installs, and the image installs that group from the one
+    # index that publishes those +cu130 builds.
+    baseline = BASELINE.read_text()
+    assert f'"flashinfer-jit-cache": {{"version": "{version}+cu130"' in baseline
+    assert f'"flashinfer-jit-cache-sm120f": {{"version": "{version}+cu130"' in baseline
+    assert f'"flashinfer-python": {{"version": "{version}"' in baseline
+    assert '"index": "https://flashinfer.ai/whl/cu130"' in baseline
+    assert '--index-url "$index" -r /tmp/penny-pins.txt' in dockerfile
 
 
 def test_stock_source_is_patched_once_and_a_repeat_run_accepts_it(tmp_path):
@@ -732,12 +739,13 @@ def test_both_installation_paths_run_the_one_step():
     assert "scripts/pennyroyal/flashinfer/install.py" in update
     assert "--no-deps -e python" in update
     assert "flashinfer-python" in update  # the prerequisite is spelled out
-    jit_cache = dockerfile.index("flashinfer-jit-cache-sm120f")
+    jit_cache = dockerfile.index("dependency_parity.py requirements")
     packaging = dockerfile.index("scripts/pennyroyal/flashinfer/install.py")
-    freeze = dockerfile.index(
-        "python scripts/pennyroyal/flashinfer/check_dependencies.py"
-    )
-    assert jit_cache < packaging < freeze
+    audit = "python scripts/pennyroyal/flashinfer/check_dependencies.py"
+    first_audit, last_audit = dockerfile.index(audit), dockerfile.rindex(audit)
+    # The dependency audit brackets the compile: the metadata closure of what is
+    # installed is judged before nvcc is spent, and the packaged environment again.
+    assert jit_cache < first_audit < packaging < last_audit
     assert "PENNY_BUILD_JOBS=4" in dockerfile and "MAX_JOBS=4" in dockerfile
     assert "check_flashinfer_sm120" in CHECK.read_text()
 

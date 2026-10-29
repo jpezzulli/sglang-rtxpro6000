@@ -42,34 +42,48 @@ RUN dnf install -y --setopt=install_weak_deps=False --nodocs \
       cmake meson pkgconf-pkg-config openssl-devel protobuf-compiler \
       rust cargo uv findutils \
     && dnf clean all
-RUN uv python install 3.12.13 \
-    && uv venv --python 3.12.13 /opt/pennyroyal/.venv \
-    && uv pip install --python /opt/pennyroyal/.venv/bin/python \
-      pip 'setuptools>=80.9' setuptools-rust setuptools-scm wheel build \
-      meson-python pybind11 patchelf tomlkit pyyaml types-PyYAML
-# Clone exactly the reviewed commit. Keeping shallow Git metadata lets the
+# The checkout precedes the install so the pins come from the source being built.
+# WORKDIR creates the directory `git init` needs - nothing else makes it, and the
+# venv is created inside it afterwards. Shallow Git metadata is what lets the
 # existing namespace helper identify the source without inventing an identity.
+WORKDIR /opt/pennyroyal
 RUN [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]] \
     && git -C /opt/pennyroyal init \
     && git -C /opt/pennyroyal remote add origin "$SOURCE_REPOSITORY" \
     && git -C /opt/pennyroyal fetch --depth=1 origin "$SOURCE_REVISION" \
     && git -C /opt/pennyroyal checkout --detach FETCH_HEAD
-WORKDIR /opt/pennyroyal
+# Release dependencies are installed, not resolved. native-baseline.json names
+# every distribution of the qualified native environment at its exact version,
+# transitive dependencies included, and --no-deps stops a resolver adding or
+# moving any of them; the native-only development tools named there stay out of
+# the image. Each group is installed from the one index that publishes those exact
+# builds and every pin is arbitrary equality, so no base version can admit a
+# local-tagged sibling of the build it qualified. The two +cu130 provider pins of
+# the FlashInfer cache family are what keep the fused-MoE extension prebuilt, and
+# the cubin wheel is the runtime input the packaging step prunes below.
+RUN uv python install 3.12.13 \
+    && uv venv --python 3.12.13 /opt/pennyroyal/.venv \
+    && for index in $(.venv/bin/python scripts/pennyroyal/dependency_parity.py indexes); do \
+         .venv/bin/python scripts/pennyroyal/dependency_parity.py requirements \
+           --index "$index" > /tmp/penny-pins.txt \
+         && uv pip install --python .venv/bin/python --no-deps --prerelease=allow \
+              --index-url "$index" -r /tmp/penny-pins.txt; \
+       done \
+    && rm -f /tmp/penny-pins.txt
+# Pennyroyal is the one baseline entry that is not a wheel from an index: its
+# version comes from the checked-out revision, never from the stale metadata of
+# another checkout. Both dependency gates then run, before the compile below can
+# be spent. The requirement check reads the metadata closure of what is installed,
+# so a retained package that needs an excluded tool fails here instead of after an
+# hour of nvcc, and the parity check compares every installed version, naming NIXL
+# as the single entry this build still owes because its own step installs it.
 RUN export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG="0.5.19+g${SOURCE_REVISION:0:12}" \
     && CARGO_TARGET_DIR=/tmp/penny-cargo uv pip install \
-      --python .venv/bin/python --prerelease=allow --index-strategy unsafe-best-match \
-      --extra-index-url https://download.pytorch.org/whl/cu130 \
-      --extra-index-url https://docs.sglang.ai/whl/cu130/ \
-      --constraint docker/pennyroyal/constraints.txt --no-build-isolation-package sglang -e python \
-    && rm -rf /tmp/penny-cargo
-# Match the native installation's prebuilt SM120 kernels. Without these packages
-# FlashInfer compiles its large fused-MoE extension on every fresh cache root.
-# Since 0.7.0 flashinfer-jit-cache is a shim; --no-deps must pull the SM120-family
-# provider wheel explicitly (and both stay aligned with pyproject's flashinfer pin).
-RUN uv pip install --python .venv/bin/python --no-deps \
-      --index-url https://flashinfer.ai/whl/cu130 \
-      'flashinfer-jit-cache==0.7.0.post1+cu130' \
-      'flashinfer-jit-cache-sm120f==0.7.0.post1+cu130'
+      --python .venv/bin/python --no-deps --no-build-isolation-package sglang -e python \
+    && rm -rf /tmp/penny-cargo \
+    && .venv/bin/python scripts/pennyroyal/flashinfer/check_dependencies.py \
+    && .venv/bin/python scripts/pennyroyal/dependency_parity.py check \
+         --pending-source-build
 # Package the accepted FlashInfer SM120 source into the image's own FlashInfer
 # package and compile the fused-MoE module from those patched headers, exactly
 # as the native sequences do. The step hands nvcc the CUDAHOSTCXX above (g++-15)
@@ -81,11 +95,11 @@ RUN uv pip install --python .venv/bin/python --no-deps \
 # configurator and no first-launch compilation; the JIT objects stay in the
 # build stage. The step also guards one stock include of <sanitizer/...> that the
 # gcc15 package above does not ship, which is why the compile needs no sanitizer
-# development headers here either. When the optional flashinfer-cubin wheel is
-# installed here, the same step removes its trtllm-gen cubins that the pinned
-# runners dispatch only on SM100/103/107: no RTX GPU can load them, and pruning
-# at this layer, before the COPY below, is what keeps their bytes out of the
-# published image instead of merely deleting them in a later one.
+# development headers here either. The baseline installs the flashinfer-cubin
+# wheel, so this step also removes its trtllm-gen cubins that the pinned runners
+# dispatch only on SM100/103/107: no RTX GPU can load them, and pruning at this
+# layer, before the COPY below, is what keeps their bytes out of the published
+# image instead of merely deleting them in a later one.
 # The compile is the single most expensive layer of this image and, unlike the
 # checkout above, it does not consume the SGLang source: it consumes the patched
 # FlashInfer sources, this toolchain, these flags and this ABI. The directory
@@ -111,12 +125,16 @@ RUN MAX_JOBS="$FLASHINFER_BUILD_JOBS" FLASHINFER_NINJA_JOBS="$FLASHINFER_BUILD_J
     .venv/bin/python scripts/pennyroyal/flashinfer/install.py \
     && .venv/bin/python scripts/pennyroyal/flashinfer/install.py --check >/dev/null \
     && rm -rf /tmp/penny-fi-sm120
-# NIXL POSIX and optional NVMe PLE reader are built from pinned/vendored source.
+# NIXL POSIX and the optional NVMe PLE reader are built from pinned/vendored
+# source. The reader installs outside the environment, so the gates that close
+# this layer still see exactly the baseline, now including the two source-built
+# NIXL wheels, and the freeze is the record of what this image installed.
 RUN bash docker/pennyroyal/build-nixl.sh \
     && CARGO_TARGET_DIR=/tmp/penny-ple-cargo PYTHON=/opt/pennyroyal/.venv/bin/python \
       bash tools/ple_nvme/install.sh \
     && rm -rf /tmp/penny-ple-cargo \
     && .venv/bin/python scripts/pennyroyal/flashinfer/check_dependencies.py \
+    && .venv/bin/python scripts/pennyroyal/dependency_parity.py check \
     && .venv/bin/python -m pip freeze > /opt/pennyroyal-container-packages.txt
 
 # The reusable half of the build stage, and only that: the fingerprinted SM120
