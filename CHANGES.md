@@ -4,15 +4,13 @@
 
 Accepted as the release head `3a4de81398c087bbb8cf25cbe4b8bb67f6f2160b` on
 base `07bf815644d39328f9c05619e7bc05125e701525`, which already carries merged
-#138 and #140. The additions merged as #141-#144 and the release records as
-#145, and the accepted source is pushed at
-`work/release-3.1.4-responses-20261028`. The `pennyroyal-v3.1.4` tag and the
-`v3.1.4` image are not published yet; the earlier candidate build 40757589184
-stays cancelled and obsolete, and the candidate image built from the merged head
-(40798675809, 2026-10-29) is rejected for release because the upgraded pydantic
-union validation dropped Responses tool namespaces. The namespace fix and the
-container dependency and build-cache work merged as #146-#148 and a
-replacement build is pending; pending fields are in
+#138 and #140. The additions merged as #141-#144 and the release records as #145
+over documentation head `4d668a2d6b`, the Responses namespace correction and the
+container dependency and build-cache work as #146-#148, and the accepted source
+is pushed at `work/release-3.1.4-responses-20261028`. The `pennyroyal-v3.1.4` tag
+and the `v3.1.4` image are not published and a replacement build is still to be
+observed; candidate build 40798675809 and its rejected image digest, the
+superseded build 40757589184 and the CI history are recorded in
 [release-3.1.4.json](release-3.1.4.json).
 
 - Anthropic histories carrying recognized nested `tool_reference` blocks
