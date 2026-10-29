@@ -30,6 +30,9 @@ qualification or reverse John's decision to reuse the 27B checks for 3.0.
 - [ ] Fresh-install and upgrade instructions fetch the correct files, including setup updates made after a runtime release.
 - [ ] Version references, image defaults and compatibility hashes are updated.
 - [ ] Update the user-visible Penny Royal version for the release. Before publication, verify its actual output in both the native release environment and built candidate container; record the commands or endpoints and output on the release item. Identify any upstream SGLang package version separately.
+- [ ] Capture the native dependency baseline before the expensive container build: from the actual qualified native release environment, record the interpreter path, source and date, the Python version, and every installed package version, direct and transitive, with exact build identifiers and immutable source identity for locally built packages. A post-build `pip freeze` alone does not satisfy this gate.
+- [ ] Pin every shared runtime dependency to its qualified baseline version so the image build installs that version instead of freshly selecting from broad requirements. Deliberate upgrades are accepted and validated natively first, then refresh the baseline and pins before the release build.
+- [ ] Identify native-only development tools and container-only build or platform packages separately, with exact versions for container additions, and do not install native-only development tools into the image. Separating them is not permission to silently waive runtime parity.
 - [ ] Local diagnostics remain off in the published defaults and are not exposed as a public setup option.
 
 ## README and documentation
@@ -69,6 +72,7 @@ without rebuilding it.
 - [ ] Publish the reviewed source and immutable release tag; never move an already published tag.
 - [ ] Publish release notes and start the container build.
 - [ ] Confirm build checks pass and the versioned image points to the correct source. Until checked, its status is pending.
+- [ ] Before publication, compare the candidate image's actual installed versions against the approved native baseline and pins. Missing, extra or mismatched runtime dependencies block release; only explained development/build/platform-only differences are allowed. Record the baseline identity, pin-file revision and parity result on the release item.
 - [ ] Verify the public README, release and installation links.
 
 ## Return to everyday use
