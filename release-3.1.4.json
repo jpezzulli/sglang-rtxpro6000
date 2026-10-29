@@ -6,13 +6,17 @@
     "publication_approved": false,
     "published": false,
     "container": "pending",
-    "note": "Accepted scope, prepared and not published: the pennyroyal-v3.1.4 tag and the v3.1.4 image do not exist yet. The earlier candidate build 40757589184 is cancelled and obsolete; its source and digest are not reused. Until the tag, a fresh image build, digest verification and host-native banner check complete, 3.1.3 remains the published release."
+    "note": "Accepted scope, built as a candidate and not published: the pennyroyal-v3.1.4 tag and the v3.1.4 image do not exist yet. The fresh candidate build 40798675809 completed successfully on 2026-10-29T03:10:54Z from head 4d668a2d6b5a58295eecf6fe0e177adb945280ce and uploaded the build-tag image below. The earlier candidate build 40757589184 is cancelled and obsolete; its source and digest are not reused. Until the tag, digest verification against a running container and the host-native banner check complete, 3.1.3 remains the published release."
   },
   "source": {
     "accepted_head": "3a4de81398c087bbb8cf25cbe4b8bb67f6f2160b",
     "accepted_tree": "0055cb59d9ab690426dd917d7a45949884b0eedd",
+    "accepted_ref": "work/release-3.1.4-responses-20261028",
+    "release_head": "4d668a2d6b5a58295eecf6fe0e177adb945280ce",
+    "release_tree": "7d61684ba2c69832d24ed042ab1e6da101fd49d5",
+    "release_head_note": "The accepted runtime tree is reproduced exactly by the merged functional PRs #141-#144; the merged head adds the seven reviewed documentation files of #145 on top, and that head is the build source. The accepted runtime source identity above stays the qualified runtime head.",
     "responses_additions_base": "07bf815644d39328f9c05619e7bc05125e701525",
-    "responses_base_note": "The accepted Responses/parser/budget additions sit on base 07bf8156, which already contains merged PR #138 and PR #140; the source is not pushed and the canonical merge and tag happen at publication.",
+    "responses_base_note": "The accepted Responses/parser/budget additions sit on base 07bf8156, which already contains merged PR #138 and PR #140; the accepted source is pushed at work/release-3.1.4-responses-20261028, the additions merged as PR #141-#144, and the release tag is applied at publication.",
     "release_tag": "pennyroyal-v3.1.4",
     "release_tag_status": "pending",
     "release_url": "https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v3.1.4",
@@ -30,17 +34,54 @@
         "merge_commit": "07bf815644d39328f9c05619e7bc05125e701525",
         "issues": [],
         "fixes": "Release-asset and documentation preparation for 3.1.4"
+      },
+      {
+        "number": 141,
+        "head": "a0cbf53091595ab44ebb7d50a1cfc10b041c211f",
+        "merge_commit": "0eef978b6784c4b7de712033c437eb06f09f2bd9",
+        "issues": [],
+        "accepted_commits": ["f80b117fb356e1b33900a8c24d667b6f22e37b72", "991b0c303d80f00a42e48c5560f8782da22246ee"],
+        "fixes": "Structured Qwen tool-argument unions, including the parameter schema $id reference scope"
+      },
+      {
+        "number": 142,
+        "head": "45d9a452117918c1a17be175bf1148e42439354a",
+        "merge_commit": "ee14f4fed5fbec69a5a8b016e165ff6425206367",
+        "issues": [],
+        "accepted_commits": ["602b7e98667d325f0eb7df9a6db69d2370deeb22"],
+        "fixes": "Literal null/NULL/Null text kept in declared type:string Qwen parameters"
+      },
+      {
+        "number": 143,
+        "head": "86d3b32e2ff9155ce2fa17bc44e11732c80833bc",
+        "merge_commit": "09720ee3a98ffe4588af60a4b4201a5aa47bd1d8",
+        "issues": [],
+        "accepted_commits": ["2674fd18b938d9999831ed9faf57da71f8dafc23", "6595ace8108ac684a1a415ac4667a2b067510aa4", "56a93e0f2a985595de991e80c70bfcccd9413192", "8e1bdb025ce3615512ee5a7de36b8ff2ff25a1a6", "3a4de81398c087bbb8cf25cbe4b8bb67f6f2160b"],
+        "fixes": "Codex-style Responses tools, replay and identity handling, including history-only binding of retired names"
+      },
+      {
+        "number": 144,
+        "head": "4baca38205b4ad251a693e103acbd72a3bb53ad9",
+        "merge_commit": "9cefc874a3260092437676f9bf3ad694501299e0",
+        "issues": [],
+        "accepted_commits": ["5619a7a1009e4cc650112bd55e7b4f917cf47649"],
+        "fixes": "Deferred omitted Responses completion budgets until after multimodal input expansion"
+      },
+      {
+        "number": 145,
+        "head": "07fd7ffdf0cb2341cd2c077050fe6eb1afae7eec",
+        "merge_commit": "4d668a2d6b5a58295eecf6fe0e177adb945280ce",
+        "issues": [],
+        "accepted_commits": [],
+        "fixes": "Release records: documentation-only followup on top of the merged runtime scope"
       }
     ],
-    "pending_prs": {
-      "numbers": null,
-      "merge_commits": null,
-      "note": "The accepted additions on top of 07bf8156 are prepared as four local functional groups awaiting focused PRs: structured unions (f80b117f, 991b0c30), literal strings (602b7e98), Responses compatibility (2674fd18, 6595ace8, 56a93e0f, 8e1bdb02, 3a4de813) and deferred completion budgets (5619a7a1). PR numbers and merge commits are unknown and null here, not invented."
-    },
-    "unmerged_accepted_commits": [
+    "accepted_commits": [
       {
         "commit": "2674fd18b938d9999831ed9faf57da71f8dafc23",
         "summary": "Codex-style Responses support: namespaced function/custom tool mapping onto the chat path, reversible collision-safe identities, inline inventories, multimodal tool results, stored tool/reasoning history, custom input events.",
+        "merged_as": "16db7514be782b5844fcf10ee84a86efb97b099f",
+        "pr": 143,
         "adapted_upstream": [
           {"pr": 38690, "short_hash": "925e684a88f5"},
           {"pr": 41178, "short_hash": "efa783a3d741"},
@@ -51,11 +92,15 @@
       {
         "commit": "6595ace8108ac684a1a415ac4667a2b067510aa4",
         "summary": "Malformed recognized replay items rejected with request errors; per-namespace/member additional_tools rebinding preserves original prompt history and unmentioned members; custom-call conflict against the already-streamed payload refused.",
+        "merged_as": "fa9c223db8530f1a5d844e8237aa9c843079b414",
+        "pr": 143,
         "adapted_upstream": []
       },
       {
         "commit": "f80b117fb356e1b33900a8c24d667b6f22e37b72",
         "summary": "Structured Qwen tool arguments: anyOf/oneOf string unions keep objects and arrays when the schema accepts the decoded value.",
+        "merged_as": "ef02a05f1707a8f4bfcd6027d4f75395d6b3ce05",
+        "pr": 141,
         "adapted_upstream": [
           {"pr": 44124, "author": "rystewart-nvidia", "head": "b0fb69ce5ae41417b5c827821051df90c161a5e2"}
         ]
@@ -63,6 +108,8 @@
       {
         "commit": "991b0c303d80f00a42e48c5560f8782da22246ee",
         "summary": "Structured-union validation honors the parameter schema's own $id reference scope.",
+        "merged_as": "a0cbf53091595ab44ebb7d50a1cfc10b041c211f",
+        "pr": 141,
         "adapted_upstream": [
           {"pr": 44124, "author": "rystewart-nvidia", "head": "b0fb69ce5ae41417b5c827821051df90c161a5e2", "note": "follow-up correction in the same adaptation"}
         ]
@@ -70,16 +117,22 @@
       {
         "commit": "602b7e98667d325f0eb7df9a6db69d2370deeb22",
         "summary": "Declared type:string parameters keep literal text, including null/NULL/Null, in complete and incremental parsing; existing coercion for nullable/nonstring/untyped parameters preserved.",
+        "merged_as": "45d9a452117918c1a17be175bf1148e42439354a",
+        "pr": 142,
         "adapted_upstream": []
       },
       {
         "commit": "56a93e0f2a985595de991e80c70bfcccd9413192",
         "summary": "Named Responses selections validated before identity translation; invalid names, namespaces and nested function-choice shapes get normal request errors.",
+        "merged_as": "fcde6d5f0ce0e53beb5074fb8750477cf99d1bf0",
+        "pr": 143,
         "adapted_upstream": []
       },
       {
         "commit": "5619a7a1009e4cc650112bd55e7b4f917cf47649",
         "summary": "Omitted non-Harmony completion budgets defer to scheduler bounds after multimodal input expansion; explicit limits unchanged.",
+        "merged_as": "4baca38205b4ad251a693e103acbd72a3bb53ad9",
+        "pr": 144,
         "adapted_upstream": [
           {"pr": 35524, "short_hash": "616178a5966ba7f301b8659cb3f94a71238ad4cc", "issue": 29287, "coauthor": "hhy-seven <33918672+hhy-seven@users.noreply.github.com>"}
         ]
@@ -87,27 +140,36 @@
       {
         "commit": "8e1bdb025ce3615512ee5a7de36b8ff2ff25a1a6",
         "summary": "Namespaced tools advertised by the generic MCP namespace__leaf identity through one per-request binding table shared by prompt, named/required selection, replay and full/SSE call items; unadvertised model names pass through.",
+        "merged_as": "093665869dfd12340adf1f0fbf1f5b0bedce61f9",
+        "pr": 143,
         "adapted_upstream": []
       },
       {
         "commit": "3a4de81398c087bbb8cf25cbe4b8bb67f6f2160b",
         "summary": "Replayed call items bind their wire identity as history-only: colliding retired tools keep distinct, non-callable identities instead of sharing one name.",
+        "merged_as": "86d3b32e2ff9155ce2fa17bc44e11732c80833bc",
+        "pr": 143,
         "adapted_upstream": []
       }
     ]
   },
   "container": {
     "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.4",
-    "candidate_image": null,
-    "digest": null,
-    "build_url": null,
-    "source_revision": null,
+    "candidate_image": "ghcr.io/jpezzulli/sglang-rtxpro6000:build-4d668a2d6b5a58295eecf6fe0e177adb945280ce",
+    "digest": "sha256:4544231eb75edae01f63f0549ffb5ce8d2c2fe5d58d2008ad1914455dc47fe07",
+    "digest_scope": "Registry manifest-index digest read from the registry metadata for the candidate tag (linux/amd64 manifest sha256:660c14cf0e7ccf213c75cd7dfa8f96350d73c065f6498f41d1a7320edbe643bc); not yet verified against a running container.",
+    "build_url": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/40798675809",
+    "source_revision": "4d668a2d6b5a58295eecf6fe0e177adb945280ce",
+    "build_result": "success",
+    "build_steps": "Job image on run 40798675809: every step succeeded through Build, check and upload image and Record image and build cache; Publish version tag without rebuilding was skipped, so the run created no release tag.",
+    "build_finished_at": "2026-10-29T03:10:54Z",
+    "build_warnings": "One GitHub Actions annotation on job 123201238902: the pinned checkout, build-push, login and setup-buildx actions run on Node.js 24 under the Node.js 20 deprecation notice. It is a tooling deprecation warning, not a release blocker, and no step failed.",
     "cancelled_build": {
       "run": 40757589184,
       "status": "cancelled",
       "note": "The old one-fix candidate build is cancelled and obsolete; its source and digest are not reused for the accepted scope."
     },
-    "note": "No image has been built or verified for the accepted 3.1.4 scope. The currently published image remains ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3, digest sha256:cdba5f8d72098813454aa552bad35873d65b2ba8cd72f93f3ae3ed7057c0636a, recorded in release-3.1.3.json."
+    "note": "Candidate image built from documentation head 4d668a2d6b, whose runtime tree is the accepted 0055cb59 tree; the image OCI revision label confirms that revision. No v3.1.4 tag or GitHub release exists yet (the run's tag step was skipped; the latest release is still pennyroyal-v3.1.3), and the image has not been served or banner-checked, so it is not a published release. The currently published image remains ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3, digest sha256:cdba5f8d72098813454aa552bad35873d65b2ba8cd72f93f3ae3ed7057c0636a, recorded in release-3.1.3.json."
   },
   "changes": [
     {
@@ -127,7 +189,7 @@
         "8e1bdb025ce3615512ee5a7de36b8ff2ff25a1a6",
         "3a4de81398c087bbb8cf25cbe4b8bb67f6f2160b"
       ],
-      "pr": null,
+      "pr": 143,
       "issues": [],
       "summary": "Responses API: namespaced function and custom tools, inline additional_tools inventories, chronological replay/history and image-containing tool results map onto the chat path with one reversible, collision-safe identity shared by declarations, selected names, replay and full/SSE outputs. Namespaced members prefer the namespace__leaf identity; contested spellings escalate deterministically; unadvertised model names pass through. Malformed recognized replay and invalid named selections, namespaces and nested function-choice shapes are rejected with normal request errors before identity translation. Collision-retired identities bind as history-only: they stay distinct and cannot be called or required.",
       "profiles": [
@@ -140,7 +202,7 @@
         "991b0c303d80f00a42e48c5560f8782da22246ee",
         "602b7e98667d325f0eb7df9a6db69d2370deeb22"
       ],
-      "pr": null,
+      "prs": [141, 142],
       "issues": [],
       "summary": "Qwen tool-argument parsing: anyOf/oneOf string unions keep objects and arrays when the parameter schema (in its own $id scope) accepts the decoded value, and declared type:string parameters keep explicit text including a literal null/NULL/Null. Existing coercion for nullable, nonstring, untyped and unknown parameters is unchanged.",
       "profiles": [
@@ -151,7 +213,7 @@
       "commits": [
         "5619a7a1009e4cc650112bd55e7b4f917cf47649"
       ],
-      "pr": null,
+      "pr": 144,
       "issues": [],
       "summary": "Omitted non-Harmony Responses completion-token budgets defer to the existing scheduler bounds until after multimodal (image) input expansion, so image requests without an explicit limit stop failing the pre-expansion context check; explicit limits and Harmony are unchanged. Adapted from upstream PR 35524 (issue 29287).",
       "profiles": [
@@ -180,11 +242,11 @@
     "overlapping_prior_runs": "Earlier combined 749 tests with 218 subtests and 119 completion-budget tests are per-stage evidence and overlap; there is no unique grand total.",
     "live_checks": "Both 27B FP8/DFlash2 and Flash-Next NVFP4/native NEXTN passed the original uncoached real Codex MCP workflow with actual tool execution and callback consumption, and 5/5 ordinary generation/parallel-tool smoke each. No Xid observed. No new performance, cache, NVMe or full-quality campaign was run.",
     "flashnext_parser_qualification": "John accepted the additional unchanged Flash-Next cross-API parser checks as passing while retaining known generation mismatches: xhigh+greedy produced 3/4 exact full payloads (one extra JSON-looking string was over-quoted); thinking-disabled with normal sampling produced 2/4 exact full payloads (streamed nullable values showed empty-string/string-\"None\" mismatches). The changed array/object/literal-string behavior passed; one reproduced empty value was already present in raw model generation and parsed identically on base 07bf8156 and the accepted head, so no new parser regression is demonstrated. Not every payload is exact.",
-    "ci": "Contributor CI run 40745879894 green on PR #138. Candidate build 40757589184 is cancelled and obsolete.",
-    "container_build": "pending: no image built for the accepted scope, no digest verified. Image verification and the host-native banner check are open publication gates.",
+    "ci": "Contributor CI run 40745879894 green on PR #138, and PRs #141-#145 merged green in sequence. Candidate build 40798675809 succeeded on head 4d668a2d6b; the earlier candidate build 40757589184 is cancelled and obsolete.",
+    "container_build": "Done: candidate image ghcr.io/jpezzulli/sglang-rtxpro6000:build-4d668a2d6b5a58295eecf6fe0e177adb945280ce built, checked and uploaded by run 40798675809 (job 123201238902). Still pending: the v3.1.4 tag and release, image serving and version-banner verification on the host, and digest verification against that running container.",
     "nvme_serving": "not run",
     "exceptions": [
-      "Publication, container build, digest verification and host-native runtime verification are all pending gates; nothing here asserts a published 3.1.4 tag or image.",
+      "Publication, the v3.1.4 tag, image serving and digest verification against a running container, and host-native runtime verification are all pending gates; the successful candidate build says nothing about a published 3.1.4 tag or image, and nothing here asserts that the candidate image was served.",
       "Evidence runs are recorded separately and are not summed; the Flash-Next generation mismatches above are accepted limitations, not failures of the shipped fixes."
     ]
   },
