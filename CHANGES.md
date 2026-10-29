@@ -1,19 +1,39 @@
 # Penny Royal release history
 
-## 3.1.4 — Anthropic nested tool references rendered safely (publication pending)
+## 3.1.4 — Accepted Responses, parser and budget scope with the Anthropic tool-reference fix (publication pending)
 
-Prepared as the single-fix release for issue #137 / PR #138. The
-`pennyroyal-v3.1.4` tag and the `v3.1.4` image are not published yet; pending
-fields are in [release-3.1.4.json](release-3.1.4.json).
+Accepted as the release head `3a4de81398c087bbb8cf25cbe4b8bb67f6f2160b` on
+base `07bf815644d39328f9c05619e7bc05125e701525`, which already carries merged
+#138 and #140. The `pennyroyal-v3.1.4` tag and the `v3.1.4` image are not
+published yet; the earlier candidate build 40757589184 is cancelled and
+obsolete; pending fields are in [release-3.1.4.json](release-3.1.4.json).
 
 - Anthropic histories carrying recognized nested `tool_reference` blocks
   returned HTTP 500 on the bundled Froggeric v22.5 template, which has no
   native reference expansion. The adapter now renders recognized references as
   text — names, order and IDs preserved — and keeps native structured handling
   where supported: the reported reproduction returns HTTP 200, ordinary prompt
-  bytes are unchanged and unsupported blocks still return a clean HTTP 400.
-  The chat template, defaults, settings and sampling behavior are unchanged
-  (head `7a5e449c`; reported by @BoneGoat).
+  bytes are unchanged and unsupported blocks still return a clean HTTP 400
+  (head `7a5e449c`, merged #138; reported by @BoneGoat).
+- `/v1/responses` accepts namespaced function/custom tools and inline
+  `additional_tools` inventories, chronological replay/history and
+  image-containing tool results, with one reversible identity binding shared by
+  declarations, selected names, replay and full/SSE outputs; colliding
+  identities that leave the inventory stay retired and non-callable.
+- The Qwen parser keeps schema-accepted arrays/objects in string unions and
+  explicit declared-string text, including a literal `"null"`; omitted
+  Responses completion budgets defer until after image expansion, so image
+  requests without an explicit limit stop failing the context check early.
+- Accepted runs, recorded separately: 165 tests with 189 subtests on the head;
+  both 27B FP8/DFlash2 and Flash-Next NVFP4/native NEXTN passed the uncoached
+  real Codex MCP workflow and 5/5 generation/parallel-tool smoke each. The
+  accepted Flash-Next parser spot-checks retain known model-generation
+  mismatches (see the release JSON); no claim of full Codex parity. The narrow
+  plaintext agent-message handling arrives with this scope and was checked;
+  the optional AutoReview flow was checked and stays optional with saved
+  client approval settings unchanged. Custom-tool grammar is prompt guidance,
+  not enforced grammar decoding. Defaults, settings, sampling and the chat
+  template are unchanged.
 
 ## 3.1.3 — Six correctness fixes and the 27B DFlash2 maturity correction
 
