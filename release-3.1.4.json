@@ -35,7 +35,7 @@
     "pending_prs": {
       "numbers": null,
       "merge_commits": null,
-      "note": "The remaining accepted additions on top of 07bf8156 have no PR numbers or merge commits yet; they are null here, not invented."
+      "note": "The accepted additions on top of 07bf8156 are prepared as four local functional groups awaiting focused PRs: structured unions (f80b117f, 991b0c30), literal strings (602b7e98), Responses compatibility (2674fd18, 6595ace8, 56a93e0f, 8e1bdb02, 3a4de813) and deferred completion budgets (5619a7a1). PR numbers and merge commits are unknown and null here, not invented."
     },
     "unmerged_accepted_commits": [
       {
@@ -123,12 +123,13 @@
       "commits": [
         "2674fd18b938d9999831ed9faf57da71f8dafc23",
         "6595ace8108ac684a1a415ac4667a2b067510aa4",
+        "56a93e0f2a985595de991e80c70bfcccd9413192",
         "8e1bdb025ce3615512ee5a7de36b8ff2ff25a1a6",
         "3a4de81398c087bbb8cf25cbe4b8bb67f6f2160b"
       ],
       "pr": null,
       "issues": [],
-      "summary": "Responses API: namespaced function and custom tools, inline additional_tools inventories, chronological replay/history and image-containing tool results map onto the chat path with one reversible, collision-safe identity shared by declarations, selected names, replay and full/SSE outputs. Namespaced members prefer the namespace__leaf identity; contested spellings escalate deterministically; unadvertised model names pass through. Malformed recognized replay and selection shapes are rejected with normal request errors. Collision-retired identities bind as history-only: they stay distinct and cannot be called or required.",
+      "summary": "Responses API: namespaced function and custom tools, inline additional_tools inventories, chronological replay/history and image-containing tool results map onto the chat path with one reversible, collision-safe identity shared by declarations, selected names, replay and full/SSE outputs. Namespaced members prefer the namespace__leaf identity; contested spellings escalate deterministically; unadvertised model names pass through. Malformed recognized replay and invalid named selections, namespaces and nested function-choice shapes are rejected with normal request errors before identity translation. Collision-retired identities bind as history-only: they stay distinct and cannot be called or required.",
       "profiles": [
         "/v1/responses"
       ]
@@ -148,23 +149,22 @@
     },
     {
       "commits": [
-        "56a93e0f2a985595de991e80c70bfcccd9413192",
         "5619a7a1009e4cc650112bd55e7b4f917cf47649"
       ],
       "pr": null,
       "issues": [],
-      "summary": "Omitted Responses completion-token budgets defer to the existing scheduler bounds until after multimodal (image) input expansion, so image requests without an explicit limit stop failing the pre-expansion context check; explicit limits and Harmony are unchanged. Adapted from upstream PR 35524 (issue 29287).",
+      "summary": "Omitted non-Harmony Responses completion-token budgets defer to the existing scheduler bounds until after multimodal (image) input expansion, so image requests without an explicit limit stop failing the pre-expansion context check; explicit limits and Harmony are unchanged. Adapted from upstream PR 35524 (issue 29287).",
       "profiles": [
         "/v1/responses"
       ]
     }
   ],
   "notes": {
-    "autoreview": "Normal optional AutoReview flow is unchanged; saved client configuration and approval settings are untouched.",
-    "plaintext_agent_messages": "The narrow plaintext agent-message compatibility ships via the already-merged plaintext subset of upstream PR 35216 in the base; no new work in this range.",
+    "autoreview": "The optional AutoReview flow was exercised in the accepted live checks and remains optional; saved client configuration and approval settings are untouched.",
+    "plaintext_agent_messages": "The narrow plaintext agent-message compatibility is introduced by 2674fd18 (the plaintext subset of upstream PR 35216) in this release range, above the 07bf8156 base; it is new in 3.1.4, not already in the base.",
     "template": "The bundled Froggeric chat template is unchanged.",
     "parity_claim": "No claim of full Codex parity or blanket model correctness; custom-tool grammar support is prompt guidance, not enforced grammar decoding.",
-    "not_qualified": "Native tool search, complete subagent workflows, async Guardian and remote compaction remain unqualified (untested, not unsupported)."
+    "not_qualified": "Native tool search, complete subagent workflows, async Guardian and remote compaction remain unqualified (untested, not unsupported); see the 3.1.4 scope section of LIMITATIONS.md."
   },
   "defaults_unchanged": {
     "native_mtp_width_policy": "tiered (block 8 at one running request, block 4 at two or more)",
@@ -178,7 +178,7 @@
     "accepted_head_cpu": "Accepted run on head 3a4de813: 165 CPU tests with 189 subtests passed (final identity correction).",
     "anthropic_reused": "Anthropic evidence dated to head 7a5e449c over the published 3.1.3 base 177697b3: 145 CPU tests with 68 subtests and 22 live checks, including the 500-to-200 reproduction; one unrelated uncached external-tokenizer test deselected. Reused, not rerun.",
     "overlapping_prior_runs": "Earlier combined 749 tests with 218 subtests and 119 completion-budget tests are per-stage evidence and overlap; there is no unique grand total.",
-    "live_checks": "Both 27B FP8/DFlash2 and Flash-Next NVFP4/native NEXTN passed the original uncached real Codex MCP workflow with actual tool execution and callback consumption, and 5/5 ordinary generation/parallel-tool smoke each. No Xid observed. No new performance, cache, NVMe or full-quality campaign was run.",
+    "live_checks": "Both 27B FP8/DFlash2 and Flash-Next NVFP4/native NEXTN passed the original uncoached real Codex MCP workflow with actual tool execution and callback consumption, and 5/5 ordinary generation/parallel-tool smoke each. No Xid observed. No new performance, cache, NVMe or full-quality campaign was run.",
     "flashnext_parser_qualification": "John accepted the additional unchanged Flash-Next cross-API parser checks as passing while retaining known generation mismatches: xhigh+greedy produced 3/4 exact full payloads (one extra JSON-looking string was over-quoted); thinking-disabled with normal sampling produced 2/4 exact full payloads (streamed nullable values showed empty-string/string-\"None\" mismatches). The changed array/object/literal-string behavior passed; one reproduced empty value was already present in raw model generation and parsed identically on base 07bf8156 and the accepted head, so no new parser regression is demonstrated. Not every payload is exact.",
     "ci": "Contributor CI run 40745879894 green on PR #138. Candidate build 40757589184 is cancelled and obsolete.",
     "container_build": "pending: no image built for the accepted scope, no digest verified. Image verification and the host-native banner check are open publication gates.",

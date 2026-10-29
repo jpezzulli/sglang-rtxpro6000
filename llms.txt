@@ -37,7 +37,9 @@ schema-accepted arrays/objects and explicit string values such as a literal
 `"null"`, and omitted completion budgets deferred until after image
 expansion. Merged #138 and #140 carry the base; the remaining additions have
 no PR numbers yet. The Froggeric template, defaults, settings and sampling are
-unchanged and this is not full Codex parity. The old candidate build
+unchanged; custom-tool grammar is prompt guidance, not enforced decoding, and
+features not yet qualified for this release are listed in the 3.1.4 section of
+LIMITATIONS.md. The old candidate build
 40757589184 is cancelled; no new image exists. Until that tag and image
 publish, the current release is Penny Royal 3.1.3, six accepted
 correctness fixes over the 3.1.2 source: Anthropic thinking accepted without a
@@ -177,7 +179,7 @@ actual answer grading on the qualified sources; extended or repetitive
 reasoning is not penalized and `ask_user` is a valid tool choice. Recorded
 deviations are listed with the measurements.
 
-- [3.1.4 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.4.md): accepted Anthropic `tool_reference` fix plus Codex-style Responses tool, Qwen parser and deferred-budget scope; tag and image pending, old candidate build cancelled.
+- [3.1.4 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.4.md): accepted Anthropic `tool_reference` fix plus Codex-style Responses tool, Qwen parser and deferred-budget scope; tag and image pending, old candidate build cancelled, open limitations in the 3.1.4 section of LIMITATIONS.md.
 - [3.1.4 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.4.json): accepted head identity, merged and pending PRs, upstream lineage, separately recorded evidence and qualification limits.
 - [3.1.3 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.3.md): six accepted correctness fixes, the 27B DFlash2 maturity correction, reused validation evidence and open exceptions.
 - [3.1.3 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.3.json): Fix identities, validation scope and published image identity.

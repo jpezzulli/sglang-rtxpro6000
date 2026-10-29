@@ -13,6 +13,17 @@
   approximately 490K. Coverage varies by prompt length, modality, sampling
   configuration, and concurrent schedule.
 
+## 3.1.4 scope (prepared, publication pending)
+
+- Custom-tool grammar support is prompt guidance: the model is told the
+  spelling convention. No grammar decoding is enforced for these names.
+- Native tool search, complete subagent workflows, async Guardian and remote
+  compaction are not qualified on this release. They are untested here, not
+  labeled unsupported.
+- The 27B DFlash2 maturity label, the Flash-Next DFlash2 alpha label and the
+  draft host-RAM guidance (24.83 GB beyond the 96 GB target/Mamba budget on
+  27B) are unchanged; this release adds no allocator optimization.
+
 ## v2.5.0 scope
 
 ### Online FP8

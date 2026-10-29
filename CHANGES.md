@@ -25,11 +25,15 @@ obsolete; pending fields are in [release-3.1.4.json](release-3.1.4.json).
   Responses completion budgets defer until after image expansion, so image
   requests without an explicit limit stop failing the context check early.
 - Accepted runs, recorded separately: 165 tests with 189 subtests on the head;
-  both 27B FP8/DFlash2 and Flash-Next NVFP4/native NEXTN passed the uncached
+  both 27B FP8/DFlash2 and Flash-Next NVFP4/native NEXTN passed the uncoached
   real Codex MCP workflow and 5/5 generation/parallel-tool smoke each. The
   accepted Flash-Next parser spot-checks retain known model-generation
-  mismatches (see the release JSON); no claim of full Codex parity. Defaults,
-  settings, sampling and the chat template are unchanged.
+  mismatches (see the release JSON); no claim of full Codex parity. The narrow
+  plaintext agent-message handling arrives with this scope and was checked;
+  the optional AutoReview flow was checked and stays optional with saved
+  client approval settings unchanged. Custom-tool grammar is prompt guidance,
+  not enforced grammar decoding. Defaults, settings, sampling and the chat
+  template are unchanged.
 
 ## 3.1.3 — Six correctness fixes and the 27B DFlash2 maturity correction
 
