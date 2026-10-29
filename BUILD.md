@@ -407,6 +407,40 @@ patched SM12x prefill kernels is enabled by the two Next launch recipes and the
 two Next startup scripts through `FLASHINFER_GDN_FP16_ACCUM_MMA=1`, which does
 not change FlashInfer's own default, the online-FP8 choice or the 27B profile.
 
+### Reusing the compiled SM120 module
+
+The container workflow reuses the patched SM120 module from
+`$IMAGE:flashinfer-sm120-cache`. This separate registry artifact is available
+across release tags and hosted runners. A missing artifact causes a cold build.
+The first build with this mechanism must compile; older images have no input
+record and are not automatically trusted as cache seeds.
+
+After resolving dependencies, the installer fingerprints the generated Ninja
+flags and sources, include trees, linked libraries, CUDA toolchain, actual NVCC
+and host compiler, Python/Torch/TVM FFI binaries, and the accepted patches and
+installer. It compares installed bytes, not just dependency declarations or
+version strings. Temporary workspace paths and the SGLang release revision are
+excluded. The image still checks out the exact requested release source and runs
+its existing package, content and version checks.
+
+A matching input record and artifact digest skip compilation. Missing, malformed
+or incompatible entries cause a rebuild; incomplete input identification prevents
+reuse. A miss removes the module's old Ninja build directory before compiling,
+so previous object files cannot be relinked under a new fingerprint.
+
+The cache keeps at most two modules and their records. It uses `.aot` filenames
+for transport, then restores the loader's `.so` path. The Dockerfile's
+`flashinfer-artifact` target exports only `/cache`; wheels, environments and Ninja
+objects remain outside the artifact. Registry retention controls older image
+versions separately. Cache publication failure is reported without blocking the
+already-checked release image.
+
+`--build-cache DIR` or `PENNY_FLASHINFER_BUILD_CACHE=DIR` selects this optional
+installer cache. Without either, the existing uncached build is unchanged.
+Bump `CACHE_SCHEMA` if the artifact format changes. Input records explain which
+sections changed when reuse is declined; no fingerprint check is added to serving
+startup.
+
 ### Source and earlier wheels
 
 The exact executable source of each release is recorded in
