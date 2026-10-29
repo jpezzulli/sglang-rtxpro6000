@@ -6,28 +6,93 @@
     "publication_approved": false,
     "published": false,
     "container": "pending",
-    "note": "Prepared, not published: the pennyroyal-v3.1.4 tag and the v3.1.4 image do not exist yet. Until the tag, image build, digest verification and host-native banner check complete, 3.1.3 remains the published release."
+    "note": "Accepted scope, prepared and not published: the pennyroyal-v3.1.4 tag and the v3.1.4 image do not exist yet. The earlier candidate build 40757589184 is cancelled and obsolete; its source and digest are not reused. Until the tag, a fresh image build, digest verification and host-native banner check complete, 3.1.3 remains the published release."
   },
   "source": {
-    "tested_base": "177697b3d10fc0a4bcb17b3d84a378eecc828f68",
-    "integration_base": "441c6d9c288f35591c94de7014528f1dde50dac8",
-    "integration_note": "These release assets sit on a local integration of PR #138 head 7a5e449cb8b3ba9d2a773a165df6534ba55318f0 onto main; the canonical merge and tag happen at publication.",
+    "accepted_head": "3a4de81398c087bbb8cf25cbe4b8bb67f6f2160b",
+    "accepted_tree": "0055cb59d9ab690426dd917d7a45949884b0eedd",
+    "responses_additions_base": "07bf815644d39328f9c05619e7bc05125e701525",
+    "responses_base_note": "The accepted Responses/parser/budget additions sit on base 07bf8156, which already contains merged PR #138 and PR #140; the source is not pushed and the canonical merge and tag happen at publication.",
     "release_tag": "pennyroyal-v3.1.4",
     "release_tag_status": "pending",
     "release_url": "https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v3.1.4",
-    "integrated_commits": {
-      "7a5e449cb8b3ba9d2a773a165df6534ba55318f0": {
-        "issues": [137],
-        "pr": 138,
-        "merge_commit": null
-      }
-    },
-    "pull_requests": [
+    "merged_prs": [
       {
         "number": 138,
         "head": "7a5e449cb8b3ba9d2a773a165df6534ba55318f0",
-        "merge_commit": null,
+        "merge_commit": "868a0b42d03f28f1fcfd59e622fe4ad457e7dfbb",
+        "issues": [137],
         "fixes": "Anthropic nested tool_reference blocks returned HTTP 500 on the bundled Froggeric v22.5 template (#137)"
+      },
+      {
+        "number": 140,
+        "head": "3b8833095148a4aed5ebd5e15ca35741e5ac809a",
+        "merge_commit": "07bf815644d39328f9c05619e7bc05125e701525",
+        "issues": [],
+        "fixes": "Release-asset and documentation preparation for 3.1.4"
+      }
+    ],
+    "pending_prs": {
+      "numbers": null,
+      "merge_commits": null,
+      "note": "The remaining accepted additions on top of 07bf8156 have no PR numbers or merge commits yet; they are null here, not invented."
+    },
+    "unmerged_accepted_commits": [
+      {
+        "commit": "2674fd18b938d9999831ed9faf57da71f8dafc23",
+        "summary": "Codex-style Responses support: namespaced function/custom tool mapping onto the chat path, reversible collision-safe identities, inline inventories, multimodal tool results, stored tool/reasoning history, custom input events.",
+        "adapted_upstream": [
+          {"pr": 38690, "short_hash": "925e684a88f5"},
+          {"pr": 41178, "short_hash": "efa783a3d741"},
+          {"pr": 34950, "short_hash": "9e0bf2578b37"},
+          {"pr": 35216, "short_hash": "e8d3009e0286", "note": "plaintext agent-message subset only"}
+        ]
+      },
+      {
+        "commit": "6595ace8108ac684a1a415ac4667a2b067510aa4",
+        "summary": "Malformed recognized replay items rejected with request errors; per-namespace/member additional_tools rebinding preserves original prompt history and unmentioned members; custom-call conflict against the already-streamed payload refused.",
+        "adapted_upstream": []
+      },
+      {
+        "commit": "f80b117fb356e1b33900a8c24d667b6f22e37b72",
+        "summary": "Structured Qwen tool arguments: anyOf/oneOf string unions keep objects and arrays when the schema accepts the decoded value.",
+        "adapted_upstream": [
+          {"pr": 44124, "author": "rystewart-nvidia", "head": "b0fb69ce5ae41417b5c827821051df90c161a5e2"}
+        ]
+      },
+      {
+        "commit": "991b0c303d80f00a42e48c5560f8782da22246ee",
+        "summary": "Structured-union validation honors the parameter schema's own $id reference scope.",
+        "adapted_upstream": [
+          {"pr": 44124, "author": "rystewart-nvidia", "head": "b0fb69ce5ae41417b5c827821051df90c161a5e2", "note": "follow-up correction in the same adaptation"}
+        ]
+      },
+      {
+        "commit": "602b7e98667d325f0eb7df9a6db69d2370deeb22",
+        "summary": "Declared type:string parameters keep literal text, including null/NULL/Null, in complete and incremental parsing; existing coercion for nullable/nonstring/untyped parameters preserved.",
+        "adapted_upstream": []
+      },
+      {
+        "commit": "56a93e0f2a985595de991e80c70bfcccd9413192",
+        "summary": "Named Responses selections validated before identity translation; invalid names, namespaces and nested function-choice shapes get normal request errors.",
+        "adapted_upstream": []
+      },
+      {
+        "commit": "5619a7a1009e4cc650112bd55e7b4f917cf47649",
+        "summary": "Omitted non-Harmony completion budgets defer to scheduler bounds after multimodal input expansion; explicit limits unchanged.",
+        "adapted_upstream": [
+          {"pr": 35524, "short_hash": "616178a5966ba7f301b8659cb3f94a71238ad4cc", "issue": 29287, "coauthor": "hhy-seven <33918672+hhy-seven@users.noreply.github.com>"}
+        ]
+      },
+      {
+        "commit": "8e1bdb025ce3615512ee5a7de36b8ff2ff25a1a6",
+        "summary": "Namespaced tools advertised by the generic MCP namespace__leaf identity through one per-request binding table shared by prompt, named/required selection, replay and full/SSE call items; unadvertised model names pass through.",
+        "adapted_upstream": []
+      },
+      {
+        "commit": "3a4de81398c087bbb8cf25cbe4b8bb67f6f2160b",
+        "summary": "Replayed call items bind their wire identity as history-only: colliding retired tools keep distinct, non-callable identities instead of sharing one name.",
+        "adapted_upstream": []
       }
     ]
   },
@@ -37,7 +102,12 @@
     "digest": null,
     "build_url": null,
     "source_revision": null,
-    "note": "No image has been built or verified for 3.1.4. The currently published image remains ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3, digest sha256:cdba5f8d72098813454aa552bad35873d65b2ba8cd72f93f3ae3ed7057c0636a, recorded in release-3.1.3.json."
+    "cancelled_build": {
+      "run": 40757589184,
+      "status": "cancelled",
+      "note": "The old one-fix candidate build is cancelled and obsolete; its source and digest are not reused for the accepted scope."
+    },
+    "note": "No image has been built or verified for the accepted 3.1.4 scope. The currently published image remains ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3, digest sha256:cdba5f8d72098813454aa552bad35873d65b2ba8cd72f93f3ae3ed7057c0636a, recorded in release-3.1.3.json."
   },
   "changes": [
     {
@@ -48,24 +118,74 @@
       "profiles": [
         "Anthropic-compatible /v1/messages"
       ]
+    },
+    {
+      "commits": [
+        "2674fd18b938d9999831ed9faf57da71f8dafc23",
+        "6595ace8108ac684a1a415ac4667a2b067510aa4",
+        "8e1bdb025ce3615512ee5a7de36b8ff2ff25a1a6",
+        "3a4de81398c087bbb8cf25cbe4b8bb67f6f2160b"
+      ],
+      "pr": null,
+      "issues": [],
+      "summary": "Responses API: namespaced function and custom tools, inline additional_tools inventories, chronological replay/history and image-containing tool results map onto the chat path with one reversible, collision-safe identity shared by declarations, selected names, replay and full/SSE outputs. Namespaced members prefer the namespace__leaf identity; contested spellings escalate deterministically; unadvertised model names pass through. Malformed recognized replay and selection shapes are rejected with normal request errors. Collision-retired identities bind as history-only: they stay distinct and cannot be called or required.",
+      "profiles": [
+        "/v1/responses"
+      ]
+    },
+    {
+      "commits": [
+        "f80b117fb356e1b33900a8c24d667b6f22e37b72",
+        "991b0c303d80f00a42e48c5560f8782da22246ee",
+        "602b7e98667d325f0eb7df9a6db69d2370deeb22"
+      ],
+      "pr": null,
+      "issues": [],
+      "summary": "Qwen tool-argument parsing: anyOf/oneOf string unions keep objects and arrays when the parameter schema (in its own $id scope) accepts the decoded value, and declared type:string parameters keep explicit text including a literal null/NULL/Null. Existing coercion for nullable, nonstring, untyped and unknown parameters is unchanged.",
+      "profiles": [
+        "Qwen tool-call parser (all serving APIs)"
+      ]
+    },
+    {
+      "commits": [
+        "56a93e0f2a985595de991e80c70bfcccd9413192",
+        "5619a7a1009e4cc650112bd55e7b4f917cf47649"
+      ],
+      "pr": null,
+      "issues": [],
+      "summary": "Omitted Responses completion-token budgets defer to the existing scheduler bounds until after multimodal (image) input expansion, so image requests without an explicit limit stop failing the pre-expansion context check; explicit limits and Harmony are unchanged. Adapted from upstream PR 35524 (issue 29287).",
+      "profiles": [
+        "/v1/responses"
+      ]
     }
   ],
+  "notes": {
+    "autoreview": "Normal optional AutoReview flow is unchanged; saved client configuration and approval settings are untouched.",
+    "plaintext_agent_messages": "The narrow plaintext agent-message compatibility ships via the already-merged plaintext subset of upstream PR 35216 in the base; no new work in this range.",
+    "template": "The bundled Froggeric chat template is unchanged.",
+    "parity_claim": "No claim of full Codex parity or blanket model correctness; custom-tool grammar support is prompt guidance, not enforced grammar decoding.",
+    "not_qualified": "Native tool search, complete subagent workflows, async Guardian and remote compaction remain unqualified (untested, not unsupported)."
+  },
   "defaults_unchanged": {
     "native_mtp_width_policy": "tiered (block 8 at one running request, block 4 at two or more)",
     "operator_local_selection": "adaptive width policy, medium reasoning effort, diagnostics off",
     "launcher_default_reasoning_effort": "medium",
     "local_diagnostics": "off",
-    "note": "No settings, defaults or sampling changes; the DFlash2 maturity labels and the draft host-RAM guidance (measured 24.83 GB beyond the 96 GB target/Mamba budget on 27B) carry over unchanged."
+    "note": "No settings, defaults or sampling changes; the DFlash2 maturity labels (27B established/qualified, Flash-Next alpha only) and the draft host-RAM guidance (measured 24.83 GB beyond the 96 GB target/Mamba budget on 27B, no allocator optimization in this release) carry over unchanged. The sampling-penalty investigation is excluded from this release."
   },
   "validation": {
-    "review": "Three sequential reviews of PR #138, final clean.",
-    "focused_cpu_checks": "Accepted run on head 7a5e449c over the published 3.1.3 base 177697b3: 145 CPU tests with 68 subtests passed; one unrelated uncached external-tokenizer test deselected. Reused evidence, not rerun.",
-    "ci": "Contributor CI run 40745879894 green.",
-    "live_checks": "22 live checks passed across both 27B FP8/DFlash2 and Flash-Next NVFP4/native NEXTN, including the original 500-to-200 reproduction, streaming, mixed references, token counts, expected HTTP 400s, and generation/parallel-tool requests; no Xid in that window. The original 3.1.3 candidate ef3258749bbe022e38a5b18922a0085320a59928 was restored afterwards and passed 5/5 restoration checks.",
-    "container_build": "pending: no image built, no digest verified. Image verification and the host-native banner check are open publication gates.",
+    "review": "First replay review found a defect, corrected in 3a4de813; the fresh second review on the accepted head is clean.",
+    "accepted_head_cpu": "Accepted run on head 3a4de813: 165 CPU tests with 189 subtests passed (final identity correction).",
+    "anthropic_reused": "Anthropic evidence dated to head 7a5e449c over the published 3.1.3 base 177697b3: 145 CPU tests with 68 subtests and 22 live checks, including the 500-to-200 reproduction; one unrelated uncached external-tokenizer test deselected. Reused, not rerun.",
+    "overlapping_prior_runs": "Earlier combined 749 tests with 218 subtests and 119 completion-budget tests are per-stage evidence and overlap; there is no unique grand total.",
+    "live_checks": "Both 27B FP8/DFlash2 and Flash-Next NVFP4/native NEXTN passed the original uncached real Codex MCP workflow with actual tool execution and callback consumption, and 5/5 ordinary generation/parallel-tool smoke each. No Xid observed. No new performance, cache, NVMe or full-quality campaign was run.",
+    "flashnext_parser_qualification": "John accepted the additional unchanged Flash-Next cross-API parser checks as passing while retaining known generation mismatches: xhigh+greedy produced 3/4 exact full payloads (one extra JSON-looking string was over-quoted); thinking-disabled with normal sampling produced 2/4 exact full payloads (streamed nullable values showed empty-string/string-\"None\" mismatches). The changed array/object/literal-string behavior passed; one reproduced empty value was already present in raw model generation and parsed identically on base 07bf8156 and the accepted head, so no new parser regression is demonstrated. Not every payload is exact.",
+    "ci": "Contributor CI run 40745879894 green on PR #138. Candidate build 40757589184 is cancelled and obsolete.",
+    "container_build": "pending: no image built for the accepted scope, no digest verified. Image verification and the host-native banner check are open publication gates.",
     "nvme_serving": "not run",
     "exceptions": [
-      "Publication, container build, digest verification and host-native runtime verification are all pending gates; nothing here asserts a published 3.1.4 tag or image."
+      "Publication, container build, digest verification and host-native runtime verification are all pending gates; nothing here asserts a published 3.1.4 tag or image.",
+      "Evidence runs are recorded separately and are not summed; the Flash-Next generation mismatches above are accepted limitations, not failures of the shipped fixes."
     ]
   },
   "contributors": [
@@ -77,7 +197,18 @@
     {
       "name": "Penny Royal",
       "email": "Pennyroyal@agentmail.to",
-      "contribution": "Anthropic nested tool-reference adaptation (PR #138) and release documentation"
+      "contribution": "Anthropic nested tool-reference adaptation (PR #138), Responses/parser/budget additions and release documentation"
+    },
+    {
+      "name": "rystewart-nvidia",
+      "email": null,
+      "url": null,
+      "contribution": "Upstream author of PR 44124, adapted in commits f80b117f and 991b0c30"
+    },
+    {
+      "name": "hhy-seven",
+      "email": "33918672+hhy-seven@users.noreply.github.com",
+      "contribution": "Upstream co-author credited in commit 5619a7a1 (adaptation of PR 35524, issue 29287)"
     }
   ]
 }

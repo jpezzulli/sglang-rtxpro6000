@@ -1,33 +1,33 @@
 # Penny Royal 3.1.4
 
-Fixes Claude Code conversations that failed with HTTP 500 when their history
-contained nested `tool_reference` blocks
-([#137](https://github.com/jpezzulli/sglang-rtxpro6000/issues/137),
-[#138](https://github.com/jpezzulli/sglang-rtxpro6000/pull/138)).
+Penny Royal 3.1.4 is accepted and awaits publication. It makes Claude Code
+histories with nested `tool_reference` blocks safe (#137, #138, reported by
+@BoneGoat) and adds the accepted Codex-style `/v1/responses` work on top of
+merged #138 and #140: namespaced function and custom tools with inline
+inventories, chronological replay and history, and image-containing tool
+results, with one reversible tool identity shared by the prompt, selections,
+replay and full/SSE outputs. Colliding names that leave the live inventory
+keep their retired identity and stay non-callable. Qwen tool arguments now
+keep schema-accepted arrays and objects and explicit string values such as a
+literal `"null"`, and omitted completion-token budgets are deferred until
+after image expansion, so picture requests stop failing the context check.
+Optional AutoReview and the narrow plaintext agent-message handling behave as
+before. The bundled Froggeric template, defaults, settings and sampling are
+unchanged, and this is not full Codex parity.
 
-Publication and container verification are pending.
+Live evidence: both 27B FP8/DFlash2 and Flash-Next NVFP4/native NEXTN passed
+an uncached real Codex MCP workflow with actual tool execution and a 5/5
+generation/parallel-tool smoke; the final accepted source passed 165 tests
+with 189 subtests. Flash-Next parser spot-checks passed as accepted, with
+known model-generation mismatches listed in the
+[release record](release-3.1.4.json) — not every payload is exact.
 
-## Fix
+Publication is held. The earlier candidate build 40757589184 is cancelled and
+obsolete; no new image exists, so the [3.1.3](RELEASE_NOTES_3.1.3.md) image is
+still the current published release and the manual install examples stay on
+it. When `v3.1.4` publishes, pull the new tag and restart with your existing
+configuration; native instructions are in [BUILD.md](BUILD.md).
 
-The Anthropic adapter renders recognized references safely while preserving
-tool names, ordering and IDs. Templates that support structured references keep
-that handling. The bundled Froggeric chat template is unchanged; ordinary
-requests keep identical prompts, and unsupported blocks still return HTTP 400.
-
-## Validation
-
-145 CPU tests and 68 subtests passed, plus 22 live checks across 27B FP8/DFlash2
-and Flash-Next NVFP4/native NEXTN. The original reproduction now returns HTTP
-200. One unrelated tokenizer-download test was excluded.
-[Release record](release-3.1.4.json).
-
-## Update
-
-Once published, pull `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.4` and restart
-with your existing configuration. Update any saved image pin. Native
-instructions: [BUILD.md](BUILD.md).
-
-## Thanks
-
-[@BoneGoat](https://github.com/BoneGoat) for the report and reproduction, and
-[Penny Royal](mailto:Pennyroyal@agentmail.to) for the fix.
+Thanks to @BoneGoat for the report and reproduction, to Penny Royal for the
+fixes, and to the upstream authors whose accepted changes were adapted —
+lineage is in [PROVENANCE.md](PROVENANCE.md).
