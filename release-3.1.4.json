@@ -6,7 +6,7 @@
     "publication_approved": false,
     "published": false,
     "container": "pending",
-    "note": "Accepted scope, not published: the pennyroyal-v3.1.4 tag, the v3.1.4 image and any versioned release do not exist. Candidate build 40798675809 completed successfully on 2026-10-29T03:10:54Z from head 4d668a2d6b5a58295eecf6fe0e177adb945280ce, and its image was then rejected for release because the upgraded pydantic validation dropped Responses tool namespaces and the image drifted from the qualified native dependency versions. A replacement build and its digest are pending and are not invented here. The earlier candidate build 40757589184 is cancelled and obsolete; its source and digest are not reused. Until a replacement image, the tag, digest verification against a running container and the host-native banner check complete, 3.1.3 remains the published release."
+    "note": "Accepted scope, not published: the pennyroyal-v3.1.4 tag, the v3.1.4 image and any versioned release do not exist. Candidate build 40798675809 completed successfully on 2026-10-29T03:10:54Z from head 4d668a2d6b5a58295eecf6fe0e177adb945280ce, and its image was then rejected for release because the upgraded pydantic validation dropped Responses tool namespaces and the image drifted from the qualified native dependency versions. The namespace correction, the container build-cache work and the dependency parity gate merged later the same day as PR #146-#148, and a replacement build and its digest are pending and are not invented here. The earlier candidate build 40757589184 is cancelled and obsolete; its source and digest are not reused. Until a replacement image, the tag, digest verification against a running container and the host-native banner check complete, 3.1.3 remains the published release."
   },
   "source": {
     "accepted_head": "3a4de81398c087bbb8cf25cbe4b8bb67f6f2160b",
@@ -14,7 +14,7 @@
     "accepted_ref": "work/release-3.1.4-responses-20261028",
     "release_head": "4d668a2d6b5a58295eecf6fe0e177adb945280ce",
     "release_tree": "7d61684ba2c69832d24ed042ab1e6da101fd49d5",
-    "release_head_note": "The accepted runtime tree is reproduced exactly by the merged functional PRs #141-#144; the merged head adds the seven reviewed documentation files of #145 on top, and that head is the build source of the rejected candidate below. The accepted runtime source identity above stays the qualified runtime head, and the accepted namespace correction sits on this head as open PR #146.",
+    "release_head_note": "The accepted runtime tree is reproduced exactly by the merged functional PRs #141-#144; the merged head adds the seven reviewed documentation files of #145 on top, and that head is the build source of the rejected candidate below. The accepted runtime source identity above stays the qualified runtime head, and the accepted namespace correction merged on this head as PR #146.",
     "responses_additions_base": "07bf815644d39328f9c05619e7bc05125e701525",
     "responses_base_note": "The accepted Responses/parser/budget additions sit on base 07bf8156, which already contains merged PR #138 and PR #140; the accepted source is pushed at work/release-3.1.4-responses-20261028, the additions merged as PR #141-#144, and the release tag is applied at publication.",
     "release_tag": "pennyroyal-v3.1.4",
@@ -76,33 +76,44 @@
         "fixes": "Release records: documentation-only followup on top of the merged runtime scope"
       }
     ],
-    "open_followup_prs": [
+    "integrated_followup_prs": [
       {
         "number": 146,
-        "state": "open",
+        "state": "merged",
         "head": "ab3f41671c80dcf95febd210890b56c039bce2e0",
-        "merge_commit": null,
+        "merge_commit": "145a8cbf9c6592654c34c7614a3b1a81a58aeb0e",
+        "ci_run": 40877621728,
+        "merged_at": "2026-10-29T13:05:13Z",
         "base": "4d668a2d6b5a58295eecf6fe0e177adb945280ce",
         "fixes": "Responses input items select the open dict arm first, so tool namespaces and newer wire fields survive request validation on the upgraded pydantic"
       },
       {
         "number": 147,
-        "state": "open",
+        "state": "merged",
         "head": "22f5b99dc6b8350e2903375b0dcf7b41b7df4255",
-        "merge_commit": null,
+        "merge_commit": "43d4b8bdeb5b2c17ccdca6629ff6819023669b2d",
+        "ci_run": 40877629230,
+        "merged_at": "2026-10-29T13:05:19Z",
         "base": "4d668a2d6b5a58295eecf6fe0e177adb945280ce",
         "original_commit": "059d3ab6fb163d55ffa6e3e95f8d98981b5a52e0",
         "fixes": "Container build-cache work: reuse the compiled FlashInfer artifact across release-source builds, keyed to the actual sources, toolchain shared libraries and ABI"
       },
       {
         "number": 148,
-        "state": "open",
+        "state": "merged",
         "head": "8d15c07c7b043597df29cb5a0406083176ac8c75",
-        "merge_commit": null,
+        "merge_commit": "7c4a60690eee720dc19ab3b86ac90c439bfbd99e",
+        "ci_run": 40877636305,
+        "merged_at": "2026-10-29T13:05:25Z",
         "base": "4d668a2d6b5a58295eecf6fe0e177adb945280ce",
-        "fixes": "Native dependency parity as a release gate; the pins and the checker itself are still being prepared in a separate task and no pin set is recorded here"
+        "fixes": "Native dependency parity as a release gate; the derived pin set and the parity checker itself are separate pending work and no pin set is recorded here"
       }
     ],
+    "integration": {
+      "public_main": "7c4a60690eee720dc19ab3b86ac90c439bfbd99e",
+      "public_main_tree": "77c8db0366093c60e0e73fae7b23f746761cd4ef",
+      "note": "Current public main after PR #146-#148, recorded 2026-10-29 with its full tree. The same tree is the local integrated base c6a033ad5fcb9f724c731c0fba7a486acdc1a91f used by the pinning task; that identity comes from the integration handoff and the object is not public here. The pinning implementation is still running or pending review, and no replacement build or release exists yet."
+    },
     "accepted_commits": [
       {
         "commit": "2674fd18b938d9999831ed9faf57da71f8dafc23",
@@ -186,7 +197,7 @@
     "digest": null,
     "build_url": null,
     "source_revision": null,
-    "build_status": "pending replacement build: no accepted candidate image, digest or source revision exists yet, so the fields above stay null rather than pointing at the rejected build below",
+    "build_status": "pending replacement build: the namespace correction and the container dependency and build-cache work are merged, no image has been built from that integrated source, and no accepted candidate image, digest or source revision exists yet, so the fields above stay null rather than pointing at the rejected build below",
     "rejected_previous_candidate": {
       "decision": "Rejected for release on 2026-10-29; the image is kept as dated history and nothing here claims it was served",
       "run": 40798675809,
@@ -208,7 +219,7 @@
       "status": "cancelled",
       "note": "The old one-fix candidate build is cancelled and obsolete; its source and digest are not reused for the accepted scope."
     },
-    "note": "The only image built from documentation head 4d668a2d6b (runtime tree 0055cb59, confirmed by the image OCI revision label) is the rejected candidate above. There is no v3.1.4 tag or GitHub release, no versioned 3.1.4 image and no replacement build or digest yet, so 3.1.4 is not installable as a release. The currently published image remains ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3, digest sha256:cdba5f8d72098813454aa552bad35873d65b2ba8cd72f93f3ae3ed7057c0636a, recorded in release-3.1.3.json."
+    "note": "The only image built so far is the rejected candidate above, from documentation head 4d668a2d6b (runtime tree 0055cb59, confirmed by the image OCI revision label) and it predates the merged namespace correction and packaging work. There is no v3.1.4 tag or GitHub release, no versioned 3.1.4 image and no replacement build or digest yet, so 3.1.4 is not installable as a release. The currently published image remains ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.3, digest sha256:cdba5f8d72098813454aa552bad35873d65b2ba8cd72f93f3ae3ed7057c0636a, recorded in release-3.1.3.json."
   },
   "changes": [
     {
@@ -258,10 +269,19 @@
       "profiles": [
         "/v1/responses"
       ]
+    },
+    {
+      "commit": "ab3f41671c80dcf95febd210890b56c039bce2e0",
+      "pr": 146,
+      "issues": [],
+      "summary": "Responses input items choose the open dict arm first, so a namespaced tool declaration, a replayed call and any newer wire field keep their namespace through request validation on every supported dependency version; constructed SDK models still fall through to their own arm and malformed values still reach the normal /v1/responses request error instead of being silently dropped.",
+      "profiles": [
+        "/v1/responses"
+      ]
     }
   ],
   "notes": {
-    "packaging_scope": "Container dependency pinning and compiled-artifact cache reuse are packaging work in this range (open PRs #147 and #148); the derived pin set and the final image parity check are still being prepared, so they are not part of the merged runtime scope and no build-time or model-performance gain is claimed.",
+    "packaging_scope": "Container dependency pinning and compiled-artifact cache reuse are packaging work in this range: the cache work and the parity gate merged as PR #147 and PR #148, while the derived pin set and the checker are still being prepared in a separate task. Neither is part of the merged runtime scope and no build-time or model-performance gain is claimed.",
     "autoreview": "The optional AutoReview flow was exercised in the accepted live checks and remains optional; saved client configuration and approval settings are untouched.",
     "plaintext_agent_messages": "The narrow plaintext agent-message compatibility is introduced by 2674fd18 (the plaintext subset of upstream PR 35216) in this release range, above the 07bf8156 base; it is new in 3.1.4, not already in the base.",
     "template": "The bundled Froggeric chat template is unchanged.",
@@ -282,12 +302,12 @@
     "overlapping_prior_runs": "Earlier combined 749 tests with 218 subtests and 119 completion-budget tests are per-stage evidence and overlap; there is no unique grand total.",
     "live_checks": "Both 27B FP8/DFlash2 and Flash-Next NVFP4/native NEXTN passed the original uncoached real Codex MCP workflow with actual tool execution and callback consumption, and 5/5 ordinary generation/parallel-tool smoke each. No Xid observed. No new performance, cache, NVMe or full-quality campaign was run.",
     "flashnext_parser_qualification": "John accepted the additional unchanged Flash-Next cross-API parser checks as passing while retaining known generation mismatches: xhigh+greedy produced 3/4 exact full payloads (one extra JSON-looking string was over-quoted); thinking-disabled with normal sampling produced 2/4 exact full payloads (streamed nullable values showed empty-string/string-\"None\" mismatches). The changed array/object/literal-string behavior passed; one reproduced empty value was already present in raw model generation and parsed identically on base 07bf8156 and the accepted head, so no new parser regression is demonstrated. Not every payload is exact.",
-    "ci": "Contributor CI run 40745879894 green on PR #138, and PRs #141-#145 merged green in sequence. Candidate build 40798675809 succeeded on head 4d668a2d6b and its image was then rejected for release; PRs #146, #147 and #148 are open on that base with contributor CI green on all three heads (2026-10-29), and no replacement container build has run yet. The earlier candidate build 40757589184 is cancelled and obsolete.",
-    "container_build": "Rejected and superseded as a release candidate: candidate image ghcr.io/jpezzulli/sglang-rtxpro6000:build-4d668a2d6b5a58295eecf6fe0e177adb945280ce (digest sha256:4544231eb75edae01f63f0549ffb5ce8d2c2fe5d58d2008ad1914455dc47fe07) was built, checked and uploaded by run 40798675809 (job 123201238902) on 2026-10-29 and rejected for release because the upgraded pydantic union validation dropped Responses tool namespaces and the image drifted from the qualified native dependency versions. Still pending: the namespace correction PR #146, a replacement build and its digest, the v3.1.4 tag and release, image serving and version-banner verification on the host, and digest verification against that running container.",
-    "dependency_parity": "Recorded 2026-10-29 from the native host. Exactly four upgrades are accepted natively: pydantic 2.14.1, pydantic-core 2.50.1, aiohttp 3.14.5 and yarl 1.25.1; the remaining native versions are unchanged and the Humming and Anthropic SDK upgrade is deferred. Qualified native versions control the container and any deliberate upgrade is validated natively before a pin changes; the derived pin set and the final image parity check are open work in PR #148 (head 8d15c07c, prepared by a separate task) and no pin set is authored or claimed complete here.",
-    "correction_source": "Recorded 2026-10-29 for the namespace correction. Head ab3f41671c80dcf95febd210890b56c039bce2e0 on base 4d668a2d6b keeps the Responses input item on the open dict arm first, preserving namespaces, newer wire fields and supported SDK objects. 384 CPU tests with 303 subtests pass on both the previous pydantic 2.13.4/pydantic-core 2.46.4 pair and the accepted pydantic 2.14.1/pydantic-core 2.50.1 pair; the two runs overlap and are not summed, and this new evidence is separate from the dated 3a4de813 acceptance below. Five of the eight new regressions were red on the base before the fix, and a fresh review on the correction head is clean.",
+    "ci": "Contributor CI run 40745879894 green on PR #138, and PRs #141-#145 merged green in sequence. Candidate build 40798675809 succeeded on head 4d668a2d6b and its image was then rejected for release. PRs #146, #147 and #148 passed Contributor checks (runs 40877621728, 40877629230 and 40877636305) and merged on 2026-10-29 into public main 7c4a60690eee720dc19ab3b86ac90c439bfbd99e; no container build has run since. The earlier candidate build 40757589184 is cancelled and obsolete.",
+    "container_build": "Rejected and superseded as a release candidate: candidate image ghcr.io/jpezzulli/sglang-rtxpro6000:build-4d668a2d6b5a58295eecf6fe0e177adb945280ce (digest sha256:4544231eb75edae01f63f0549ffb5ce8d2c2fe5d58d2008ad1914455dc47fe07) was built, checked and uploaded by run 40798675809 (job 123201238902) on 2026-10-29 and rejected for release because the upgraded pydantic union validation dropped Responses tool namespaces and the image drifted from the qualified native dependency versions. Still pending: a replacement build from the integrated source and its digest, the derived dependency pins, the v3.1.4 tag and release, image serving and version-banner verification on the host, and digest verification against that running container.",
+    "dependency_parity": "Recorded 2026-10-29 from the native host. Exactly four upgrades are accepted natively: pydantic 2.14.1, pydantic-core 2.50.1, aiohttp 3.14.5 and yarl 1.25.1; the remaining native versions are unchanged and the Humming and Anthropic SDK upgrade is deferred. Qualified native versions control the container and any deliberate upgrade is validated natively before a pin changes; the parity gate merged as PR #148 while the derived pin set and the final image parity check are still being prepared in a separate task, and no pin set is authored or claimed complete here.",
+    "correction_source": "Recorded 2026-10-29 for the namespace correction, merged as PR #146. Head ab3f41671c80dcf95febd210890b56c039bce2e0 on base 4d668a2d6b keeps the Responses input item on the open dict arm first, preserving namespaces, newer wire fields and supported SDK objects. 384 CPU tests with 303 subtests pass on both the previous pydantic 2.13.4/pydantic-core 2.46.4 pair and the accepted pydantic 2.14.1/pydantic-core 2.50.1 pair; the two runs overlap and are not summed, and this new evidence is separate from the dated 3a4de813 acceptance below. Five of the eight new regressions were red on the base before the fix, and a fresh review on the correction head is clean.",
     "correction_live": "Recorded 2026-10-29. Local HTTP compatibility passed 5/5 before and after the change on the local encoder, so no remote encoder is implied; seven live API checks, the real uncoached Codex MCP execution and replay, and the image callback passed on the Flash-Next profile, which runs the corrected source with the adaptive width policy, medium reasoning effort and diagnostics off as an actual working service. The previously accepted two-profile qualification is reused as dated evidence; no additional 27B, performance, cache or NVMe campaign was run.",
-    "container_cache": "Recorded 2026-10-29 for open PR #147 (head 22f5b99dc6b8350e2903375b0dcf7b41b7df4255 over original 059d3ab6fb163d55ffa6e3e95f8d98981b5a52e0, Penny and John authorship preserved). The compiled FlashInfer artifact is reused only when a fingerprint of the actual sources, toolchain shared libraries and ABI matches, and the small artifact travels through GHCR; changed, corrupt or unresolved inputs cannot reuse it. 66 tests with 4 subtests pass, with one optional probe skipped in the light test environment and passing separately inside the actual image. Local restore measured about 3 seconds; no full hosted build speedup and no production cache transfer is proved yet, the first production build must still compile to seed the cache, and the existing image has no accepted input record. Independent review is clean, and no model performance improvement is claimed.",
+    "container_cache": "Recorded 2026-10-29 for PR #147 (head 22f5b99dc6b8350e2903375b0dcf7b41b7df4255 over original 059d3ab6fb163d55ffa6e3e95f8d98981b5a52e0, Penny and John authorship preserved, merged the same day). The compiled FlashInfer artifact is reused only when a fingerprint of the actual sources, toolchain shared libraries and ABI matches, and the small artifact travels through GHCR; changed, corrupt or unresolved inputs cannot reuse it. 66 tests with 4 subtests pass, with one optional probe skipped in the light test environment and passing separately inside the actual image. Local restore measured about 3 seconds; no full hosted build speedup and no production cache transfer is proved yet, the first production build must still compile to seed the cache, and the existing image has no accepted input record. Independent review is clean, and no model performance improvement is claimed.",
     "nvme_serving": "not run",
     "exceptions": [
       "Publication, the v3.1.4 tag, the replacement container build and its digest, image serving and digest verification against a running container, and host-native runtime verification are all pending gates; the successful but rejected candidate build says nothing about a published 3.1.4 tag or image, and nothing here asserts that any 3.1.4 image was served.",

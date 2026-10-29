@@ -24,8 +24,9 @@ pending; 3.1.3 remains published.
 ## Packaging
 
 Images pin the dependency versions validated on the host and reuse the compiled
-FlashInfer artifact only when its recorded inputs match (#147, #148). The pin
-set and parity checker are still landing, and publication waits for them.
+FlashInfer artifact only when its recorded inputs match (#147, #148), so image
+and host stay in step. The pin set is still landing, and publication waits for
+it.
 
 Custom-tool grammar support is prompt guidance, not enforced grammar decoding.
 Optional AutoReview was checked and remains optional, and your saved approval
