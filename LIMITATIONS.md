@@ -15,8 +15,7 @@
 
 ## 3.1.4 scope (prepared, publication pending)
 
-- Custom-tool grammar support is prompt guidance: the model is told the
-  spelling convention. No grammar decoding is enforced for these names.
+- Custom-tool grammar descriptions are passed as prompt guidance for the tool's input. They are not enforced through grammar-constrained decoding.
 - Native tool search, complete subagent workflows, async Guardian and remote
   compaction are not qualified on this release. They are untested here, not
   labeled unsupported.
