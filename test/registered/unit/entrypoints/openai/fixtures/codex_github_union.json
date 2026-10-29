@@ -1,0 +1,139 @@
+{
+  "provenance": {
+    "producer": "Codex CLI 0.165.0",
+    "date": "2026-10-28",
+    "source_kind": "captured provider_request tool definition",
+    "sanitization": [
+      "Inventory reduced to original GitHub search_issues definition; no private request input or metadata retained"
+    ]
+  },
+  "tool": {
+    "type": "namespace",
+    "name": "mcp__codex_apps__github",
+    "description": "Access repositories, issues, and pull requests. Required for some features such as Codex",
+    "tools": [
+      {
+        "type": "function",
+        "name": "_search_issues",
+        "description": "Search one repository or every repository the linked account can access. Supply at most one repository selector. Empty lists mean no repository filter. A `repo:owner/name` query does not require a separate repository selector. This tool is part of plugin `GitHub`.",
+        "strict": false,
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "order": {
+              "description": "Optional ascending or descending result order.",
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "desc",
+                    "asc"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "query": {
+              "type": "string",
+              "description": "GitHub issue search query. Supports repo:, org:, and other GitHub qualifiers. Without a repository selector, search all repositories available to the linked account."
+            },
+            "repository_full_name": {
+              "description": "Optional repository or repositories in owner/name form.",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "repository_id": {
+              "description": "Optional GitHub repository ID or IDs.",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "repository_url": {
+              "description": "Optional GitHub repository URL or URLs.",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sort": {
+              "description": "Optional GitHub issue result sort.",
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "best-match",
+                    "created",
+                    "updated",
+                    "comments",
+                    "reactions",
+                    "interactions"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "state": {
+              "description": "Optional issue state filter.",
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "open",
+                    "closed"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "topn": {
+              "type": "integer",
+              "description": "Maximum number of results to return."
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      }
+    ]
+  }
+}

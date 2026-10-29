@@ -1,0 +1,257 @@
+{
+ "provenance": {
+  "producer": "Codex CLI 0.165.0",
+  "date": "2026-10-28",
+  "source_kind": "captured provider_request body (naming-guidance slice)",
+  "sanitization": [
+   "Private instructions and request metadata removed",
+   "Generic MCP naming guidance retained verbatim in shape; it names no tool",
+   "User text replaced",
+   "Tool inventory reduced to the original Tavily search definition"
+  ]
+ },
+ "request": {
+  "model": "pennyroyal",
+  "stream": false,
+  "tool_choice": "auto",
+  "instructions": "# MCP\nSome tools are namespaced MCP tools. The name of such a tool is the name of its server followed by two underscores and then the name of the tool, so mcp__server__tool identifies the tool exposed by the server MCP server. Call a tool by exactly the name it is advertised with, so the name you call is mcp__server__tool; never shorten it to the leaf or join the parts with a dot.\n",
+  "tools": [
+   {
+    "type": "namespace",
+    "name": "mcp__tavily",
+    "description": "Researching with Tavily: when a result names a likely answer, read its page with tavily_extract to confirm it before searching more, and name the candidate in your next query when testing it. Keep your best candidate until a source contradicts it; if none confirms it, also search the main alternative by name. Once new searches stop adding evidence, answer with the best-supported candidate, from sources rather than memory, and say what you could not confirm.",
+    "tools": [
+     {
+      "type": "function",
+      "name": "tavily_search",
+      "description": "Search the web for current information on any topic. Use for news, facts, or data beyond your knowledge cutoff, and before answering any question about specific facts, figures or recent events. Returns snippets and source URLs. Results are short excerpts; read a page with tavily_extract to confirm what it says.",
+      "strict": false,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "country": {
+         "description": "Boost search results from a specific country. Must be a full country name (e.g., 'United States', 'Japan', 'Germany'). ISO country codes (e.g., 'us', 'jp') are not supported. Available only if topic is general. See https://docs.tavily.com/documentation/api-reference/search for the full list of supported countries.",
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "end_date": {
+         "description": "Will return all results before the specified end date. Required to be written in the format YYYY-MM-DD. Filters by publish date, not by when events happened; leave it empty when looking for facts about past events.",
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "exact_match": {
+         "description": "Only return results containing the exact phrase(s) in quotes in your query",
+         "anyOf": [
+          {
+           "type": "boolean"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "exclude_domains": {
+         "description": "List of domains to specifically exclude, if the user asks to exclude a domain set this to the domain of the site",
+         "anyOf": [
+          {
+           "type": "array",
+           "items": {
+            "type": "string"
+           }
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "filter_by_published_date": {
+         "description": "Filter results to the requested date window and exclude results with no detected publication date",
+         "anyOf": [
+          {
+           "type": "boolean"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "include_domains": {
+         "description": "A list of domains to specifically include in the search results, if the user asks to search on specific sites set this to the domain of the site. Use full domains such as 'en.wikipedia.org' or 'sec.gov', not suffixes such as 'edu'. This is a hard filter: if results come back empty or thin, search again without it.",
+         "anyOf": [
+          {
+           "type": "array",
+           "items": {
+            "type": "string"
+           }
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "include_favicon": {
+         "description": "Whether to include the favicon URL for each result",
+         "anyOf": [
+          {
+           "type": "boolean"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "include_image_descriptions": {
+         "description": "Include a list of query-related images and their descriptions in the response",
+         "anyOf": [
+          {
+           "type": "boolean"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "include_images": {
+         "description": "Include a list of query-related images in the response",
+         "anyOf": [
+          {
+           "type": "boolean"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "include_published_date": {
+         "description": "Include detected publication dates (beta)",
+         "anyOf": [
+          {
+           "type": "boolean"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "include_raw_content": {
+         "description": "Include the cleaned and parsed HTML content of each search result. Whole pages can make the response too large to read; to read one page, use tavily_extract with a query instead.",
+         "anyOf": [
+          {
+           "type": "boolean"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "max_results": {
+         "description": "The maximum number of search results to return. Ask for 10 when looking for a specific fact, page or entity.",
+         "anyOf": [
+          {
+           "type": "integer"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "query": {
+         "type": "string",
+         "description": "Search query. Keep it short and specific, in the words the page itself would use; one idea per query."
+        },
+        "search_depth": {
+         "description": "The depth of the search. 'basic' for generic results, 'advanced' for more thorough search, 'fast' for optimized low latency with high relevance, 'ultra-fast' for prioritizing latency above all else. Use 'advanced' when looking for a specific fact, page or entity, or when 'basic' did not find it.",
+         "anyOf": [
+          {
+           "type": "string",
+           "enum": [
+            "basic",
+            "advanced",
+            "fast",
+            "ultra-fast"
+           ]
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "start_date": {
+         "description": "Will return all results after the specified start date. Required to be written in the format YYYY-MM-DD. Filters by publish date, not by when events happened; leave it empty when looking for facts about past events.",
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "time_range": {
+         "description": "The time range back from the current date to include in the search results. Filters by when a page was published, not by when the events it describes happened.",
+         "anyOf": [
+          {
+           "type": "string",
+           "enum": [
+            "day",
+            "week",
+            "month",
+            "year"
+           ]
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "topic": {
+         "description": "Search category. Use 'general' for almost all searches, including current events and requests that combine news with other information. Use 'news' only when the user explicitly asks for news, headlines, or news coverage.",
+         "anyOf": [
+          {
+           "type": "string",
+           "enum": [
+            "general",
+            "news"
+           ]
+          },
+          {
+           "type": "null"
+          }
+         ]
+        }
+       },
+       "required": [
+        "query"
+       ],
+       "additionalProperties": false
+      }
+     }
+    ]
+   }
+  ],
+  "input": [
+   {
+    "type": "message",
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "Use Tavily to find the official Python pathlib documentation."
+     }
+    ]
+   }
+  ]
+ }
+}
