@@ -36,12 +36,15 @@ outputs (retired collisions stay non-callable), Qwen parser handling that keeps
 schema-accepted arrays/objects and explicit string values such as a literal
 `"null"`, and omitted completion budgets deferred until after image
 expansion. Merged #138 and #140 carry the base; the remaining additions merged
-as #141-#144 over that source, with the release records in #145. The Froggeric
-template, defaults, settings and sampling are unchanged; custom-tool grammar is
-prompt guidance, not enforced decoding, and features not yet qualified for this
-release are listed in the 3.1.4 section of LIMITATIONS.md. The old candidate
-build 40757589184 is cancelled; the fresh candidate image built from the merged
-head exists only under its build tag, and no release publishes until digest and
+as #141-#144 over that source, with the release records in #145, and tool
+namespaces are kept through request validation on every supported dependency
+version in open PR #146. The Froggeric template, defaults, settings and sampling
+are unchanged; custom-tool grammar is prompt guidance, not enforced decoding, and
+features not yet qualified for this release are listed in the 3.1.4 section of
+LIMITATIONS.md. The old candidate build 40757589184 is cancelled and the
+candidate image built from the merged head is rejected for release, so container
+dependency pinning and cached compilation (open PRs #147 and #148) and a
+replacement image are still ahead; no release publishes until digest and
 host-native banner checks pass. Until that tag and image
 publish, the current release is Penny Royal 3.1.3, six accepted
 correctness fixes over the 3.1.2 source: Anthropic thinking accepted without a
