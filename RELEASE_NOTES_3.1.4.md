@@ -2,8 +2,7 @@
 
 Penny Royal 3.1.4 improves Claude Code and Codex compatibility for tool
 histories, structured arguments and image results, and makes container dependency
-versions predictable. The verified candidate awaits publication approval; 3.1.3 is
-still published.
+versions predictable. Published 2026-10-29.
 
 ## Fixes
 
@@ -38,8 +37,9 @@ digests and history in the [release record](release-3.1.4.json).
 
 ## Update
 
-When published, pull `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.4` and restart with
-your existing configuration; update any saved image pin. Native setup: [BUILD.md](BUILD.md).
+Pull `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.4` and restart with your existing
+configuration; update any saved image pin. Manual download: matching launch files in
+the [docker guide](docker/pennyroyal/README.md); native setup: [BUILD.md](BUILD.md).
 
 ## Thanks
 

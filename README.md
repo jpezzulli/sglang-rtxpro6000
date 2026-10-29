@@ -28,7 +28,7 @@ width routing (block 6 for one request, block 4 for two or more) and
 FlashInfer draft-token verification is an **experimental / alpha** profile,
 fully available to opt into.
 
-**3.1.4 (ready for publication, not published):** fixes Anthropic `tool_reference` histories and improves Responses tools, replay and image handling. [Release notes](RELEASE_NOTES_3.1.4.md). [3.1.3](RELEASE_NOTES_3.1.3.md) remains the published release until the tag and image publish.
+**3.1.4 (published 2026-10-29):** fixes Anthropic `tool_reference` histories, improves Responses tools, replay and image handling, and installs the dependency versions qualified on the native host. [Release notes](RELEASE_NOTES_3.1.4.md). [3.1.3](RELEASE_NOTES_3.1.3.md) stays available as the previous release.
 
 <a id="dflash2-maturity"></a>
 
