@@ -200,3 +200,45 @@ def test_docker_build_runs_cpu_checks_with_expected_revision():
         in dockerfile
     )
     assert "&& pennyroyal --help" in dockerfile
+
+
+def test_the_build_cache_travels_through_the_registry():
+    """The compiled SM120 module persists across hosted runners by content.
+
+    The runner cannot compute the fingerprint before the build, so it restores
+    whatever the last build published and lets the packaging step decide; and the
+    artifact lives in the registry rather than in an Actions cache entry, because
+    Actions caches are scoped to the ref that wrote them and this workflow builds
+    each release from its own Git tag, which no later release could ever read.
+    """
+    text = WORKFLOW.read_text()
+    steps = workflow()["jobs"]["image"]["steps"]
+    index = {
+        step.get("id") or step.get("uses", ""): position
+        for position, step in enumerate(steps)
+    }
+    restore = next(step for step in steps if "build-cache" in str(step.get("env", "")))
+    published = next(
+        step for step in steps if "flashinfer-artifact" in step.get("run", "")
+    )
+    assert "actions/cache" not in text, "a ref-scoped cache cannot span releases"
+    assert steps.index(restore) < index["build"] < steps.index(published)
+    assert steps.index(published) < index["publish"]
+    for step in (restore, published):
+        # A digest promotion rebuilds nothing, so it must not touch the cache.
+        assert step["if"].startswith("inputs.promote_digest == ''"), step.get("name")
+        assert "github.ref" not in str(step), "the cache is not scoped to a ref"
+    assert restore["env"]["CACHE_DIR"] == "docker/pennyroyal/build-cache"
+    assert restore["env"]["CACHE_IMAGE"].endswith(":flashinfer-sm120-cache")
+    assert "imagetools inspect" in restore["run"], "a cold build must not be an error"
+    assert '"$CACHE_IMAGE" true)' in restore["run"]
+    assert 'docker cp "$container:/cache/." "$CACHE_DIR"' in restore["run"]
+    assert "docker export" not in restore["run"]
+    assert "::notice::" in restore["run"], "the cold path says what it decided"
+    assert published["env"]["CACHE_IMAGE"] == restore["env"]["CACHE_IMAGE"]
+    assert "--target flashinfer-artifact" in published["run"]
+    assert '-t "$CACHE_IMAGE"' in published["run"] and "--push" in published["run"]
+    assert "SOURCE_REVISION" in published["run"], "the same revision is republished"
+    # The cache directory exists in the source, so a build with nothing published
+    # yet still has somewhere to COPY from.
+    assert (REPO / "docker/pennyroyal/build-cache/.gitignore").is_file()

@@ -1,0 +1,6 @@
+# Restored and published FlashInfer SM120 build cache; see BUILD.md
+# ("Reusing the compiled SM120 module") and the pennyroyal-container workflow.
+# The directory itself is part of the source so an image build with no cache
+# restored still has somewhere to COPY from.
+*
+!.gitignore

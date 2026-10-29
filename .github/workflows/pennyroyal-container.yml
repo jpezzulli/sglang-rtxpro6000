@@ -83,6 +83,29 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Restore the compiled FlashInfer SM120 module
+        if: inputs.promote_digest == ''
+        env:
+          CACHE_DIR: docker/pennyroyal/build-cache
+          CACHE_IMAGE: ${{ env.IMAGE }}:flashinfer-sm120-cache
+        run: |
+          # The compiled module persists as a registry artifact rather than as an
+          # Actions cache entry: releases build from Git tags and branch builds
+          # from feature branches, and a cache scoped to one of those refs cannot
+          # be read by the next release at all. A tag nobody has pushed yet is a
+          # cold build, not a failure, and the packaging step still verifies the
+          # fingerprint before it believes anything it finds here.
+          if docker buildx imagetools inspect "$CACHE_IMAGE" >/dev/null 2>&1; then
+            # The artifact stage carries nothing but files, so it has no command of
+            # its own and `docker create` needs one named; it is never started. The
+            # copy takes the /cache subtree only, not an engine-populated container
+            # root.
+            container="$(docker create --platform linux/amd64 "$CACHE_IMAGE" true)"
+            docker cp "$container:/cache/." "$CACHE_DIR"
+            docker rm "$container" > /dev/null
+          else
+            echo "::notice::no $CACHE_IMAGE yet; this build compiles the module"
+          fi
       - name: Build, check and upload image
         if: inputs.promote_digest == ''
         id: build
@@ -99,6 +122,28 @@ jobs:
           # separate exported build cache on the small hosted runner.
           cache-from: type=registry,ref=${{ env.IMAGE }}:build-cache
           cache-to: type=inline
+      - name: Publish the compiled FlashInfer SM120 module
+        if: inputs.promote_digest == ''
+        env:
+          CACHE_IMAGE: ${{ env.IMAGE }}:flashinfer-sm120-cache
+          REVISION: ${{ steps.image_meta.outputs.revision }}
+        run: |
+          # The same revision through the same BuildKit cache, so this publishes the
+          # artifact stage instead of building anything again. Each push carries at
+          # most the two compiled modules the cache directory keeps, and the
+          # registry's own retention decides how long superseded layers are kept.
+          # Refreshing the cache is an optimisation for the next build, so a failure
+          # here is said out loud and the job carries on: the image above is already
+          # built, checked and pushed, and the version tag below is the point.
+          if ! docker buildx build . \
+            --file docker/pennyroyal/Dockerfile \
+            --platform linux/amd64 \
+            --target flashinfer-artifact \
+            --build-arg SOURCE_REVISION="$REVISION" \
+            -t "$CACHE_IMAGE" \
+            --push; then
+            echo "::warning::flashinfer-sm120-cache was not published, the next build compiles the module again"
+          fi
       - name: Record image and build cache
         if: inputs.promote_digest == ''
         env:

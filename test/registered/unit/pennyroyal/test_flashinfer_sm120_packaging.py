@@ -4,22 +4,33 @@ No GPU, no CUDA toolchain, no container runtime and no wheel download: the
 packaging rules are exercised against synthetic installed-source trees, and the
 carried mailboxes are checked against their pins and attribution. Compilation,
 image build and GPU behaviour are qualified separately on the RTX PRO 6000 host;
-nothing here claims them.
+nothing here claims them. The reuse step is held to the same standard: the
+fingerprint and the cache are exercised against fixture bytes -- a stand-in
+CUDA tree, a stand-in compiler script and a stand-in build.ninja -- and a fake
+JitSpec records whether the compile was dispatched. Nothing here runs nvcc, and
+no test claims a real compiled binary or a real container layer.
 """
 
 import hashlib
 import importlib.util
 import inspect
+import io
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+from contextlib import redirect_stderr
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from sglang.test.ci.ci_register import register_cpu_ci
 
-register_cpu_ci(est_time=3, suite="base-a-test-cpu")
+register_cpu_ci(est_time=25, suite="base-a-test-cpu")
 
 REPO = Path(__file__).resolve().parents[4]
 PACKAGE_DIR = REPO / "scripts" / "pennyroyal" / "flashinfer"
@@ -56,10 +67,14 @@ COMPAT_ACCEPTED_SHA256 = (
 COMPAT_COMMIT = "c84ae2ff261d08bb212f5d72867185876d9d71e7"
 
 
-def installer():
+def installer(*, shared_libraries=False):
     spec = importlib.util.spec_from_file_location("penny_flashinfer_sm120", INSTALLER)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if not shared_libraries:
+        # Most tests use text stand-ins for compiler executables. Exercise ELF
+        # resolution separately with real binaries and in the image probe.
+        module._program_libraries = lambda programs, incomplete: {}
     return module
 
 
@@ -495,8 +510,7 @@ def test_the_image_check_refuses_an_unpackaged_flashinfer(tmp_path, monkeypatch)
 def test_build_targets_the_patched_sources_without_the_prebuilt_shortcut():
     code = installer().BUILD_CODE
     assert "gen_cutlass_fused_moe_sm120_module(use_fast_build=False)" in code
-    assert "spec.build()" in code
-    assert "print(pathlib.Path(spec.jit_library_path))" in code
+    assert "print(state, module)" in code
     # The shortcuts that take the stock AOT module and compile nothing.
     for shortcut in ("build_and_load", "build_jit_specs", "skip_prebuilt"):
         assert shortcut not in code, shortcut
@@ -511,6 +525,13 @@ def test_build_targets_the_patched_sources_without_the_prebuilt_shortcut():
     assert source_manifest()["cuda_arch_list"] == "12.0f"
     for host_path in ("/home/", "thegrid", ".aot-overlay"):
         assert host_path not in text, host_path
+    # The compile itself is reached through the reuse helper, so no caller can
+    # rejoin ninja without passing the fingerprint check.
+    assert "step.build_or_reuse(" in code
+    assert "step.accepted_sources()" in code
+    assert "spec.build()" not in code, "the build code does not reach ninja itself"
+    assert "def build_or_reuse" in text
+    assert "spec.build()" in text.split("def build_or_reuse")[1]
 
 
 def test_a_failed_build_keeps_the_compiler_diagnostic(tmp_path, monkeypatch):
@@ -713,7 +734,9 @@ def test_both_installation_paths_run_the_one_step():
     assert "flashinfer-python" in update  # the prerequisite is spelled out
     jit_cache = dockerfile.index("flashinfer-jit-cache-sm120f")
     packaging = dockerfile.index("scripts/pennyroyal/flashinfer/install.py")
-    freeze = dockerfile.index("python scripts/pennyroyal/flashinfer/check_dependencies.py")
+    freeze = dockerfile.index(
+        "python scripts/pennyroyal/flashinfer/check_dependencies.py"
+    )
     assert jit_cache < packaging < freeze
     assert "PENNY_BUILD_JOBS=4" in dockerfile and "MAX_JOBS=4" in dockerfile
     assert "check_flashinfer_sm120" in CHECK.read_text()
@@ -841,6 +864,1119 @@ def test_next_recipes_default_the_accepted_gdn_mode_and_27b_does_not():
     )
     entrypoint = (REPO / "docker/pennyroyal/entrypoint.sh").read_text()
     assert "FLASHINFER_GDN_FP16_ACCUM_MMA" not in entrypoint
+
+
+# --- reusing the compiled SM120 module -------------------------------------
+
+CACHE_SCHEMA = "pennyroyal-flashinfer-aot-v1"
+CACHE_RECORD = "record.json"
+CACHE_LATEST = "latest"
+CACHE_SUFFIX = ".aot"
+COMPILED = b"compiled by nvcc\n"
+JOINED = " $\n    ".join  # flashinfer.jit.cpp_ext.join_multiline, verbatim
+
+
+def build_fixture(root: Path, workspace: Path | None = None) -> SimpleNamespace:
+    """One stand-in installed environment, as the fingerprint sees it.
+
+    The CUDA tree, the headers, the linked libraries, the interpreter, torch and
+    tvm-ffi are fixture files, and the host "compiler" is a script that answers the
+    queries the fingerprint asks it -- including the bare names it must place from
+    its own search path -- so the reading is the real one with no toolchain present.
+    The build.ninja has the shape FlashInfer's generator writes: values wrapped with
+    "$" followed by a newline, the -ccbin argument on the line after its flag, and
+    the generated instantiations inside the build's scratch directory.
+    """
+    workspace = workspace or root / "workspace-a"
+
+    def file(relative: str, payload: bytes, base: Path = root) -> Path:
+        target = base / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        return target
+
+    cuda = root / "cuda"
+    fixture = SimpleNamespace(
+        root=root,
+        workspace=workspace,
+        nvcc=file("bin/nvcc", b"nvcc image one\n", cuda),
+        libdevice=file("nvvm/libdevice.10.bc", b"libdevice one\n", cuda),
+        cuda_header=file("include/cuda_runtime.h", b"typedef int one;\n", cuda),
+        cudart=file("lib64/libcudart.so", b"cudart one\n", cuda),
+        cudadevrt=file("lib64/libcudadevrt.a", b"cudadevrt one\n", cuda),
+        libcuda=file("lib64/stubs/libcuda.so", b"libcuda one\n", cuda),
+        header=file("flashinfer-include/kernel.h", b"#pragma once\n"),
+        csrc=file("flashinfer-csrc/moe.cuh", b"#pragma once\n"),
+        python_header=file("python-include/Python.h", b"typedef int one;\n"),
+        ffi_header=file("tvm-ffi-include/builtin.h", b"#pragma once\n"),
+        cxx_include=file("c++-include/vector", b"#pragma once\n"),
+        crt=file("gcc-15/crtbeginS.o", b"crt one\n"),
+        libgcc=file("gcc-15/libgcc.a", b"libgcc one\n"),
+        cc1plus=file("gcc-15/cc1plus", b"cc1plus one\n"),
+        collect2=file("gcc-15/collect2", b"collect2 one\n"),
+        assembler=file("gcc-15/as", b"as one\n"),
+        ld=file("toolchain/ld", b"ld one\n"),
+        libc=file("toolchain/libc.so.6", b"glibc one\n"),
+        libstdcxx=file("toolchain/libstdc++.so.6", b"libstdc++ one\n"),
+    )
+    scripts = {
+        "libc.so": file(
+            "toolchain/libc.so", b"/* GNU ld script */\nGROUP ( libc.so.6 )\n"
+        ),
+        "libstdc++.so": file(
+            "toolchain/libstdc++.so",
+            b"/* GNU ld script */\nGROUP ( libstdc++.so.6 )\n",
+        ),
+    }
+    fixture.abi = {
+        "python": file("toolchain/python3.12", b"cpython one\n"),
+        "torch": file("toolchain/libtorch_python.so", b"libtorch one\n"),
+        "tvm_ffi/libtvm_ffi.so": file("toolchain/libtvm_ffi.so", b"tvm ffi one\n"),
+    }
+    fixture.generated = file("generated/120/moe.cu", b"// generated\n", workspace)
+    fixture.sources = [
+        file("flashinfer-csrc/moe_input.cu", b"// patched flashinfer source\n"),
+        file("flashinfer-csrc/moe_fp8.cu", b"// patched flashinfer source\n"),
+        fixture.generated,
+    ]
+    fixture.compiler = file("toolchain/g++-15", b"")
+    fixture.ccbin_compiler = file("toolchain/host-c++", b"")
+    driver = (
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "-print-search-dirs) echo 'install: %s'\n"
+        '  echo "programs: =%s:%s"\n  ;;\n'
+        % (root / "gcc-15", root / "toolchain", root / "gcc-15")
+        + "".join(
+            f"-print-prog-name={name}) echo {answer} ;;\n"
+            for name, answer in (
+                # Real g++ answers bare names for the programs it execs when they
+                # are not next to it; only its own search path can place them.
+                ("cc1plus", "cc1plus"),
+                ("collect2", "collect2"),
+                ("as", "as"),
+                ("ld", fixture.ld),
+            )
+        )
+        + "".join(
+            f"-print-file-name={name}) echo {path} ;;\n"
+            for name, path in scripts.items()
+        )
+        + "*) echo '#include <...> search starts here:' >&2\n"
+        f"   echo {fixture.cxx_include.parent} >&2\n"
+        "   echo 'End of search list.' >&2 ;;\n"
+        "esac\n"
+    )
+    fixture.compiler.write_text(driver)
+    fixture.ccbin_compiler.write_text(driver)
+    fixture.compiler.chmod(0o755)
+    fixture.ccbin_compiler.chmod(0o755)
+    fixture.ninja = ninja_fixture(fixture)
+    fixture.inputs = {
+        "workspace": [str(workspace / "flashinfer"), str(workspace)],
+        "sources": [str(path) for path in fixture.sources],
+    }
+    return fixture
+
+
+def ninja_fixture(fixture: SimpleNamespace) -> str:
+    """The build file FlashInfer would run, generated the way it generates one."""
+    root = fixture.root
+    common = [
+        "-DPy_LIMITED_API=0x03090000",
+        "-D_GLIBCXX_USE_CXX11_ABI=1",
+        f"-I{root / 'flashinfer-csrc'}",
+        f"-I{fixture.workspace / 'generated'}",
+        f"-isystem {root / 'flashinfer-include'}",
+        "-isystem $cuda_home/include",
+        f"-isystem {root / 'python-include'}",
+        f"-isystem {root / 'tvm-ffi-include'}",
+    ]
+    cuda = [
+        "-std=c++17",
+        "--threads=1",
+        "-use_fast_math",
+        "-ccbin",
+        str(fixture.ccbin_compiler),
+        "$common_cflags",
+        "--expt-relaxed-constexpr",
+        "-static-global-template-stub=false",
+        "-gencode=arch=compute_120f,code=sm_120f",
+        "-DNDEBUG",
+        "-O3",
+    ]
+    link = [
+        "-shared",
+        "-L$cuda_home/lib64",
+        "-L$cuda_home/lib64/stubs",
+        "-lcudart",
+        "-lcuda",
+        "-lcudadevrt",
+    ]
+    return "\n".join(
+        [
+            "ninja_required_version = 1.3",
+            "name = fused_moe_120",
+            f"cuda_home = {root / 'cuda'}",
+            f"cxx = {fixture.compiler}",
+            "nvcc = $cuda_home/bin/nvcc",
+            "cxx_launcher =",
+            "nvcc_launcher =",
+            "",
+            "common_cflags = " + JOINED(common),
+            "cflags = $common_cflags -fPIC",
+            "cuda_cflags = " + JOINED(cuda),
+            "cuda_arch_flags = -gencode=arch=compute_120f,code=sm_120f",
+            "ldflags = " + JOINED(link),
+            "",
+            "rule cuda_compile",
+            "  command = $nvcc --generate-dependencies-with-compile -MF $out.d"
+            " $cuda_cflags -c $in -o $out",
+            "",
+        ]
+        + [
+            f"build cached_ops/fused_moe_120/{path.stem}.cuda.o: cuda_compile {path}"
+            for path in fixture.sources
+        ]
+        + ["", "build cached_ops/fused_moe_120/fused_moe_120.so: link objects", ""]
+    )
+
+
+class FakeSpec:
+    """The slice of FlashInfer's JitSpec that the reuse step touches.
+
+    ``compiled`` records every build call together with whether an output was
+    already sitting there, which is how the tests tell a restored module from one
+    that entered the compile step again, and a relink from a republished leftover.
+    """
+
+    name = "fused_moe_120"
+
+    payload = COMPILED
+
+    def __init__(self, workspace: Path, ninja: str, sources, compiled: list):
+        self.ninja = ninja
+        self.sources = sources
+        self.compiled = compiled
+        self.build_dir = workspace / "flashinfer/cached_ops/fused_moe_120"
+        self.ninja_path = self.build_dir / "build.ninja"
+        self.jit_library_path = self.build_dir / f"{self.name}.so"
+
+    def write_ninja(self) -> None:
+        self.ninja_path.parent.mkdir(parents=True, exist_ok=True)
+        self.ninja_path.write_text(self.ninja)
+        # Ninja leaves its objects next to the module it links, and it is content to
+        # relink them without asking whether the inputs that made them changed.
+        (self.build_dir / "moe_input.cuda.o").write_bytes(self.payload)
+
+    def build(self, *args, **kwargs) -> None:
+        self.compiled.append(
+            (
+                self.name,
+                self.jit_library_path.is_file(),
+                (self.build_dir / "moe_input.cuda.o").is_file(),
+            )
+        )
+        self.jit_library_path.parent.mkdir(parents=True, exist_ok=True)
+        self.jit_library_path.write_bytes(self.payload)
+
+
+def reused(module, fixture, source, cache, workspace, report, payload=COMPILED):
+    """Run the reuse step in one separate build environment, recording the calls."""
+    compiled: list = []
+    spec = FakeSpec(workspace, fixture.ninja, fixture.sources, compiled)
+    spec.payload = payload
+    with redirect_stderr(report):
+        built, state = module.build_or_reuse(
+            spec, source, cache, fixture.inputs, fixture.abi
+        )
+    return spec, built, state, compiled, report.getvalue()
+
+
+def fingerprint_of(module, fixture, source, ninja=None):
+    return module.build_fingerprint(
+        ninja or fixture.ninja, source, fixture.inputs, fixture.abi
+    )
+
+
+def cache_keys(cache: Path) -> set:
+    return {path.name for path in (cache / CACHE_SCHEMA).iterdir()}
+
+
+def test_the_generated_build_file_is_read_as_generated(tmp_path):
+    """The real generator wraps values with "$" and a newline; the reader must cope.
+
+    A hand-written file with backslash continuations proves nothing about that, and
+    the first version of this step died here: it reassembled the lines wrongly, took
+    the trailing dollar sign as part of the flags, and then tried to fingerprint "$"
+    as a compiler.
+    """
+    module = installer()
+    fixture = build_fixture(tmp_path)
+    source = synthetic_source(tmp_path)
+    assert " $\n    -D_GLIBCXX_USE_CXX11_ABI=1" in fixture.ninja
+    assert "-ccbin $\n" in fixture.ninja, "the flag ends a wrapped line"
+    printed = fingerprint_of(module, fixture, source)
+    assert printed["inputs"]["incomplete"] == [], printed["inputs"]["incomplete"]
+    toolchain = printed["inputs"]["toolchain"]
+    assert (
+        toolchain[str(fixture.compiler.resolve())]
+        == hashlib.sha256(fixture.compiler.read_bytes()).hexdigest()
+    )
+    # -ccbin sits on the line after its argument and was still followed, to a
+    # compiler the cxx binding does not name.
+    assert (
+        toolchain[str(fixture.ccbin_compiler.resolve())]
+        == hashlib.sha256(fixture.ccbin_compiler.read_bytes()).hexdigest()
+    )
+    assert not [value for value in printed["inputs"]["includes"] if "$" in value]
+    assert all(
+        value != "absent" for value in printed["inputs"]["includes"].values()
+    ), printed["inputs"]["includes"]
+    assert all(
+        value != "absent" for value in printed["inputs"]["toolchain"].values()
+    ), printed["inputs"]["toolchain"]
+    # FLASHINFER_NVCC lets the build name any nvcc on the box, and the file says
+    # which one: its bytes are an input even when they are not under CUDA_HOME.
+    outside = tmp_path / "toolchain/nvcc-wrapper"
+    outside.write_text("#!/bin/sh\necho nvcc one\n")
+    outside.chmod(0o755)
+    overridden = fixture.ninja.replace(
+        "nvcc = $cuda_home/bin/nvcc", f"nvcc = {outside}"
+    )
+    second = module.build_fingerprint(overridden, source, fixture.inputs, fixture.abi)
+    assert second["inputs"]["incomplete"] == [], second["inputs"]["incomplete"]
+    assert (
+        second["inputs"]["toolchain"][str(outside.resolve())]
+        == hashlib.sha256(outside.read_bytes()).hexdigest()
+    ), second["inputs"]["toolchain"]
+    outside.write_text("#!/bin/sh\necho nvcc two\n")
+    assert (
+        module.build_fingerprint(overridden, source, fixture.inputs, fixture.abi)[
+            "fingerprint"
+        ]
+        != second["fingerprint"]
+    ), "the nvcc the build names is a build input"
+    gone = module.build_fingerprint(
+        overridden.replace(str(outside), str(tmp_path / "absent-nvcc")),
+        source,
+        fixture.inputs,
+        fixture.abi,
+    )
+    assert any("nvcc" in gap for gap in gone["inputs"]["incomplete"]), gone["inputs"]
+    # The container sets CXX and CUDAHOSTCXX to the same compiler; naming it twice
+    # must not double-count it, and must not lose it either.
+    same = printed["inputs"]["toolchain"]
+    both = module.build_fingerprint(
+        fixture.ninja.replace(str(fixture.ccbin_compiler), str(fixture.compiler)),
+        source,
+        fixture.inputs,
+        fixture.abi,
+    )
+    assert both["inputs"]["incomplete"] == [], both["inputs"]["incomplete"]
+    assert (
+        both["inputs"]["toolchain"][str(fixture.compiler.resolve())]
+        == same[str(fixture.compiler.resolve())]
+    )
+    assert both["fingerprint"] != printed["fingerprint"], "the flag text is an input"
+    assert re.search(r"^[0-9a-f]{64}$", printed["fingerprint"])
+
+
+def test_the_build_fingerprint_binds_the_actual_build_inputs(tmp_path):
+    module = installer()
+    root = tmp_path
+    fixture = build_fixture(root)
+    source = synthetic_source(root)
+    installer_copy = root / "install-copy.py"
+    installer_copy.write_bytes(INSTALLER.read_bytes())
+    module.INSTALLER_PATH = installer_copy
+
+    def fingerprint(ninja=None):
+        return fingerprint_of(module, fixture, source, ninja)["fingerprint"]
+
+    base = fingerprint()
+    assert re.fullmatch(r"[0-9a-f]{64}", base), base
+
+    def moved(path: Path, payload: bytes) -> None:
+        before = path.read_bytes()
+        path.write_bytes(payload)
+        try:
+            assert fingerprint() != base, f"{path} is a build input"
+        finally:
+            path.write_bytes(before)
+
+    # The CUDA toolchain by content: nvcc, libdevice and the headers the build is
+    # given, whatever nvcc --version still says about itself.
+    moved(fixture.nvcc, b"nvcc image two\n")
+    moved(fixture.libdevice, b"libdevice two\n")
+    moved(fixture.cuda_header, b"typedef int two;\n")
+    # The host toolchain by content, including what the driver only names.
+    moved(fixture.compiler, b"#!/bin/sh\necho two\n")
+    moved(fixture.cc1plus, b"cc1plus two\n")
+    moved(fixture.collect2, b"collect2 two\n")
+    moved(fixture.assembler, b"as two\n")
+    moved(fixture.ld, b"ld two\n")
+    moved(fixture.crt, b"crt two\n")
+    moved(fixture.libgcc, b"libgcc two\n")
+    moved(fixture.libc, b"glibc two\n")
+    moved(fixture.libstdcxx, b"libstdc++ two\n")
+    moved(fixture.cxx_include, b"#pragma once\n// two\n")
+    # The kernel sources and headers, and the instantiation the generator wrote.
+    moved(fixture.header, b"#pragma once\n// two\n")
+    moved(fixture.csrc, b"#pragma once\n// two\n")
+    moved(fixture.sources[0], b"// patched two\n")
+    moved(fixture.generated, b"// generated two\n")
+    # What the link step resolves -lNAME to, shared and archive alike.
+    moved(fixture.cudart, b"cudart two\n")
+    moved(fixture.cudadevrt, b"cudadevrt two\n")
+    moved(fixture.libcuda, b"libcuda two\n")
+    # The ABI of what the module is built into and loaded by.
+    moved(fixture.python_header, b"typedef int two;\n")
+    moved(fixture.ffi_header, b"#pragma once\n// two\n")
+    for label in ("python", "torch", "tvm_ffi/libtvm_ffi.so"):
+        moved(fixture.abi[label], b"another image\n")
+    # The accepted patch set and this installer are identities too.
+    moved(Path(source["patches"][0]["patch"]), b"a different mailbox\n")
+    moved(installer_copy, b"a different installer\n")
+    source["patches"][0]["files"][0]["accepted_sha256"] = "0" * 64
+    assert fingerprint() != base, "the accepted manifest is a build input"
+    source["patches"][0]["files"][0]["accepted_sha256"] = digest(
+        "# stock kernel\nreturn 2\n"
+    )
+    # The effective flags, however the generator chose to break their lines.
+    for label, before, after in (
+        ("arch", "compute_120f", "compute_103f"),
+        ("nvcc threads", "--threads=1", "--threads=4"),
+        ("libstdc++ abi", "_GLIBCXX_USE_CXX11_ABI=1", "_GLIBCXX_USE_CXX11_ABI=0"),
+        ("link set", "-lcudadevrt", ""),
+        ("include set", "-isystem $cuda_home/include", ""),
+        ("cuda home", f"cuda_home = {root / 'cuda'}", f"cuda_home = {root}"),
+    ):
+        assert fingerprint(fixture.ninja.replace(before, after)) != base, label
+
+    # And what must not move it: an API-only release has no say here.
+    (root / "flashinfer-include/__pycache__").mkdir(exist_ok=True)
+    (root / "flashinfer-include/__pycache__/x.cpython-312.pyc").write_bytes(b"stale")
+    aot = root / "flashinfer/data/aot/fused_moe_120"
+    aot.mkdir(parents=True, exist_ok=True)
+    (aot / "fused_moe_120.so").write_bytes(b"the installed module is an output\n")
+    api = root / "python/sglang/srt/models/another_api.py"
+    api.parent.mkdir(parents=True, exist_ok=True)
+    api.write_text("# api only\n")
+    os.environ["SOURCE_REVISION"] = "b" * 40
+    try:
+        assert fingerprint() == base, "the source revision is not a build input"
+    finally:
+        del os.environ["SOURCE_REVISION"]
+    assert "SOURCE_REVISION" not in INSTALLER.read_text(), "no revision here at all"
+
+
+def test_the_fingerprint_ignores_where_the_build_scratch_lives(tmp_path):
+    """The same build in another temporary directory is the same build.
+
+    The uncached path builds inside a fresh TemporaryDirectory, so a workspace path
+    leaking into the digest would make every documented native --build-cache run
+    miss, and would tie a container artifact to the one scratch directory that made
+    it. Everything under the workspace is still hashed; only its location is not.
+    """
+    module = installer()
+    source = synthetic_source(tmp_path)
+    fixture = build_fixture(tmp_path)
+    base = fingerprint_of(module, fixture, source)["fingerprint"]
+    moved = build_fixture(tmp_path, workspace=tmp_path / "workspace-b")
+    assert moved.generated != fixture.generated
+    assert (
+        fingerprint_of(module, moved, source)["fingerprint"] == base
+    ), "the workspace location is not a build input"
+    moved.generated.write_bytes(b"// generated two\n")
+    assert fingerprint_of(module, moved, source)["fingerprint"] != base
+
+
+def test_an_input_the_fingerprint_cannot_see_blocks_reuse(tmp_path):
+    """A gap in the identity is reported and compiles; it is never a silent hit."""
+    module = installer()
+    fixture = build_fixture(tmp_path)
+    source = synthetic_source(tmp_path)
+    cache = tmp_path / "build-cache"
+    report = io.StringIO()
+    reused(module, fixture, source, cache, tmp_path / "run-one", report)
+    assert cache_keys(cache)
+
+    shutil.rmtree(fixture.nvcc.parent)
+    gaps = fingerprint_of(module, fixture, source)["inputs"]["incomplete"]
+    assert any("cuda/bin" in gap for gap in gaps), gaps
+    _, _, state, compiled, said = reused(
+        module, fixture, source, cache, tmp_path / "run-two", report
+    )
+    assert state == "compiled"
+    assert "not fully identifiable" in said, said
+    assert compiled and not compiled[0][1], "a stale output was republished"
+    fixture.nvcc.parent.mkdir(parents=True, exist_ok=True)
+    fixture.nvcc.write_bytes(b"nvcc image one\n")
+
+    # An unplaceable tool is a gap, not a fact: the driver's own answer is all the
+    # fingerprint has to go on, and it does not get to pretend otherwise.
+    blind = tmp_path / "compiler-without-cc1plus"
+    blind.write_text(
+        fixture.compiler.read_text().replace(
+            "-print-prog-name=cc1plus", "-print-prog-name=cc1plusX"
+        )
+    )
+    blind.chmod(0o755)
+    blind_ninja = fixture.ninja.replace(str(fixture.compiler), str(blind))
+    gaps = module.build_fingerprint(blind_ninja, source, fixture.inputs, fixture.abi)[
+        "inputs"
+    ]["incomplete"]
+    assert any("cc1plus" in gap for gap in gaps), gaps
+    fixture.ninja = blind_ninja
+    _, _, state, _, said = reused(
+        module, fixture, source, cache, tmp_path / "run-three", report
+    )
+    assert state == "compiled" and "not fully identifiable" in said, said
+
+
+def test_the_same_inputs_reuse_the_compiled_module_without_the_compile(tmp_path):
+    module = installer()
+    fixture = build_fixture(tmp_path)
+    source = synthetic_source(tmp_path)
+    cache = tmp_path / "build-cache"
+    report = io.StringIO()
+
+    _, built, state, compiled, _ = reused(
+        module, fixture, source, cache, tmp_path / "run-one", report
+    )
+    assert state == "compiled"
+    assert compiled == [("fused_moe_120", False, False)], "the first build reaches nvcc"
+    assert built.read_bytes() == COMPILED
+    fingerprint = (cache / CACHE_LATEST).read_text().strip()
+    directory = cache / CACHE_SCHEMA / fingerprint
+    # The artifact is not a .so: the repository's .dockerignore excludes *.so from
+    # every build context, and a context filter that drops the binary while leaving
+    # the records behind is exactly how a cache would start lying.
+    assert (directory / ("fused_moe_120" + CACHE_SUFFIX)).read_bytes() == COMPILED
+    assert not list(directory.glob("*.so")), list(directory.iterdir())
+    record = json.loads((directory / CACHE_RECORD).read_text())
+    assert record["schema"] == CACHE_SCHEMA and record["module"] == "fused_moe_120"
+    assert record["fingerprint"] == fingerprint
+    assert record["artifact_sha256"] == hashlib.sha256(COMPILED).hexdigest()
+    assert record["artifact_bytes"] == len(COMPILED)
+    assert record["inputs"]["toolchain"], "the inputs travel with the artifact"
+
+    # A second, separate build environment with the same actual inputs: the compile
+    # step is not entered, and the module is the recorded bytes.
+    spec, built, state, compiled, said = reused(
+        module, fixture, source, cache, tmp_path / "run-two", report
+    )
+    assert state == "restored", said
+    assert compiled == [], "a cache hit must not enter the compile step"
+    assert built.read_bytes() == COMPILED and spec.jit_library_path.is_file()
+
+    # A real change to one input comes back as a compile and names the class of
+    # input that moved, so a 90-minute rebuild is explainable from the log alone.
+    fixture.generated.write_bytes(b"// generated two\n")
+    fixture.inputs = {**fixture.inputs, "sources": [str(p) for p in fixture.sources]}
+    _, _, state, compiled, said = reused(
+        module, fixture, source, cache, tmp_path / "run-three", report
+    )
+    assert state == "compiled", said
+    assert "sources" in said, said
+    assert cache_keys(cache) == {
+        fingerprint,
+        (cache / CACHE_LATEST).read_text().strip(),
+    }
+
+    # Same paths, different bytes: the objects a previous compiler left behind must
+    # not be relinked and published under the fingerprint of the new one.
+    compiler_bytes = fixture.compiler.read_bytes()
+    rebuilt = b"compiled by the new compiler\n"
+    # A rebuilt toolchain package: the same path, working, different bytes.
+    fixture.compiler.write_bytes(compiler_bytes + b"# rebuilt\n")
+    _, _, state, compiled, said = reused(
+        module,
+        fixture,
+        source,
+        cache,
+        tmp_path / "run-three-b",
+        report,
+        payload=rebuilt,
+    )
+    assert state == "compiled", said
+    assert "toolchain" in said, said
+    assert compiled == [
+        ("fused_moe_120", False, False)
+    ], "a fingerprint miss left Ninja intermediates in place: " + str(compiled)
+    republished = (cache / CACHE_LATEST).read_text().strip()
+    record = json.loads((cache / CACHE_SCHEMA / republished / CACHE_RECORD).read_text())
+    assert record["artifact_sha256"] == hashlib.sha256(rebuilt).hexdigest(), record
+    fixture.compiler.write_bytes(compiler_bytes)
+
+    fixture.nvcc.write_bytes(b"nvcc image three\n")
+    _, _, state, _, said = reused(
+        module, fixture, source, cache, tmp_path / "run-four", report
+    )
+    assert state == "compiled", said
+    assert "toolchain" in said, said
+    assert len(cache_keys(cache)) == 2, cache_keys(cache)
+    assert fingerprint not in cache_keys(cache), "the superseded artifact is pruned"
+    assert (cache / CACHE_LATEST).read_text().strip() in cache_keys(cache)
+
+
+def test_a_corrupt_or_foreign_cache_entry_is_never_reused(tmp_path):
+    module = installer()
+    fixture = build_fixture(tmp_path)
+    source = synthetic_source(tmp_path)
+    cache = tmp_path / "build-cache"
+    report = io.StringIO()
+    _, _, state, _, _ = reused(
+        module, fixture, source, cache, tmp_path / "run-one", report
+    )
+    assert state == "compiled"
+    directory = cache / CACHE_SCHEMA / (cache / CACHE_LATEST).read_text().strip()
+    artifact = directory / ("fused_moe_120" + CACHE_SUFFIX)
+    record_path = directory / CACHE_RECORD
+    stored = json.loads(record_path.read_text())
+
+    def refuses(description, break_cache):
+        break_cache()
+        report.seek(0)
+        report.truncate()
+        _, _, state, compiled, said = reused(
+            module, fixture, source, cache, tmp_path / "again", report
+        )
+        assert state == "compiled", f"{description}: {said}"
+        assert compiled, description
+        assert said.strip(), f"{description}: said nothing"
+        # The rejection heals itself: the rebuild republishes the artifact.
+        _, _, state, compiled, said = reused(
+            module, fixture, source, cache, tmp_path / "after", report
+        )
+        assert state == "restored", f"{description}: {said}"
+        assert compiled == [], description
+        stored.update(json.loads(record_path.read_text()))
+
+    refuses("a truncated artifact", lambda: artifact.write_bytes(COMPILED[:-4]))
+    refuses("an empty artifact", lambda: artifact.write_bytes(b""))
+    refuses("a vanished artifact", lambda: artifact.unlink())
+    refuses("no record at all", lambda: record_path.unlink(missing_ok=True))
+    refuses("an unreadable record", lambda: record_path.write_text("{"))
+    for malformed in ("[]", "null", '"just a string"', "[[]]", "{}", '{"inputs": []}'):
+        refuses(
+            f"a record holding {malformed}",
+            lambda malformed=malformed: record_path.write_text(malformed),
+        )
+    for field, value in (
+        ("fingerprint", "f" * 64),
+        ("module", "fused_moe_103"),
+        ("schema", "v0"),
+        ("artifact_bytes", 1),
+        ("artifact_sha256", "0" * 64),
+    ):
+        refuses(
+            f"a record with {field}={value!r}",
+            lambda field=field, value=value: record_path.write_text(
+                json.dumps({**stored, field: value})
+            ),
+        )
+    # The recorded inputs are bound to the fingerprint, so another build's inputs
+    # cannot be pasted onto this record to make a stale entry look right.
+    refuses(
+        "inputs that are not this build's",
+        lambda: record_path.write_text(
+            json.dumps({**stored, "inputs": {**stored["inputs"], "ninja": "0" * 64}})
+        ),
+    )
+
+
+def test_the_uncached_build_does_no_fingerprinting(tmp_path):
+    """--build-cache is an addition; without it the step is what it always was."""
+    module = installer()
+    fixture = build_fixture(tmp_path)
+    source = synthetic_source(tmp_path)
+    compiled: list = []
+    spec = FakeSpec(tmp_path / "workspace", fixture.ninja, fixture.sources, compiled)
+    spec.build_dir.mkdir(parents=True, exist_ok=True)
+    spec.jit_library_path.write_bytes(b"left over from a previous run\n")
+    original = module.build_fingerprint
+
+    def no_fingerprinting(*args, **kwargs):
+        raise AssertionError("the uncached build fingerprinted something")
+
+    module.build_fingerprint = no_fingerprinting
+    report = io.StringIO()
+    try:
+        with redirect_stderr(report):
+            built, state = module.build_or_reuse(spec, source)
+    finally:
+        module.build_fingerprint = original
+    assert (state, compiled) == ("compiled", [("fused_moe_120", True, True)])
+    assert built.read_bytes() == COMPILED
+    assert report.getvalue() == "", report.getvalue()
+
+
+def test_a_miss_cannot_publish_when_old_objects_cannot_be_removed(
+    tmp_path, monkeypatch
+):
+    module = installer()
+    fixture = build_fixture(tmp_path)
+    source = synthetic_source(tmp_path)
+    compiled: list = []
+    spec = FakeSpec(tmp_path / "workspace", fixture.ninja, fixture.sources, compiled)
+
+    def refuse_cleanup(path):
+        raise PermissionError("cannot remove old objects")
+
+    monkeypatch.setattr(module.shutil, "rmtree", refuse_cleanup)
+    with pytest.raises(PermissionError, match="cannot remove old objects"):
+        module.build_or_reuse(
+            spec, source, tmp_path / "cache", fixture.inputs, fixture.abi
+        )
+    assert compiled == [], "a failed cleanup must not relink stale objects"
+    assert not (tmp_path / "cache" / CACHE_LATEST).exists()
+
+
+def test_the_build_subprocess_is_told_the_installer_and_the_cache(tmp_path):
+    module = installer()
+    source = source_manifest()
+    env = module.nvcc_environment(source, tmp_path / "flashinfer", {})
+    assert env["PENNY_FLASHINFER_INSTALLER"] == str(INSTALLER.resolve()), env
+    assert "PENNY_FLASHINFER_BUILD_CACHE" not in env, "no cache, no key"
+
+    seen = {}
+    built = tmp_path / "jit/fused_moe_120/fused_moe_120.so"
+    built.parent.mkdir(parents=True)
+    built.write_bytes(b"nvcc made this\n")
+    original_run = module.subprocess.run
+
+    def recording_run(argv, **kwargs):
+        seen.update(kwargs["env"])
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=f"compiled {built}\n", stderr=""
+        )
+
+    module.subprocess.run = recording_run
+    try:
+        package = installed_tree(
+            tmp_path / "site",
+            {"kernel.py": "# stock kernel\nreturn 2\n"},
+            "9.9.9",
+            guard=GUARD_ACCEPTED,
+        )
+        destination, state = module.install_accepted_source(
+            package, synthetic_source(tmp_path), tmp_path / "build-cache"
+        )
+    finally:
+        module.subprocess.run = original_run  # the module object is the shared one
+    assert seen["PENNY_FLASHINFER_BUILD_CACHE"] == str(tmp_path / "build-cache"), seen
+    assert state == "compiled", state
+    assert destination.read_bytes() == built.read_bytes()
+    text = INSTALLER.read_text()
+    assert "--build-cache" in text
+    assert (
+        "PENNY_FLASHINFER_BUILD_CACHE" in text
+    ), "the environment is the container's knob"
+
+
+def test_the_compiler_queries_are_the_ones_a_real_toolchain_answers(tmp_path):
+    """The fixture script covers the reading; this covers a real compiler.
+
+    A CPU runner with no C++ compiler has nothing to answer here and the step asks
+    for nothing; on a host that has one, every query the fingerprint relies on has
+    to resolve, because an unresolved answer blocks reuse instead of counting as a
+    fact about the toolchain.
+    """
+    module = installer(shared_libraries=True)
+    cxx = shutil.which(os.environ.get("CXX") or "c++")
+    if cxx is None:
+        return
+    resolved = Path(cxx).resolve()
+    directories, answers, search = module._driver_queries(resolved)
+    assert directories and all(
+        Path(entry).is_dir() for entry in directories
+    ), directories
+    assert set(answers) == {
+        *module.COMPILER_PROGRAMS,
+        *module.COMPILER_LIBRARIES,
+    }, answers
+    assert search and all(Path(entry).is_absolute() for entry in search), search
+    incomplete: list = []
+    inputs = module._compiler_inputs(resolved, incomplete)
+    assert incomplete == [], incomplete
+    assert str(resolved) in inputs
+    assert any(key.startswith("include:") for key in inputs), inputs
+    assert any(key.startswith("install:") for key in inputs), inputs
+    for name, answer in sorted(answers.items()):
+        placed = module._resolved_answer(answer, search, resolved.parent)
+        assert placed is not None and str(placed) in inputs, (
+            name,
+            answer,
+            sorted(inputs),
+        )
+
+
+def test_the_compiler_identity_includes_its_loaded_shared_libraries():
+    module = installer(shared_libraries=True)
+    cxx = shutil.which(os.environ.get("CXX") or "c++")
+    if cxx is None or shutil.which("ldd") is None:
+        pytest.skip("a C++ compiler and ldd are required")
+    compiler = Path(cxx).resolve()
+    _, answers, search = module._driver_queries(compiler)
+    frontend = module._resolved_answer(answers["cc1plus"], search, compiler.parent)
+    assert frontend is not None
+    listed = subprocess.run(["ldd", str(frontend)], capture_output=True, text=True)
+    assert listed.returncode == 0, listed.stderr
+    dependencies = {
+        str(Path(match).resolve())
+        for match in re.findall(r"(?:=>\s+|^\s*)(/\S+)\s+\(", listed.stdout, re.M)
+    }
+    assert dependencies, listed.stdout
+    incomplete = []
+    recorded = module._compiler_inputs(compiler, incomplete)
+    assert incomplete == [], incomplete
+    assert dependencies <= recorded.keys(), dependencies - recorded.keys()
+
+
+def test_changed_compiler_library_bytes_change_identity(tmp_path):
+    module = installer(shared_libraries=True)
+    cc = shutil.which("cc")
+    if cc is None or shutil.which("ldd") is None:
+        pytest.skip("a C compiler and ldd are required")
+    library = tmp_path / "libcompiler_input.so"
+    executable = tmp_path / "compiler"
+    subprocess.run(
+        [cc, "-x", "c", "-shared", "-fPIC", "-o", str(library), "-"],
+        input="int compiler_input(void) { return 1; }\n",
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        [
+            cc,
+            "-x",
+            "c",
+            "-",
+            f"-L{tmp_path}",
+            "-lcompiler_input",
+            f"-Wl,-rpath,{tmp_path}",
+            "-o",
+            str(executable),
+        ],
+        input="extern int compiler_input(void); int main(void) { return compiler_input(); }\n",
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    gaps = []
+    before = module._program_libraries({executable}, gaps)
+    assert gaps == [], gaps
+    assert str(library) in before
+    program_digest = module.sha256_file(executable)
+    with library.open("ab") as handle:
+        handle.write(b"updated library contents\n")
+    after = module._program_libraries({executable}, gaps)
+    assert gaps == [], gaps
+    assert before[str(library)] != after[str(library)]
+    assert module.sha256_file(executable) == program_digest
+    library.unlink()
+    module._program_libraries({executable}, gaps)
+    assert any("not found" in gap for gap in gaps), gaps
+
+
+def test_unresolved_toolchain_library_scan_prevents_reuse(tmp_path, monkeypatch):
+    module = installer(shared_libraries=True)
+    program = tmp_path / "compiler"
+    program.write_bytes(b"\x7fELF fixture")
+
+    def unavailable(*args, **kwargs):
+        raise FileNotFoundError("ldd unavailable")
+
+    monkeypatch.setattr(module.subprocess, "run", unavailable)
+    gaps = []
+    assert module._program_libraries({program}, gaps) == {}
+    assert any("ldd unavailable" in gap for gap in gaps)
+    program.write_text("#!/bin/sh\nexec arbitrary-compiler\n")
+    gaps = []
+    assert module._program_libraries({program}, gaps) == {}
+    assert any("non-ELF" in gap for gap in gaps)
+
+
+def test_the_abi_inputs_are_the_installed_binaries_and_not_their_versions(tmp_path):
+    """The container resolves torch and tvm-ffi for real; here they are stood in.
+
+    The fingerprint cannot be honest about the ABI it binds the module to without
+    those binaries, and an environment that cannot name one gets no reuse rather
+    than a thinner fingerprint.
+    """
+    module = installer()
+    fixture = build_fixture(tmp_path)
+    source = synthetic_source(tmp_path)
+    site = tmp_path / "abi-site"
+    extension = site / "torch/lib/libtorch_python.so"
+    extension.parent.mkdir(parents=True)
+    (site / "torch/__init__.py").write_text("")
+    extension.write_bytes(b"libtorch one\n")
+    library = site / "tvm_ffi/lib/libtvm_ffi.so"
+    library.parent.mkdir(parents=True)
+    (site / "tvm_ffi/__init__.py").write_text("")
+    library.write_bytes(b"tvm ffi one\n")
+    # torch._C without __file__ is the older layout; the fallback is the same file.
+    installed = {
+        "torch": SimpleNamespace(
+            _C=SimpleNamespace(), __file__=str(site / "torch/__init__.py")
+        ),
+        "tvm_ffi": SimpleNamespace(__file__=str(site / "tvm_ffi/__init__.py")),
+    }
+    saved = {name: module.sys.modules.get(name) for name in installed}
+    module.sys.modules.update(installed)
+
+    def fingerprint():
+        return module.build_fingerprint(fixture.ninja, source, fixture.inputs)[
+            "fingerprint"
+        ]
+
+    try:
+        found = module.abi_dependency_files()
+        assert found["python"] == module.Path(module.sys.executable).resolve(), found
+        assert found["torch"] == extension.resolve(), found
+        assert found["tvm_ffi/lib/libtvm_ffi.so"] == library.resolve(), found
+        base = fingerprint()
+        assert not fingerprint_of(module, fixture, source)["inputs"]["incomplete"]
+        library.write_bytes(b"tvm ffi two\n")
+        assert fingerprint() != base, "the loader that hosts the module is an input"
+        library.write_bytes(b"tvm ffi one\n")
+        extension.write_bytes(b"libtorch two\n")
+        assert fingerprint() != base, "the torch ABI answer is an input"
+        extension.write_bytes(b"libtorch one\n")
+        library.unlink()
+        raises(lambda: module.abi_dependency_files(), "no shared library")
+        module.sys.modules["torch"] = None
+        gaps = module.build_fingerprint(fixture.ninja, source, fixture.inputs)[
+            "inputs"
+        ]["incomplete"]
+        assert any("abi" in gap for gap in gaps), gaps
+    finally:
+        for name, previous in saved.items():
+            if previous is None:
+                module.sys.modules.pop(name, None)
+            else:
+                module.sys.modules[name] = previous
+
+
+def test_the_container_restores_the_module_before_it_can_recompile():
+    dockerfile = DOCKERFILE.read_text()
+    restore = dockerfile.index("COPY docker/pennyroyal/build-cache/")
+    packaging = dockerfile.index("scripts/pennyroyal/flashinfer/install.py")
+    export = dockerfile.index("FROM scratch AS flashinfer-artifact")
+    assert restore < packaging < export, "restore, then build, then export"
+    assert "PENNY_FLASHINFER_BUILD_CACHE=/tmp/penny-fi-cache" in dockerfile
+    assert "COPY --from=build /tmp/penny-fi-cache/ /cache/" in dockerfile[export:]
+    # Only the fingerprinted modules travel; the ninja objects still do not.
+    assert dockerfile.count("/tmp/penny-fi-cache") == 3, dockerfile.count(
+        "/tmp/penny-fi-cache"
+    )
+    assert "rm -rf /tmp/penny-fi-sm120" in dockerfile
+    assert (REPO / "docker/pennyroyal/build-cache/.gitignore").is_file()
+
+
+REAL_SPEC_PROBE = r"""
+import importlib.util
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+root, workspace, installer, manifest = map(pathlib.Path, sys.argv[1:5])
+cuda = root / "cuda"
+(cuda / "bin").mkdir(parents=True, exist_ok=True)
+(cuda / "include").mkdir(exist_ok=True)
+(cuda / "nvvm").mkdir(exist_ok=True)
+nvcc = cuda / "bin" / "nvcc"
+if not nvcc.exists():
+    # A tiny CPU executable answers the generator's version query. No CUDA is
+    # compiled, and the dependency scan can examine a real ELF executable.
+    subprocess.run(
+        [os.environ.get("CXX", "c++"), "-x", "c++", "-o", str(nvcc), "-"],
+        input='#include <stdio.h>\nint main() { puts("Cuda compilation tools, release 13.0, V13.0.48"); }\n',
+        text=True, capture_output=True, check=True,
+    )
+os.environ["CUDA_HOME"] = str(cuda)
+os.environ["FLASHINFER_WORKSPACE_BASE"] = str(workspace)
+source = json.loads(manifest.read_text())
+os.environ["FLASHINFER_CUDA_ARCH_LIST"] = source["cuda_arch_list"]
+try:
+    from flashinfer.jit.fused_moe import gen_cutlass_fused_moe_sm120_module
+except ImportError as error:
+    print(json.dumps({"unavailable": str(error)}))
+    raise SystemExit(0)
+
+spec = gen_cutlass_fused_moe_sm120_module(use_fast_build=False)
+
+
+def never_build(*args, **kwargs):
+    raise AssertionError("the fingerprint compiled")
+
+
+spec.build = never_build
+spec.write_ninja()
+ninja = pathlib.Path(spec.ninja_path).read_text()
+for name in re.findall(r"(?:^|\s)-l(\S+)", ninja):
+    for directory in re.findall(r"(?:^|\s)-L(\S+)", ninja):
+        target = pathlib.Path(directory.replace("$cuda_home", str(cuda)))
+        # Only the fixture CUDA tree may be stubbed, never an installed directory.
+        assert target.resolve().is_relative_to(cuda.resolve()), target
+        target.mkdir(parents=True, exist_ok=True)
+        (target / ("lib" + name + ".so")).write_bytes(b"stub\n")
+loader = importlib.util.spec_from_file_location("penny_flashinfer_sm120", installer)
+step = importlib.util.module_from_spec(loader)
+loader.loader.exec_module(step)
+printed = step.build_fingerprint(
+    ninja, source, step.build_inputs(spec, os.environ), step.abi_dependency_files()
+)
+print(
+    json.dumps(
+        {
+            "fingerprint": printed["fingerprint"],
+            "incomplete": printed["inputs"]["incomplete"],
+            "includes": list(printed["inputs"]["includes"]),
+            "sources": len(spec.sources),
+            "ninja": str(spec.ninja_path),
+            "workspace": str(workspace),
+            "cuda": str(cuda),
+        }
+    )
+)
+"""
+
+
+def test_the_build_context_actually_carries_the_build_cache(tmp_path):
+    """The cache is restored through the build context, so the context decides.
+
+    The repository .dockerignore excludes *.so, which is why this is built rather
+    than asserted about: a scratch image out of a cache directory holding the step's
+    real file names shows what the engine really sent, under the ignore files this
+    repository really has. Only a box with no working engine skips; once the engine
+    answers, a broken build, create or copy is a failure. No Penny Royal image is
+    built here.
+    """
+    engine = next((tool for tool in ("podman", "docker") if shutil.which(tool)), None)
+    if engine is None:
+        pytest.skip("no container engine on this box")
+    context = tmp_path / "context"
+    cache = context / "docker/pennyroyal/build-cache"
+    payload = cache / CACHE_SCHEMA / ("f" * 64)
+    payload.mkdir(parents=True)
+    (payload / ("fused_moe_120" + CACHE_SUFFIX)).write_bytes(b"artifact\n")
+    (payload / CACHE_RECORD).write_text("{}\n")
+    (cache / CACHE_LATEST).write_text("f" * 64 + "\n")
+    (payload / "decoy.so").write_bytes(b"artifact\n")
+    shutil.copyfile(REPO / ".dockerignore", context / ".dockerignore")
+    shutil.copyfile(
+        REPO / "docker/pennyroyal/Dockerfile.dockerignore",
+        context / "docker/pennyroyal/Dockerfile.dockerignore",
+    )
+    # Named Dockerfile, so the adjacent Dockerfile.dockerignore really is the file
+    # the engine looks for beside it. The artifact stage of the image puts the cache
+    # under /cache, which is what the workflow copies out of a created container.
+    (context / "docker/pennyroyal/Dockerfile").write_text(
+        "FROM scratch\nCOPY docker/pennyroyal/build-cache/ /cache/\n"
+    )
+    image = f"pennyroyal-context-probe-{os.getpid()}"
+    built = subprocess.run(
+        [engine, "build", "-q", "-t", image, "-f", "docker/pennyroyal/Dockerfile", "."],
+        cwd=context,
+        capture_output=True,
+        text=True,
+    )
+    if built.returncode != 0:
+        reachable = subprocess.run([engine, "version"], capture_output=True)
+        if reachable.returncode != 0:
+            pytest.skip(f"{engine} cannot build here: {built.stderr.strip()[:200]}")
+        raise AssertionError(
+            f"{engine} is working but the probe build failed: {built.stderr}"
+        )
+    container = None
+    try:
+        # The artifact stage has no command, exactly like the real one, so a dummy
+        # is required to create the container. It is never started.
+        create = subprocess.run(
+            [engine, "create", built.stdout.strip() or image, "true"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        container = create.stdout.strip().splitlines()[-1]
+        copied = subprocess.run(
+            [engine, "cp", f"{container}:/cache/.", str(tmp_path / "extracted")],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert copied.returncode == 0
+    finally:
+        if container is not None:
+            subprocess.run([engine, "rm", container], capture_output=True)
+        subprocess.run([engine, "rmi", image], capture_output=True)
+    sent = sorted(
+        str(path.relative_to(tmp_path / "extracted"))
+        for path in (tmp_path / "extracted").rglob("*")
+        if path.is_file()
+    )
+    for name in (
+        CACHE_LATEST,
+        f"{CACHE_SCHEMA}/{'f' * 64}/{CACHE_RECORD}",
+        f"{CACHE_SCHEMA}/{'f' * 64}/fused_moe_120{CACHE_SUFFIX}",
+    ):
+        assert name in sent, (engine, sent)
+
+
+def test_a_real_flashinfer_spec_is_fingerprinted_without_compiling(tmp_path):
+    """The generated spec of an installed FlashInfer, read without compiling.
+
+    Both runs happen in a disposable subprocess with their own temporary workspace
+    and their own CUDA tree, so nothing here can write into an installed directory
+    or leave FlashInfer's environment changed for the rest of the suite, and the
+    two fingerprints come from two processes that never shared an import. Writing
+    the Ninja file is the whole interaction: a step that reached the build would
+    fail the child.
+    """
+    root = tmp_path / "probe"
+    root.mkdir()
+    manifest = root / "accepted-sources.json"
+    shutil.copyfile(MANIFEST, manifest)
+    runs = []
+    for name in ("workspace-one", "workspace-two"):
+        workspace = tmp_path / name
+        workspace.mkdir()
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                REAL_SPEC_PROBE,
+                str(root),
+                str(workspace),
+                str(INSTALLER),
+                str(manifest),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        report = json.loads(result.stdout.strip().splitlines()[-1])
+        if "unavailable" in report:
+            pytest.skip(f"flashinfer is not importable here: {report['unavailable']}")
+        runs.append(report)
+    first, second = runs
+    assert first["sources"] > 10, runs
+    assert first["incomplete"] == [], runs
+    for report in runs:
+        assert report["ninja"].startswith(report["workspace"]), report
+        assert report["cuda"].startswith(str(root)), report
+    assert first["ninja"] != second["ninja"], runs
+    assert first["cuda"] == second["cuda"], runs
+    assert first["fingerprint"] == second["fingerprint"], runs
+    assert not [value for value in first["includes"] if "$" in value], runs
 
 
 if __name__ == "__main__":  # pytest is the real driver; this is a smoke check

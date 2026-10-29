@@ -86,12 +86,28 @@ RUN uv pip install --python .venv/bin/python --no-deps \
 # runners dispatch only on SM100/103/107: no RTX GPU can load them, and pruning
 # at this layer, before the COPY below, is what keeps their bytes out of the
 # published image instead of merely deleting them in a later one.
+# The compile is the single most expensive layer of this image and, unlike the
+# checkout above, it does not consume the SGLang source: it consumes the patched
+# FlashInfer sources, this toolchain, these flags and this ABI. The directory
+# copied in below therefore carries fingerprint-keyed modules from one hosted
+# runner to the next, and the step installs one of those instead of recompiling
+# whenever every actual input is unchanged. An API-only release then restores the
+# module in seconds; a changed kernel, compiler package, CUDA header, flag or
+# resolved dependency misses the fingerprint and compiles, and an entry that is
+# missing, foreign, malformed or short is reported and compiled rather than
+# trusted. Nothing is keyed on the release revision, and nothing is pruned out of
+# the checks below: --check still requires the packaged module. The workflow fills
+# this directory from the flashinfer-sm120-cache tag of this image's registry, so a
+# first build finds it empty and compiles; the modules inside are stored as .aot,
+# not .so, because the repository .dockerignore keeps .so out of every context.
 # The hosted build action exited 137 during this compile with four jobs.
 # Serialize this memory-heavy extension on the small runner. Local builders
 # can raise the build-only argument; the serving/JIT defaults stay unchanged.
+COPY docker/pennyroyal/build-cache/ /tmp/penny-fi-cache/
 ARG FLASHINFER_BUILD_JOBS=1
 RUN MAX_JOBS="$FLASHINFER_BUILD_JOBS" FLASHINFER_NINJA_JOBS="$FLASHINFER_BUILD_JOBS" \
     FLASHINFER_WORKSPACE_BASE=/tmp/penny-fi-sm120 \
+    PENNY_FLASHINFER_BUILD_CACHE=/tmp/penny-fi-cache \
     .venv/bin/python scripts/pennyroyal/flashinfer/install.py \
     && .venv/bin/python scripts/pennyroyal/flashinfer/install.py --check >/dev/null \
     && rm -rf /tmp/penny-fi-sm120
@@ -102,6 +118,15 @@ RUN bash docker/pennyroyal/build-nixl.sh \
     && rm -rf /tmp/penny-ple-cargo \
     && .venv/bin/python scripts/pennyroyal/flashinfer/check_dependencies.py \
     && .venv/bin/python -m pip freeze > /opt/pennyroyal-container-packages.txt
+
+# The reusable half of the build stage, and only that: the fingerprinted SM120
+# modules the step above published and their records, under one directory so the
+# hosted build can copy that subtree out of a created container instead of the
+# whole rootfs. Publishing this target is how the compile survives a fresh hosted
+# runner without exporting the wheels, the venv or any Ninja object. The stage has
+# no command, because it is never run: `docker create` needs one supplied.
+FROM scratch AS flashinfer-artifact
+COPY --from=build /tmp/penny-fi-cache/ /cache/
 
 FROM base AS runtime
 ARG SOURCE_REVISION

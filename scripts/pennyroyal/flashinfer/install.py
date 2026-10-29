@@ -22,6 +22,7 @@ Usage, with the target environment's own Python:
     python scripts/pennyroyal/flashinfer/install.py --check       # verify it
     python scripts/pennyroyal/flashinfer/install.py --apply-only  # source half only
     python scripts/pennyroyal/flashinfer/install.py --record DIR  # refresh the pins
+    python scripts/pennyroyal/flashinfer/install.py --build-cache DIR  # reuse the compile
 
 DIR is the `flashinfer` package directory of a fresh extraction of the pinned
 wheel.  --apply-only, --record and --package exist for the focused CPU check and
@@ -53,6 +54,36 @@ beside the new FlashInfer, and FlashInfer rejects that combination while
 importing its JIT environment; the step names those wheels before the build
 starts, with the aligned family recorded in accepted-sources.json.
 
+The compile is the expensive part of this step, so it can be reused. With
+--build-cache DIR (or PENNY_FLASHINFER_BUILD_CACHE=DIR) the step first binds the
+module to the inputs that actually produce it: the Ninja file FlashInfer generated
+for it, hashed with the build's own scratch directory blanked out so a run in a
+different temporary directory is the same build; every source the build compiles,
+including the instantiation files FlashInfer generates; the contents of every
+include directory and linked library those flags name; the CUDA toolkit's bin, nvvm
+and include trees; the host compiler, the header and startup-object directories it
+reports, and every program and library it says it execs or links; the nvcc the
+build file names, which FLASHINFER_NVCC can point outside the toolkit; and the
+interpreter, torch and tvm-ffi binaries the module is built for and loaded by, next
+to the accepted manifest, mailboxes and installer. A cache entry whose record
+declares this fingerprint, whose own inputs hash back to that fingerprint and whose
+bytes match the recorded digest is installed without entering the compile; an entry
+that is missing, malformed, from another schema, recorded for another module,
+shorter than it claims or holding other bytes is reported and compiled fresh, never
+reused quietly. Anything the fingerprint could not look at -- an include directory
+that is not there, a tool the driver cannot place, a source that does not exist --
+is recorded as a gap in the identity and blocks reuse instead of being counted as a
+fact about it. Without a cache directory nothing of this is computed and the build
+is what it always was. On a miss the Ninja build directory is removed first, so
+neither an output nor an object left in a persistent workspace can be relinked and
+republished under a fingerprint that does not describe it. The
+repository's own source revision is not one of those inputs, because this module
+does not consume it: an API-only release restores the module in seconds instead of
+paying 5,620 seconds of compilation again, while any real change to the kernel,
+toolchain, flags or ABI recompiles. The published artifact is stored beside a record
+carrying its digest and the whole input map, so a rebuild that should not have
+happened is explainable by diffing two records.
+
 After the module is in place the step prunes the pinned flashinfer-cubin wheel's
 proven-unsupported payload through the sibling prune_cubins.py: the
 sm100a/sm100f/sm103a/sm107a trtllm-gen cubins the pinned runners dispatch only
@@ -69,6 +100,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -79,15 +111,41 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 MANIFEST_PATH = HERE / "accepted-sources.json"
+INSTALLER_PATH = Path(__file__).resolve()
 PREFIX = "FlashInfer SM120 packaging"
+
+# The reusable-artifact cache: one directory per fingerprint, one record beside
+# the module naming the artifact's own digest and every input it was bound to,
+# and a `latest` pointer so a later build can say which input moved instead of
+# just spending an hour again. CACHE_KEEP bounds the footprint to the newest
+# artifacts, so a toolchain that flips back and forth does not recompile on
+# every flip and the cache does not grow with every CUDA package refresh.
+CACHE_SCHEMA = "pennyroyal-flashinfer-aot-v1"
+CACHE_RECORD = "record.json"
+CACHE_LATEST = "latest"
+CACHE_KEEP = 2
+# The cached module is stored under a name the repository's .dockerignore cannot
+# match: the artifact reaches the image build through the build context, and a
+# context pattern written to keep stray build products out of the image would
+# silently drop a .so and leave the records alone.
+CACHE_ARTIFACT_SUFFIX = ".aot"
+BUILD_STATES = ("restored", "compiled")
+CUDA_TOOLCHAIN_PARTS = ("bin", "nvvm", "include")
+# The binaries the driver execs and links, named as it names them. Only the driver
+# is asked where they are; nothing here guesses a location.
+COMPILER_PROGRAMS = ("cc1plus", "collect2", "as", "ld")
+COMPILER_LIBRARIES = ("libc.so", "libstdc++.so")
+WORKSPACE_PLACEHOLDER = "!workspace"
 
 # Built in a fresh interpreter so the arch list is set before FlashInfer reads
 # it. JitSpec.build() runs the Ninja graph and stops: build_and_load(), or
 # build_jit_specs() with its skip_prebuilt default, would take the stock AOT
-# module and silently compile nothing.
+# module and silently compile nothing. The reuse decision is this file's, so the
+# fingerprint rules cannot drift apart from the ones the check reports.
 BUILD_ERROR_TAIL_LINES = 40
 
 BUILD_CODE = """
+import importlib.util
 import os
 import pathlib
 
@@ -101,8 +159,16 @@ if built_from != expected:
         f"FlashInfer compiles from {built_from}, not the patched source at {expected}"
     )
 spec = gen_cutlass_fused_moe_sm120_module(use_fast_build=False)
-spec.build()
-print(pathlib.Path(spec.jit_library_path))
+packaging = importlib.util.spec_from_file_location(
+    "pennyroyal_flashinfer_install", os.environ["PENNY_FLASHINFER_INSTALLER"]
+)
+step = importlib.util.module_from_spec(packaging)
+packaging.loader.exec_module(step)
+cache = os.environ.get("PENNY_FLASHINFER_BUILD_CACHE")
+module, state = step.build_or_reuse(
+    spec, step.accepted_sources(), pathlib.Path(cache) if cache else None
+)
+print(state, module)
 """
 
 
@@ -253,6 +319,664 @@ def apply_accepted_source(package: Path, source: dict) -> list[str]:
     return statuses
 
 
+def _tree_digest(root: Path) -> str:
+    """The digest of the path and bytes of every file under one directory.
+
+    What the build reads is what the module is bound to, so files are counted by
+    content rather than by any version string. Byte-compiled files are skipped:
+    they appear whenever anything imports the package, which is a property of the
+    last run rather than of this build. A directory that is not there is counted as
+    absent and an unreadable file as unreadable, so a missing or blocked input
+    moves the digest instead of quietly dropping out of it.
+    """
+    if not root.is_dir():
+        return "absent"
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix == ".pyc" or "__pycache__" in path.parts:
+            continue
+        try:
+            content = sha256_file(path)
+        except OSError:
+            content = "unreadable"
+        digest.update(str(path.relative_to(root)).encode())
+        digest.update(b"\0")
+        digest.update(content.encode())
+    return digest.hexdigest()
+
+
+def _flag_values(ninja: str, *patterns: str) -> list[str]:
+    """Flag values out of the generated ninja file, in the order they appear.
+
+    The search runs over the whole text instead of line by line, because
+    FlashInfer's join_multiline() wraps a long value as "$" followed by a newline:
+    every flag is still one complete token on one side of that wrap, so the values
+    can be read without reassembling lines and without depending on where the
+    generator chose to break them.
+    """
+    found: list[str] = []
+    for pattern in patterns:
+        found.extend(
+            value for value in re.findall(pattern, ninja) if value not in found
+        )
+    return found
+
+
+def _binding(ninja: str, name: str) -> str:
+    """One single-line ninja binding, or the empty string when there is none.
+
+    A value ending in the generator's "$" continuation is deliberately not read
+    here: the bindings asked for below (cuda_home, cxx, nvcc) are single tokens in
+    every generated file, and a wrapped one would mean the step cannot say with
+    certainty what the build names, which is a gap rather than a guess.
+    """
+    match = re.search(rf"(?m)^{name} = (.*)$", ninja)
+    if not match:
+        return ""
+    value = match.group(1).strip()
+    return "" if value.endswith("$") else value
+
+
+def _expand(text: str, cuda_home: str) -> str:
+    return text.replace("$cuda_home", cuda_home)
+
+
+def _driver_queries(cxx: Path) -> tuple[list[str], dict[str, str], list[str]]:
+    """What a compiler reports about itself: headers, its search path, its files.
+
+    `-E -v` gives the directories it searches for headers, `-print-search-dirs`
+    gives the programs it execs and the directory it keeps its startup objects and
+    runtime library in, and the `-print-prog-name`/`-print-file-name` queries give
+    the binaries it actually invokes and links. No version string is involved, and
+    no location is guessed here: these are the answers the driver would use.
+    """
+    listed = subprocess.run(
+        [str(cxx), "-E", "-v", "-x", "c++", os.devnull],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    directories = []
+    started = False
+    for line in (listed.stderr + listed.stdout).splitlines():
+        if "search starts here:" in line:
+            started = True
+        elif "End of search list." in line:
+            break
+        elif started and line.strip() and line.strip() not in directories:
+            directories.append(line.strip())
+    search = subprocess.run(
+        [str(cxx), "-print-search-dirs"], check=True, capture_output=True, text=True
+    ).stdout
+    programs: list[str] = []
+    install: list[str] = []
+    for line in search.splitlines():
+        kind, _, value = line.partition(":")
+        value = value.strip().lstrip("=").strip()
+        if kind == "programs":
+            programs = [entry for entry in value.split(":") if entry]
+        elif kind == "install" and value:
+            install = [value]
+    answers = {}
+    for flag, names in (
+        ("-print-prog-name=", COMPILER_PROGRAMS),
+        ("-print-file-name=", COMPILER_LIBRARIES),
+    ):
+        for name in names:
+            answers[name] = subprocess.run(
+                [str(cxx), flag + name], check=True, capture_output=True, text=True
+            ).stdout.strip()
+    return directories, answers, install + programs
+
+
+def _resolved_answer(answer: str, search: list[str], cxx_parent: Path) -> Path | None:
+    """Where the driver's own answer points, following its search path."""
+    named = Path(answer)
+    if named.is_absolute():
+        return named if named.is_file() else None
+    for directory in [Path(entry) for entry in search] + [cxx_parent]:
+        candidate = directory / answer
+        if candidate.is_file():
+            return candidate.resolve()
+    found = shutil.which(answer)
+    return Path(found).resolve() if found else None
+
+
+def _script_children(script: Path) -> list[Path]:
+    """The libraries a linker script stands for; the script itself is not the input."""
+    with script.open("rb") as handle:
+        head = handle.read(512)
+    if not head.startswith(b"/*") or b"(" not in head:
+        return []
+    children = []
+    for token in re.findall(rb"[^\s()]+", head[head.index(b"(") :]):
+        child = Path(os.fsdecode(token))
+        if not child.is_absolute():
+            child = script.with_name(os.fsdecode(token))
+        if child.is_file() and child not in children:
+            children.append(child)
+    return children
+
+
+def _program_libraries(programs: set[Path], incomplete: list[str]) -> dict[str, str]:
+    """Hash the libraries the installed ELF toolchain actually loads.
+
+    A compiler executable can stay unchanged while its MPFR/GMP or other shared
+    libraries change generated code. ldd resolves the complete dependency set
+    using the same environment as the build, including the ELF loader. Unresolved
+    dependencies or opaque compiler wrappers prevent reuse instead of producing
+    an identity that silently omits part of the toolchain.
+    """
+    libraries = {}
+    for program in sorted({path.resolve() for path in programs}):
+        with program.open("rb") as handle:
+            if handle.read(4) != b"\x7fELF":
+                incomplete.append(f"shared dependencies of non-ELF tool {program}")
+                continue
+        try:
+            result = subprocess.run(
+                ["ldd", str(program)],
+                env={**os.environ, "LC_ALL": "C"},
+                capture_output=True,
+                text=True,
+            )
+        except OSError as error:
+            incomplete.append(f"shared dependencies of {program}: {error}")
+            continue
+        output = result.stdout + result.stderr
+        if output.strip() in ("statically linked", "not a dynamic executable"):
+            continue
+        if result.returncode != 0 or not output.strip():
+            incomplete.append(f"ldd could not identify dependencies of {program}")
+            continue
+        for line in output.splitlines():
+            line = line.strip()
+            if not line or line.startswith(("linux-vdso.", "linux-gate.")):
+                continue
+            match = re.fullmatch(r"(?:\S+\s+=>\s+)?(/.+?)\s+\(0x[0-9a-fA-F]+\)", line)
+            if match is None:
+                incomplete.append(f"{program.name} dependency: {line}")
+                continue
+            library = Path(match[1]).resolve()
+            try:
+                libraries[str(library)] = sha256_file(library)
+            except OSError as error:
+                incomplete.append(f"shared dependency {library}: {error}")
+    return libraries
+
+
+def _compiler_inputs(cxx: Path, incomplete: list[str]) -> dict[str, str]:
+    """The host compiler and everything it execs, resolves and links, by content.
+
+    Every answer the compiler gives is hashed, including the directory holding its
+    startup objects and libgcc; an answer that resolves to nothing is recorded as a
+    gap in this toolchain's identity rather than counted as a fact about it, because
+    a fingerprint that cannot see part of its own compiler must not claim reuse.
+    """
+    inputs = {str(cxx): sha256_file(cxx)}
+    programs = {cxx}
+    directories, answers, search = _driver_queries(cxx)
+    for directory in directories:
+        inputs[f"include:{directory}"] = _tree_digest(Path(directory))
+    for directory in [entry for entry in search if Path(entry).is_dir()]:
+        inputs[f"install:{directory}"] = _tree_digest(Path(directory))
+    for name, answer in sorted(answers.items()):
+        resolved = _resolved_answer(answer, search, cxx.parent)
+        if resolved is None:
+            incomplete.append(f"{cxx.name} answer {name}={answer!r} is not a file")
+            continue
+        inputs[str(resolved)] = sha256_file(resolved)
+        if name in COMPILER_PROGRAMS:
+            programs.add(resolved)
+        for child in _script_children(resolved):
+            inputs[str(child)] = sha256_file(child)
+    inputs.update(_program_libraries(programs, incomplete))
+    return inputs
+
+
+def _link_inputs(ninja: str, incomplete: list[str]) -> dict[str, str]:
+    """The libraries the link step resolves -lNAME to, by content.
+
+    The flags are read out of the whole build file rather than out of its ldflags
+    binding, because that binding is one of the wrapped ones and only the tokens
+    themselves are stable across how the generator broke the lines.
+    """
+    inputs: dict[str, str] = {}
+    directories = _flag_values(ninja, r"(?:^|\s)-L(\S+)")
+    for name in _flag_values(ninja, r"(?:^|\s)-l(\S+)"):
+        for suffix in (".so", ".a"):
+            found = next(
+                (
+                    Path(directory) / f"lib{name}{suffix}"
+                    for directory in directories
+                    if (Path(directory) / f"lib{name}{suffix}").is_file()
+                ),
+                None,
+            )
+            if found is not None:
+                inputs[str(found)] = sha256_file(found)
+                break
+        else:
+            incomplete.append(f"-l{name} is on no -L path")
+    return inputs
+
+
+def abi_dependency_files() -> dict[str, Path]:
+    """The installed binaries whose contents decide this module's ABI.
+
+    The interpreter the build runs on, the torch binary that answers the
+    _GLIBCXX_USE_CXX11_ABI question the build asks it, and the tvm-ffi libraries
+    that host the compiled module. Their version strings are not the fingerprint,
+    their bytes are.
+    """
+    import torch
+    import tvm_ffi
+
+    answer = getattr(torch, "_C", None)
+    library = getattr(answer, "__file__", None) or str(
+        Path(torch.__file__).resolve().parent / "lib" / "libtorch_python.so"
+    )
+    if not Path(library).is_file():
+        raise fail(f"{library} is not the installed torch C extension")
+    ffi_root = Path(tvm_ffi.__file__).resolve().parent
+    shared = sorted(path for path in ffi_root.rglob("*.so*") if path.is_file())
+    if not shared:
+        raise fail(f"{tvm_ffi.__file__} carries no shared library to fingerprint")
+    found = {"python": Path(sys.executable).resolve(), "torch": Path(library).resolve()}
+    for path in shared:
+        found[f"tvm_ffi/{path.relative_to(ffi_root)}"] = path
+    return found
+
+
+def build_inputs(spec, environ: dict) -> dict:
+    """The paths the build reads, with its scratch locations set aside.
+
+    ``spec`` is FlashInfer's JitSpec for the module. Its sources are carried so
+    each one is hashed by content, and the workspace roots are carried so they can
+    be blanked out of the build-file digest: FlashInfer writes the generated
+    instantiations and the Ninja file under a directory that changes with the
+    temporary directory of a run, and a scratch path is not a build input. The
+    generated sources themselves are still hashed, so their content is.
+    """
+    roots = {str(Path(spec.build_dir).parents[1])}
+    base = environ.get("FLASHINFER_WORKSPACE_BASE")
+    if base:
+        roots.add(str(Path(base)))
+    return {
+        "workspace": sorted(roots, key=len, reverse=True),
+        "sources": [str(path) for path in spec.sources],
+    }
+
+
+def _resolved(tool: str, cuda_home: str) -> Path:
+    """Where a compiler named in the build file actually is."""
+    path = Path(_expand(tool, cuda_home))
+    found = path if path.is_absolute() else shutil.which(str(path))
+    if not found or not Path(found).is_file():
+        raise fail(f"{tool} is not an executable this build can fingerprint")
+    return Path(found).resolve()
+
+
+def _fingerprint_of(inputs: dict) -> str:
+    encoded = json.dumps(inputs, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def build_fingerprint(
+    ninja: str,
+    source: dict,
+    inputs: dict,
+    abi: dict[str, Path] | None = None,
+) -> dict:
+    """Bind the compiled module to the inputs that actually produced it.
+
+    ``ninja`` is the build file FlashInfer generated for this module, hashed whole
+    so every architecture, host compiler, include and link flag it carries counts
+    as the build would have run it; the files and directories its flags name are
+    then hashed by content, which covers the patched CUDA/C++ sources, the vendored
+    headers, the CUDA toolkit, the host toolchain the driver execs and links, the
+    linked CUDA libraries and the Python, torch and tvm-ffi binaries. The accepted
+    manifest, the carried mailboxes and this installer are identities too. This
+    repository's own source revision is deliberately none of that, because the
+    module consumes nothing else from the checkout: that is what lets an API-only
+    release reuse a compile of 5,620 seconds.
+
+    ``incomplete`` lists anything the fingerprint could not look at. It travels with
+    the digest so a record says what it does not know, and it blocks reuse.
+    """
+    roots = [str(root) for root in inputs.get("workspace") or ()]
+
+    def neutralise(value: str) -> str:
+        for root in sorted(roots, key=len, reverse=True):
+            value = value.replace(root, WORKSPACE_PLACEHOLDER)
+        return value
+
+    text = neutralise(ninja)
+    # Everything below reads paths out of the raw file and neutralises them only for
+    # the digests: the workspace is blanked where it is hashed, not where it points.
+    cuda_home = (
+        _binding(ninja, "cuda_home") or os.environ.get("CUDA_HOME") or "/usr/local/cuda"
+    )
+    # -I<path> and "-isystem <path>" each arrive as one flag, but "-ccbin <path>"
+    # is two list entries, so the generator's wrap can land between the flag and its
+    # argument: the optional separator token is part of reading the file as it is.
+    includes = [
+        _expand(value, cuda_home)
+        for value in _flag_values(
+            ninja, r"(?:^|\s)-I(\S+)", r"(?:^|\s)-isystem\s+(?:\$(?=\s)\s*)?(\S+)"
+        )
+    ]
+    ccbin = _flag_values(ninja, r"(?:^|\s)-ccbin\s+(?:\$(?=\s)\s*)?(\S+)")
+    incomplete: list[str] = []
+    compilers: set[Path] = set()
+    for value in [cuda_home, *includes, *ccbin]:
+        if "$" in value:
+            incomplete.append(f"unexpanded flag {value!r}")
+    toolchain = {
+        f"cuda-{part}": _tree_digest(Path(cuda_home, part))
+        for part in CUDA_TOOLCHAIN_PARTS
+    }
+    for directory in [Path(cuda_home, part) for part in CUDA_TOOLCHAIN_PARTS]:
+        if not directory.is_dir():
+            incomplete.append(f"{directory} is not a directory")
+    for name, value in (
+        ("cxx", _binding(ninja, "cxx")),
+        ("ccbin", ccbin[0] if ccbin else ""),
+    ):
+        if not value:
+            continue
+        try:
+            compiler = _resolved(value, cuda_home)
+        except RuntimeError as error:
+            incomplete.append(f"{name}: {error}")
+            continue
+        if compiler in compilers:
+            continue
+        compilers.add(compiler)
+        toolchain.update(_compiler_inputs(compiler, incomplete))
+    toolchain.update(_link_inputs(_expand(ninja, cuda_home), incomplete))
+    # The compiler the build invokes, as the build names it. FlashInfer takes it
+    # from FLASHINFER_NVCC, so it is not necessarily the nvcc under CUDA_HOME whose
+    # tree is hashed above, and an override the step cannot see is a gap.
+    nvcc = _expand(_binding(ninja, "nvcc"), cuda_home)
+    if not nvcc:
+        incomplete.append("the build file does not name its nvcc on one line")
+    else:
+        try:
+            invoked = _resolved(nvcc, cuda_home)
+        except RuntimeError as error:
+            incomplete.append(f"nvcc: {error}")
+        else:
+            toolchain[str(invoked)] = sha256_file(invoked)
+            programs = {invoked}
+            # NVCC also invokes toolkit helpers such as ptxas and cicc. Their
+            # executable bytes are in the toolkit tree; their loaded libraries
+            # may live outside it and must participate in the same identity.
+            for part in ("bin", "nvvm"):
+                for path in Path(cuda_home, part).rglob("*"):
+                    if path.is_file():
+                        with path.open("rb") as handle:
+                            if handle.read(4) == b"\x7fELF":
+                                programs.add(path)
+            toolchain.update(_program_libraries(programs, incomplete))
+    try:
+        dependencies = abi if abi is not None else abi_dependency_files()
+    except (ImportError, RuntimeError) as error:
+        incomplete.append(f"abi: {error}")
+        dependencies = {}
+    sources = []
+    for path in [Path(value) for value in inputs.get("sources") or ()]:
+        if not path.is_file():
+            incomplete.append(f"{path} is not a source file")
+            continue
+        sources.append([f"{path.parent.name}/{path.name}", sha256_file(path)])
+    recorded = {
+        "schema": CACHE_SCHEMA,
+        "accepted": hashlib.sha256(
+            json.dumps(source, sort_keys=True).encode()
+        ).hexdigest(),
+        "installer": sha256_file(INSTALLER_PATH),
+        "patches": {
+            entry["patch"]: sha256_file(HERE / entry["patch"])
+            for entry in source["patches"]
+        },
+        "ninja": hashlib.sha256(text.encode()).hexdigest(),
+        "includes": {
+            neutralise(value): _tree_digest(Path(value)) for value in sorted(includes)
+        },
+        "sources": sorted(sources),
+        "toolchain": toolchain,
+        "abi": {
+            label: sha256_file(path) for label, path in sorted(dependencies.items())
+        },
+        "incomplete": sorted(set(incomplete)),
+    }
+    return {"fingerprint": _fingerprint_of(recorded), "inputs": recorded}
+
+
+def _artifact_dir(cache: Path, fingerprint: str) -> Path:
+    return cache / CACHE_SCHEMA / fingerprint
+
+
+def _load_record(path: Path) -> tuple[dict | None, str]:
+    """A cache record, or why this file is not one.
+
+    Any JSON value can sit at this path: an empty list, a bare string, a truncated
+    object, bytes from another schema. None of them may raise their way past a
+    rebuild, so the shape is checked here and everything malformed comes back as a
+    reason to compile.
+    """
+    try:
+        loaded = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, ValueError) as error:
+        return None, f"{path} is not a readable record ({error})"
+    if not isinstance(loaded, dict):
+        return None, f"{path} holds {type(loaded).__name__}, not a record"
+    return loaded, ""
+
+
+def _last_used(cache: Path) -> tuple[str, dict] | None:
+    """The fingerprint and inputs of the artifact this cache last worked with."""
+    try:
+        fingerprint = (cache / CACHE_LATEST).read_text().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    record, _ = _load_record(_artifact_dir(cache, fingerprint) / CACHE_RECORD)
+    if record is None:
+        return None
+    inputs = record.get("inputs")
+    return str(record.get("fingerprint", fingerprint)), (
+        inputs if isinstance(inputs, dict) else {}
+    )
+
+
+def _miss_reason(cache: Path, fingerprint: str, inputs: dict) -> str:
+    """Why the cache cannot answer this build, in the names it is recorded by."""
+    last = _last_used(cache)
+    if last is None:
+        return "no cached module"
+    before, before_inputs = last
+    if before == fingerprint:
+        return "the cached module is incomplete or corrupt"
+    moved = sorted(name for name in inputs if before_inputs.get(name) != inputs[name])
+    return "build inputs changed since {}: {}".format(
+        before[:12], ", ".join(moved or ["the cache schema"])
+    )
+
+
+def _restore(
+    cache: Path, fingerprint: str, name: str, inputs: dict
+) -> tuple[Path | None, str]:
+    """The cached module for this fingerprint, or why there is no such thing.
+
+    Every check is a refusal. The record must be an object that declares this
+    schema, this module and this fingerprint, its own inputs must hash back to that
+    fingerprint so a record cannot be pasted onto another build, and the artifact
+    must be exactly as long and as digestible as the record says. Nothing that fails
+    here is installed quietly.
+    """
+    directory = _artifact_dir(cache, fingerprint)
+    record_path = directory / CACHE_RECORD
+    if not record_path.is_file():
+        return None, _miss_reason(cache, fingerprint, inputs)
+    record, why = _load_record(record_path)
+    if record is None:
+        return None, why
+    for field, wanted in (
+        ("schema", CACHE_SCHEMA),
+        ("fingerprint", fingerprint),
+        ("module", name),
+    ):
+        if record.get(field) != wanted:
+            return None, (
+                f"{record_path} records {field}={record.get(field)!r}, not {wanted!r}"
+            )
+    if not isinstance(record.get("inputs"), dict):
+        return (
+            None,
+            f"{record_path} records its inputs as {type(record.get('inputs')).__name__}",
+        )
+    if _fingerprint_of(record["inputs"]) != fingerprint:
+        return (
+            None,
+            f"{record_path} inputs hash to {_fingerprint_of(record['inputs'])[:12]}, not its own fingerprint",
+        )
+    artifact = directory / (name + CACHE_ARTIFACT_SUFFIX)
+    size = artifact.stat().st_size if artifact.is_file() else None
+    if size is None or size != record.get("artifact_bytes"):
+        return None, (
+            f"{artifact} is "
+            f"{'absent' if size is None else f'{size} bytes'}, the record says "
+            f"{record.get('artifact_bytes')!r}"
+        )
+    actual = sha256_file(artifact)
+    if actual != record.get("artifact_sha256"):
+        return None, (
+            f"{artifact} holds {actual}, the record says "
+            f"{record.get('artifact_sha256')!r}"
+        )
+    return artifact, ""
+
+
+def _note_latest(cache: Path, fingerprint: str) -> None:
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / CACHE_LATEST).write_text(fingerprint + "\n")
+    except OSError as error:
+        print(f"{PREFIX}: could not update {cache}: {error}", file=sys.stderr)
+
+
+def _prune(cache: Path, keep: set[str]) -> None:
+    """Drop every artifact but the ones this cache can still come back to.
+
+    The published fingerprint and the one the cache last used are the current
+    toolchain and the previous one: an environment that flips back and forth between
+    two of them keeps paying one compile instead of two, and nothing else is allowed
+    to accumulate. CACHE_KEEP is that count.
+    """
+    try:
+        directories = [path for path in (cache / CACHE_SCHEMA).iterdir()]
+    except OSError:
+        return
+    for stale in (path for path in directories if path.name not in keep):
+        shutil.rmtree(stale, ignore_errors=True)
+
+
+def _publish(
+    cache: Path, fingerprint: str, name: str, module: Path, inputs: dict
+) -> None:
+    """Carry this build's module to the next one, and keep the footprint bounded."""
+    directory = _artifact_dir(cache, fingerprint)
+    artifact = directory / (name + CACHE_ARTIFACT_SUFFIX)
+    before = _last_used(cache)
+    record = {
+        "schema": CACHE_SCHEMA,
+        "fingerprint": fingerprint,
+        "module": name,
+        "artifact_sha256": sha256_file(module),
+        "artifact_bytes": module.stat().st_size,
+        "inputs": inputs,
+    }
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        temporary = artifact.with_name(artifact.name + ".tmp")
+        shutil.copyfile(module, temporary)
+        temporary.chmod(0o644)
+        os.replace(temporary, artifact)
+        (directory / CACHE_RECORD).write_text(json.dumps(record, indent=2) + "\n")
+    except OSError as error:
+        print(
+            f"{PREFIX}: could not publish {directory}: {error}; the next build "
+            "will compile again",
+            file=sys.stderr,
+        )
+        return
+    _note_latest(cache, fingerprint)
+    keep = [fingerprint] + ([before[0]] if before else [])
+    _prune(cache, set(keep[:CACHE_KEEP]))
+
+
+def build_or_reuse(
+    spec,
+    source: dict,
+    cache: Path | None = None,
+    inputs: dict | None = None,
+    abi: dict[str, Path] | None = None,
+) -> tuple[Path, str]:
+    """The compiled SM120 module, from the fingerprinted cache or from nvcc.
+
+    Without a cache directory this is the build exactly as it always was: write the
+    Ninja file, run it, no fingerprint and no extra read of the environment. With
+    one, the Ninja file is hashed first, because it is the record of the flags and
+    the toolchain the build would run under, and skipping the compile is then the
+    only difference from a cold build: the patched sources, the generated
+    instantiations and the loader's expectations are the same either way.
+
+    A refused entry is reported on stderr and compiled. On a miss the Ninja build
+    directory is removed first, because Ninja is otherwise content to relink the
+    objects its previous inputs left behind and this build would publish code it
+    never compiled under its own new fingerprint; regenerating the build file is the
+    build's own job. Without a cache directory none of this happens.
+    """
+    spec.write_ninja()
+    destination = Path(spec.jit_library_path)
+    if cache is None:
+        spec.build()
+        return destination, "compiled"
+    printed = build_fingerprint(
+        Path(spec.ninja_path).read_text(),
+        source,
+        inputs or build_inputs(spec, os.environ),
+        abi,
+    )
+    fingerprint, manifest = printed["fingerprint"], printed["inputs"]
+    gaps = ", ".join(manifest.get("incomplete") or ())
+    if gaps:
+        print(
+            f"{PREFIX}: the build inputs are not fully identifiable ({gaps}); "
+            "compiling",
+            file=sys.stderr,
+        )
+    else:
+        cached, why = _restore(cache, fingerprint, spec.name, manifest)
+        if cached is None:
+            print(f"{PREFIX}: {why}; compiling", file=sys.stderr)
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_name(destination.name + ".tmp")
+            shutil.copyfile(cached, temporary)
+            temporary.chmod(0o644)
+            os.replace(temporary, destination)
+            _note_latest(cache, fingerprint)
+            return destination, "restored"
+    # A miss means something that changes the code really changed, so the
+    # intermediates from the previous inputs cannot be trusted to be relinked.
+    shutil.rmtree(Path(spec.build_dir))
+    spec.build()
+    _publish(cache, fingerprint, spec.name, destination, manifest)
+    return destination, "compiled"
+
+
 def nvcc_environment(source: dict, package: Path, environ: dict) -> dict:
     """The environment of the build subprocess, and of nothing else.
 
@@ -266,6 +990,7 @@ def nvcc_environment(source: dict, package: Path, environ: dict) -> dict:
     env = dict(environ)
     env["FLASHINFER_CUDA_ARCH_LIST"] = source["cuda_arch_list"]
     env["PENNY_FLASHINFER_ACCEPTED_CSRC"] = str(package / "data" / "csrc")
+    env["PENNY_FLASHINFER_INSTALLER"] = str(INSTALLER_PATH)
     host_cxx = env.get("CUDAHOSTCXX")
     if host_cxx:
         env["CC"] = host_cxx
@@ -310,15 +1035,22 @@ def _build_failure_message(
     )
 
 
-def install_accepted_source(package: Path, source: dict) -> tuple[Path, str]:
+def install_accepted_source(
+    package: Path, source: dict, cache: Path | None = None
+) -> tuple[Path, str]:
     """Build the patched SM120 module and put it where the loader prefers it.
 
     Both guards are cheap and repeated by main() before it patches anything, so
-    a direct caller of this function still cannot reach the import error.
+    a direct caller of this function still cannot reach the import error. With a
+    cache directory the compile itself is the only thing build_or_reuse may skip;
+    everything else here runs the same, and the reported state says which of
+    "restored", "compiled" or "unchanged" this run was.
     """
     require_accepted_pin(source, package)
     require_aligned_jit_cache(source, package)
     env = nvcc_environment(source, package, os.environ)
+    if cache is not None:
+        env["PENNY_FLASHINFER_BUILD_CACHE"] = str(cache)
     persistent = env.get("FLASHINFER_WORKSPACE_BASE")
     stack = (
         nullcontext()
@@ -339,7 +1071,13 @@ def install_accepted_source(package: Path, source: dict) -> tuple[Path, str]:
             )
         except subprocess.CalledProcessError as error:
             raise fail(_build_failure_message(source, env, error)) from error
-        built = Path(result.stdout.strip().splitlines()[-1])
+        reported = result.stdout.strip().splitlines()[-1].split(" ", 1)
+        if len(reported) != 2 or reported[0] not in BUILD_STATES:
+            raise fail(
+                f"the build step reported {reported} instead of a build state and "
+                "the module path it wrote"
+            )
+        state, built = reported[0], Path(reported[1])
         module = source["aot_module"]
         if built.parent.name != module or built.name != f"{module}.so":
             raise fail(f"expected the build to emit {module}/{module}.so, got {built}")
@@ -350,7 +1088,6 @@ def install_accepted_source(package: Path, source: dict) -> tuple[Path, str]:
         temporary = destination.with_name(destination.name + ".tmp")
         shutil.copyfile(built, temporary)
         temporary.chmod(0o644)
-        state = "reinstalled"
         if destination.is_file() and sha256_file(destination) == sha256_file(built):
             temporary.unlink()
             state = "unchanged"
@@ -450,8 +1187,23 @@ def main(argv: list[str] | None = None) -> int:
         metavar="DIR",
         help="recompute the accepted digests from a fresh wheel extraction",
     )
+    parser.add_argument(
+        "--build-cache",
+        type=Path,
+        metavar="DIR",
+        help=(
+            "reuse and publish the compiled module in DIR "
+            "(default: $PENNY_FLASHINFER_BUILD_CACHE, unset means always compile)"
+        ),
+    )
     args = parser.parse_args(argv)
     source = accepted_sources()
+    declared = args.build_cache or (
+        Path(os.environ["PENNY_FLASHINFER_BUILD_CACHE"])
+        if os.environ.get("PENNY_FLASHINFER_BUILD_CACHE")
+        else None
+    )
+    cache = declared.resolve() if declared else None
     try:
         package = (
             args.record.resolve()
@@ -470,11 +1222,12 @@ def main(argv: list[str] | None = None) -> int:
             if not args.apply_only:
                 jobs = os.environ.get("MAX_JOBS", "ninja default")
                 print(
-                    f"building {source['aot_module']} for "
+                    f"installing {source['aot_module']} for "
                     f"FLASHINFER_CUDA_ARCH_LIST={source['cuda_arch_list']} "
-                    f"(MAX_JOBS={jobs})"
+                    f"(MAX_JOBS={jobs}, "
+                    f"build cache {cache if cache else 'disabled'})"
                 )
-                module, state = install_accepted_source(package, source)
+                module, state = install_accepted_source(package, source, cache)
                 print(
                     f"{state} {module} ({module.stat().st_size} bytes, "
                     f"sha256 {sha256_file(module)})"
