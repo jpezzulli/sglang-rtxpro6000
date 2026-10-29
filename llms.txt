@@ -42,10 +42,10 @@ The Froggeric template, defaults, settings and sampling are unchanged;
 custom-tool grammar is prompt guidance, not enforced decoding, and features not
 yet qualified for this release are listed in the 3.1.4 section of
 LIMITATIONS.md. Publication is still open: the first candidate image for this
-range is rejected for release, a replacement image built from the merged
-dependency pins exists only under its build tag, and no release publishes until
-digest and host-native banner checks pass. Until that tag and image
-publish, the current release is Penny Royal 3.1.3, six accepted
+range is rejected for release, and the replacement image built from the merged
+dependency pins has passed host verification, CPU-only test containers and a
+bounded GPU serving smoke but still waits on approval for its tag and release.
+Until that tag and image publish, the current release is Penny Royal 3.1.3, six accepted
 correctness fixes over the 3.1.2 source: Anthropic thinking accepted without a
 `budget_tokens` figure (#124), an explicit `reasoning.effort` on the Responses
 API outranking the launch default, incomplete NIXL file-backed restores refused

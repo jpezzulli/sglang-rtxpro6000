@@ -2,7 +2,8 @@
 
 Penny Royal 3.1.4 improves Claude Code and Codex compatibility for tool
 histories, structured arguments and image results, and makes container dependency
-versions predictable. Publication is pending; 3.1.3 remains published.
+versions predictable. The verified candidate awaits publication approval; 3.1.3 is
+still published.
 
 ## Fixes
 
@@ -22,25 +23,23 @@ versions predictable. Publication is pending; 3.1.3 remains published.
 ## Packaging
 
 Images install the exact dependency versions qualified on the native host, gated
-around the FlashInfer compile and again in the final image (#150); compiled
-artifacts restore only when their recorded inputs match (#147, #148). Custom-tool
-grammar is prompt guidance, not enforced decoding; AutoReview stays optional with
-your settings unchanged; features not yet qualified are in
-[LIMITATIONS.md](LIMITATIONS.md).
+around the FlashInfer compile and in the final image (#150); compiled artifacts
+restore only when their recorded inputs match (#147, #148). Custom-tool grammar is
+prompt guidance, not enforced decoding, AutoReview stays optional, and features not
+yet qualified are in [LIMITATIONS.md](LIMITATIONS.md).
 
 ## Validation
 
 The namespace correction passed 384 tests with 303 subtests on each tested
-dependency pair, and Flash-Next passed live API checks plus the real uncoached
-Codex MCP workflow, replay and image callback. Earlier two-profile evidence (165
-tests with 189 subtests, plus the 27B and Flash-Next runs) is reused as dated
-results; the [release record](release-3.1.4.json) carries the build history.
+dependency pair, and the candidate image passed its own checks, CPU-only test
+containers and a bounded GPU serving smoke. Earlier two-profile evidence (165 tests
+with 189 subtests, plus the 27B and Flash-Next runs) stays as dated results, with
+digests and history in the [release record](release-3.1.4.json).
 
 ## Update
 
-When published, pull `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.4` and restart
-with your existing configuration; update any saved image pin. Native setup:
-[BUILD.md](BUILD.md).
+When published, pull `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.4` and restart with
+your existing configuration; update any saved image pin. Native setup: [BUILD.md](BUILD.md).
 
 ## Thanks
 

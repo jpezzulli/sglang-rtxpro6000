@@ -11,9 +11,10 @@ native-derived dependency baseline as #150, so the release image installs the
 215 exact versions qualified on the native host instead of resolving its own.
 The accepted source is pushed at `work/release-3.1.4-responses-20261028`. The
 `pennyroyal-v3.1.4` tag and the `v3.1.4` image are not published; the replacement
-build 40885090275 completed successfully on 2026-10-29 from the pinned main and
-its image is verified through build and registry metadata only, with GPU serving
-and the host-native banner check still open. Candidate build 40798675809 and its
+build 40885090275 completed successfully on 2026-10-29 from the pinned main, and
+that exact image passed host verification, CPU-only test containers and a bounded
+GPU serving smoke. Publication approval, the tag and the release are what remain.
+Candidate build 40798675809 and its
 rejected image digest, the superseded build 40757589184 and the CI history are
 recorded in [release-3.1.4.json](release-3.1.4.json).
 
