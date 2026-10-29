@@ -1,5 +1,0 @@
-# Keep the CUDA wheel family aligned with the native reference environment.
-torch==2.13.0+cu130
-torchvision==0.28.0+cu130
-torchaudio==2.11.0+cu130
-triton==3.7.1

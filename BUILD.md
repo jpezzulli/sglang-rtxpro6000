@@ -292,6 +292,43 @@ These are the versions used for the release. A fresh native install can
 resolve newer versions of unpinned packages. Use the release container for
 the packaged environment.
 
+<a id="dependency-baseline"></a>
+
+### Dependency baseline and image parity
+
+The release container installs exact versions instead of resolving them.
+`docker/pennyroyal/native-baseline.json` is the one list: one entry per distribution
+of the qualified native environment above, at its exact version including any local
+build tag, classified as a runtime dependency, a build tool, a native-only
+development tool the image excludes, a source build (`nixl`, from the pinned POSIX
+commit below), the editable checkout -- checked against the revision it is built
+from, never against the stale metadata of another checkout -- or the exact version
+of an image-only addition (`types-PyYAML`). Excluding a tool is a claim that nothing
+installed asks for it: `pyelftools` looks like a development tool and ships, because
+the retained Humming wheel requires it unconditionally.
+
+`scripts/pennyroyal/dependency_parity.py` turns that list into the frozen install:
+`requirements` prints arbitrary-equality (`===`) pins, grouped by the one index that
+publishes each exact build so a base version cannot admit a local-tagged sibling,
+and `indexes` names those indexes. `check` verifies an environment, and `refresh`
+re-derives the list from a qualified environment:
+
+```bash
+.venv/bin/python -m pip list --format=json | .venv/bin/python \
+  scripts/pennyroyal/dependency_parity.py refresh      # --write applies it
+```
+
+Read `pip list --format=json` rather than a freeze: the cubin and NIXL wheels are
+direct installs, and a freeze omits the bootstrap tools. A name the list has never
+seen comes back `unclassified` and blocks the build until it is classified, so no
+release version is chosen at build time. The image runs both dependency gates
+before the FlashInfer compile, naming NIXL as the one entry it still owes, and both
+again once NIXL is built; `pennyroyal --check` reruns the parity gate in the
+finished image. Interpreter, missing, extra, version and build-tag drift all fail
+it. The requirement check forgives exactly two things: the five FlashInfer providers
+this target cannot load, and the recorded Humming pair (0.1.12 asked, 0.1.10
+qualified, upgrade deferred).
+
 ### Compiler and build jobs
 
 The examples and launchers default to four build jobs and one NVCC thread.

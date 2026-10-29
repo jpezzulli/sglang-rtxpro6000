@@ -1,12 +1,19 @@
 """CPU-only image check; this does not claim model/GPU qualification."""
 
-import importlib.metadata as metadata
 import importlib.util
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+
+def _step(root: Path, relative: str, name: str):
+    """A packaging module of this checkout, loaded whatever sys.path says."""
+    spec = importlib.util.spec_from_file_location(name, root / relative)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def check_source(root: Path, expected_revision: str = "") -> str:
@@ -56,29 +63,41 @@ def check_flashinfer_sm120(root: Path, stock_kernels: list[Path]) -> dict:
     )
 
 
+def check_baseline_parity(root: Path, source: str) -> dict:
+    """Require the installed environment to be the qualified native baseline.
+
+    The baseline is the one list of versions a release may install, so this
+    reports drift instead of agreeing with a second dictionary of expectations:
+    every shared dependency at its exact version including any local build tag,
+    no native-only development tool, nothing unapproved, and Pennyroyal itself at
+    the version derived from the revision this image was built from. No GPU is
+    involved.
+    """
+    parity = _step(
+        root, "scripts/pennyroyal/dependency_parity.py", "pennyroyal_dependency_parity"
+    )
+    manifest = parity.load()
+    result = parity.check(manifest, parity.installed_versions(), source)
+    problems = parity.report(result)
+    if problems:
+        raise RuntimeError("Dependency parity failed:\n  " + "\n  ".join(problems))
+    return {
+        "baseline": manifest["qualified"]["inspected"],
+        "distributions": len(manifest["packages"]),
+        "python": result["python"],
+        "platform": result["platform"],
+    }
+
+
 def main():
     import nixl
     import torch
 
     root = Path("/opt/pennyroyal")
     source = check_source(root, os.environ.get("PENNY_EXPECTED_SOURCE_REVISION", ""))
-    expected = {
-        "torch": "2.13.0+cu130",
-        "torchvision": "0.28.0+cu130",
-        "torchaudio": "2.11.0+cu130",
-        "flashinfer-python": "0.7.0.post1",
-        "flashinfer-jit-cache": "0.7.0.post1+cu130",
-        "flashinfer-jit-cache-sm120f": "0.7.0.post1+cu130",
-        "sglang-kernel": "0.4.6.post1+cu130",
-        "triton": "3.7.1",
-        "nixl": "1.4.0",
-        "nixl-cu13": "1.4.0",
-    }
-    installed = {name: metadata.version(name) for name in expected}
-    if installed != expected or torch.version.cuda != "13.0":
-        raise RuntimeError(
-            f"Unexpected CUDA package set: {installed}, CUDA={torch.version.cuda}"
-        )
+    dependencies = check_baseline_parity(root, source)
+    if torch.version.cuda != "13.0":
+        raise RuntimeError(f"Unexpected CUDA runtime: {torch.version.cuda}")
     import flashinfer_jit_cache
 
     # 0.7.0 splits the jit cache into arch-specific provider wheels behind a
@@ -126,7 +145,7 @@ def main():
         json.dumps(
             {
                 "source": source,
-                "packages": installed,
+                "dependencies": dependencies,
                 "flashinfer_sm120": sm120,
                 "posix_plugin": "available",
                 "gpu_tested": False,
