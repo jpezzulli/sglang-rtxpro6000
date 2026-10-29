@@ -67,10 +67,14 @@ COMPAT_ACCEPTED_SHA256 = (
 COMPAT_COMMIT = "c84ae2ff261d08bb212f5d72867185876d9d71e7"
 
 
-def installer():
+def installer(*, shared_libraries=False):
     spec = importlib.util.spec_from_file_location("penny_flashinfer_sm120", INSTALLER)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if not shared_libraries:
+        # Most tests use text stand-ins for compiler executables. Exercise ELF
+        # resolution separately with real binaries and in the image probe.
+        module._program_libraries = lambda programs, incomplete: {}
     return module
 
 
@@ -1580,7 +1584,7 @@ def test_the_compiler_queries_are_the_ones_a_real_toolchain_answers(tmp_path):
     to resolve, because an unresolved answer blocks reuse instead of counting as a
     fact about the toolchain.
     """
-    module = installer()
+    module = installer(shared_libraries=True)
     cxx = shutil.which(os.environ.get("CXX") or "c++")
     if cxx is None:
         return
@@ -1607,6 +1611,93 @@ def test_the_compiler_queries_are_the_ones_a_real_toolchain_answers(tmp_path):
             answer,
             sorted(inputs),
         )
+
+
+def test_the_compiler_identity_includes_its_loaded_shared_libraries():
+    module = installer(shared_libraries=True)
+    cxx = shutil.which(os.environ.get("CXX") or "c++")
+    if cxx is None or shutil.which("ldd") is None:
+        pytest.skip("a C++ compiler and ldd are required")
+    compiler = Path(cxx).resolve()
+    _, answers, search = module._driver_queries(compiler)
+    frontend = module._resolved_answer(answers["cc1plus"], search, compiler.parent)
+    assert frontend is not None
+    listed = subprocess.run(["ldd", str(frontend)], capture_output=True, text=True)
+    assert listed.returncode == 0, listed.stderr
+    dependencies = {
+        str(Path(match).resolve())
+        for match in re.findall(r"(?:=>\s+|^\s*)(/\S+)\s+\(", listed.stdout, re.M)
+    }
+    assert dependencies, listed.stdout
+    incomplete = []
+    recorded = module._compiler_inputs(compiler, incomplete)
+    assert incomplete == [], incomplete
+    assert dependencies <= recorded.keys(), dependencies - recorded.keys()
+
+
+def test_changed_compiler_library_bytes_change_identity(tmp_path):
+    module = installer(shared_libraries=True)
+    cc = shutil.which("cc")
+    if cc is None or shutil.which("ldd") is None:
+        pytest.skip("a C compiler and ldd are required")
+    library = tmp_path / "libcompiler_input.so"
+    executable = tmp_path / "compiler"
+    subprocess.run(
+        [cc, "-x", "c", "-shared", "-fPIC", "-o", str(library), "-"],
+        input="int compiler_input(void) { return 1; }\n",
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        [
+            cc,
+            "-x",
+            "c",
+            "-",
+            f"-L{tmp_path}",
+            "-lcompiler_input",
+            f"-Wl,-rpath,{tmp_path}",
+            "-o",
+            str(executable),
+        ],
+        input="extern int compiler_input(void); int main(void) { return compiler_input(); }\n",
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    gaps = []
+    before = module._program_libraries({executable}, gaps)
+    assert gaps == [], gaps
+    assert str(library) in before
+    program_digest = module.sha256_file(executable)
+    with library.open("ab") as handle:
+        handle.write(b"updated library contents\n")
+    after = module._program_libraries({executable}, gaps)
+    assert gaps == [], gaps
+    assert before[str(library)] != after[str(library)]
+    assert module.sha256_file(executable) == program_digest
+    library.unlink()
+    module._program_libraries({executable}, gaps)
+    assert any("not found" in gap for gap in gaps), gaps
+
+
+def test_unresolved_toolchain_library_scan_prevents_reuse(tmp_path, monkeypatch):
+    module = installer(shared_libraries=True)
+    program = tmp_path / "compiler"
+    program.write_bytes(b"\x7fELF fixture")
+
+    def unavailable(*args, **kwargs):
+        raise FileNotFoundError("ldd unavailable")
+
+    monkeypatch.setattr(module.subprocess, "run", unavailable)
+    gaps = []
+    assert module._program_libraries({program}, gaps) == {}
+    assert any("ldd unavailable" in gap for gap in gaps)
+    program.write_text("#!/bin/sh\nexec arbitrary-compiler\n")
+    gaps = []
+    assert module._program_libraries({program}, gaps) == {}
+    assert any("non-ELF" in gap for gap in gaps)
 
 
 def test_the_abi_inputs_are_the_installed_binaries_and_not_their_versions(tmp_path):
@@ -1693,6 +1784,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 
 root, workspace, installer, manifest = map(pathlib.Path, sys.argv[1:5])
@@ -1701,8 +1793,14 @@ cuda = root / "cuda"
 (cuda / "include").mkdir(exist_ok=True)
 (cuda / "nvvm").mkdir(exist_ok=True)
 nvcc = cuda / "bin" / "nvcc"
-nvcc.write_text('#!/bin/sh\necho "Cuda compilation tools, release 13.0, V13.0.48"\n')
-nvcc.chmod(0o755)
+if not nvcc.exists():
+    # A tiny CPU executable answers the generator's version query. No CUDA is
+    # compiled, and the dependency scan can examine a real ELF executable.
+    subprocess.run(
+        [os.environ.get("CXX", "c++"), "-x", "c++", "-o", str(nvcc), "-"],
+        input='#include <stdio.h>\nint main() { puts("Cuda compilation tools, release 13.0, V13.0.48"); }\n',
+        text=True, capture_output=True, check=True,
+    )
 os.environ["CUDA_HOME"] = str(cuda)
 os.environ["FLASHINFER_WORKSPACE_BASE"] = str(workspace)
 source = json.loads(manifest.read_text())

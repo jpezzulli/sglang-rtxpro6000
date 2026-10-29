@@ -417,7 +417,8 @@ record and are not automatically trusted as cache seeds.
 
 After resolving dependencies, the installer fingerprints the generated Ninja
 flags and sources, include trees, linked libraries, CUDA toolchain, actual NVCC
-and host compiler, Python/Torch/TVM FFI binaries, and the accepted patches and
+and host compiler with their resolved shared libraries, Python/Torch/TVM FFI
+binaries, and the accepted patches and
 installer. It compares installed bytes, not just dependency declarations or
 version strings. Temporary workspace paths and the SGLang release revision are
 excluded. The image still checks out the exact requested release source and runs

@@ -458,6 +458,53 @@ def _script_children(script: Path) -> list[Path]:
     return children
 
 
+def _program_libraries(programs: set[Path], incomplete: list[str]) -> dict[str, str]:
+    """Hash the libraries the installed ELF toolchain actually loads.
+
+    A compiler executable can stay unchanged while its MPFR/GMP or other shared
+    libraries change generated code. ldd resolves the complete dependency set
+    using the same environment as the build, including the ELF loader. Unresolved
+    dependencies or opaque compiler wrappers prevent reuse instead of producing
+    an identity that silently omits part of the toolchain.
+    """
+    libraries = {}
+    for program in sorted({path.resolve() for path in programs}):
+        with program.open("rb") as handle:
+            if handle.read(4) != b"\x7fELF":
+                incomplete.append(f"shared dependencies of non-ELF tool {program}")
+                continue
+        try:
+            result = subprocess.run(
+                ["ldd", str(program)],
+                env={**os.environ, "LC_ALL": "C"},
+                capture_output=True,
+                text=True,
+            )
+        except OSError as error:
+            incomplete.append(f"shared dependencies of {program}: {error}")
+            continue
+        output = result.stdout + result.stderr
+        if output.strip() in ("statically linked", "not a dynamic executable"):
+            continue
+        if result.returncode != 0 or not output.strip():
+            incomplete.append(f"ldd could not identify dependencies of {program}")
+            continue
+        for line in output.splitlines():
+            line = line.strip()
+            if not line or line.startswith(("linux-vdso.", "linux-gate.")):
+                continue
+            match = re.fullmatch(r"(?:\S+\s+=>\s+)?(/.+?)\s+\(0x[0-9a-fA-F]+\)", line)
+            if match is None:
+                incomplete.append(f"{program.name} dependency: {line}")
+                continue
+            library = Path(match[1]).resolve()
+            try:
+                libraries[str(library)] = sha256_file(library)
+            except OSError as error:
+                incomplete.append(f"shared dependency {library}: {error}")
+    return libraries
+
+
 def _compiler_inputs(cxx: Path, incomplete: list[str]) -> dict[str, str]:
     """The host compiler and everything it execs, resolves and links, by content.
 
@@ -467,6 +514,7 @@ def _compiler_inputs(cxx: Path, incomplete: list[str]) -> dict[str, str]:
     a fingerprint that cannot see part of its own compiler must not claim reuse.
     """
     inputs = {str(cxx): sha256_file(cxx)}
+    programs = {cxx}
     directories, answers, search = _driver_queries(cxx)
     for directory in directories:
         inputs[f"include:{directory}"] = _tree_digest(Path(directory))
@@ -478,8 +526,11 @@ def _compiler_inputs(cxx: Path, incomplete: list[str]) -> dict[str, str]:
             incomplete.append(f"{cxx.name} answer {name}={answer!r} is not a file")
             continue
         inputs[str(resolved)] = sha256_file(resolved)
+        if name in COMPILER_PROGRAMS:
+            programs.add(resolved)
         for child in _script_children(resolved):
             inputs[str(child)] = sha256_file(child)
+    inputs.update(_program_libraries(programs, incomplete))
     return inputs
 
 
@@ -657,6 +708,17 @@ def build_fingerprint(
             incomplete.append(f"nvcc: {error}")
         else:
             toolchain[str(invoked)] = sha256_file(invoked)
+            programs = {invoked}
+            # NVCC also invokes toolkit helpers such as ptxas and cicc. Their
+            # executable bytes are in the toolkit tree; their loaded libraries
+            # may live outside it and must participate in the same identity.
+            for part in ("bin", "nvvm"):
+                for path in Path(cuda_home, part).rglob("*"):
+                    if path.is_file():
+                        with path.open("rb") as handle:
+                            if handle.read(4) == b"\x7fELF":
+                                programs.add(path)
+            toolchain.update(_program_libraries(programs, incomplete))
     try:
         dependencies = abi if abi is not None else abi_dependency_files()
     except (ImportError, RuntimeError) as error:
