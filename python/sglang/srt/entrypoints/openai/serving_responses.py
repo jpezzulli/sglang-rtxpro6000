@@ -399,25 +399,33 @@ class OpenAIServingResponses(OpenAIServingChat):
                     assert len(tool_list) == 0
                     tool_sessions = {}
                 for i, engine_prompt in enumerate(engine_prompts):
-                    # Calculate default max tokens from context length minus prompt length
-                    if isinstance(engine_prompt, list):
-                        prompt_length = len(engine_prompt)
-                    elif isinstance(engine_prompt, str):
-                        prompt_length = len(tokenizer.encode(engine_prompt))
-                    else:
-                        prompt_length = 0
+                    # The scheduler knows the real input length after image
+                    # expansion. Defer omitted non-Harmony limits to it rather
+                    # than rejecting an overestimated pre-expansion budget
+                    # (upstream PR35524). Preserve explicit/Harmony conversion.
+                    default_max_tokens = None
+                    if self.use_harmony or request.max_output_tokens is not None:
+                        # Calculate default max tokens from context length minus prompt length
+                        if isinstance(engine_prompt, list):
+                            prompt_length = len(engine_prompt)
+                        elif isinstance(engine_prompt, str):
+                            prompt_length = len(tokenizer.encode(engine_prompt))
+                        else:
+                            prompt_length = 0
 
-                    context_len = (
-                        self.tokenizer_manager.model_config.context_len
-                        if hasattr(self.tokenizer_manager.model_config, "context_len")
-                        else 4096
-                    )
-                    # Account for reserved tokens (e.g., EAGLE speculative decoding slots)
-                    # that the tokenizer_manager adds during validation
-                    num_reserved_tokens = self.tokenizer_manager.num_reserved_tokens
-                    default_max_tokens = max(
-                        context_len - prompt_length - num_reserved_tokens, 512
-                    )  # Ensure minimum 512 tokens
+                        context_len = (
+                            self.tokenizer_manager.model_config.context_len
+                            if hasattr(
+                                self.tokenizer_manager.model_config, "context_len"
+                            )
+                            else 4096
+                        )
+                        # Account for reserved tokens (e.g., EAGLE speculative decoding slots)
+                        # that the tokenizer_manager adds during validation
+                        num_reserved_tokens = self.tokenizer_manager.num_reserved_tokens
+                        default_max_tokens = max(
+                            context_len - prompt_length - num_reserved_tokens, 512
+                        )  # Ensure minimum 512 tokens
                     sampling_params = request.to_sampling_params(
                         default_max_tokens,
                         self.default_sampling_params,
