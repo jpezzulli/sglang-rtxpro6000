@@ -41,11 +41,13 @@ namespaces are kept through request validation under pydantic 2.14.1 in #146.
 The Froggeric template, defaults, settings and sampling are unchanged;
 custom-tool grammar is prompt guidance, not enforced decoding, and features not
 yet qualified for this release are listed in the 3.1.4 section of
-LIMITATIONS.md. Publication is still open: the first candidate image for this
-range is rejected for release, the container dependency pins and a replacement
-image are ahead, and no release publishes until digest and host-native banner
-checks pass. Until that tag and image
-publish, the current release is Penny Royal 3.1.3, six accepted
+LIMITATIONS.md. Penny Royal 3.1.4 is published: the released image is the candidate
+built from the merged dependency pins, verified on the host, in CPU-only containers and
+in a bounded GPU serving smoke, and promoted to `v3.1.4` without rebuilding, with the
+`pennyroyal-v3.1.4` tag and release accompanying these records. The first candidate
+image for this range stays rejected and unreused, and the native service keeps its
+working 3.1.4 source with the documented fallback rather than being cut over. The
+previous release is Penny Royal 3.1.3, six accepted
 correctness fixes over the 3.1.2 source: Anthropic thinking accepted without a
 `budget_tokens` figure (#124), an explicit `reasoning.effort` on the Responses
 API outranking the launch default, incomplete NIXL file-backed restores refused

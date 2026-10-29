@@ -1,17 +1,22 @@
 # Penny Royal release history
 
-## 3.1.4 — Accepted Responses, parser and budget scope with the Anthropic tool-reference fix (publication pending)
+## 3.1.4 — Published Responses, parser and budget scope with the Anthropic tool-reference fix
 
 Accepted as the release head `3a4de81398c087bbb8cf25cbe4b8bb67f6f2160b` on
 base `07bf815644d39328f9c05619e7bc05125e701525`, which already carries merged
 #138 and #140. The additions merged as #141-#144 and the release records as #145
 over documentation head `4d668a2d6b`, the Responses namespace correction and the
-container dependency and build-cache work as #146-#148, and the accepted source
-is pushed at `work/release-3.1.4-responses-20261028`. The `pennyroyal-v3.1.4` tag
-and the `v3.1.4` image are not published and a replacement build is still to be
-observed; candidate build 40798675809 and its rejected image digest, the
-superseded build 40757589184 and the CI history are recorded in
-[release-3.1.4.json](release-3.1.4.json).
+container build-cache and dependency parity work as #146-#148, and the accepted
+native-derived dependency baseline as #150, so the release image installs the
+215 exact versions qualified on the native host instead of resolving its own.
+The accepted source is pushed at `work/release-3.1.4-responses-20261028`. Published
+2026-10-29: the approved image is the one built by run 40885090275 from the pinned
+main, verified on the host, in CPU-only containers and in a bounded GPU serving smoke,
+and promoted to `v3.1.4` without rebuilding; the `pennyroyal-v3.1.4` tag and release
+accompany these records. The native service stays on its working 3.1.4 candidate with
+the documented fallback, with no cutover. Candidate build 40798675809 and its
+rejected image digest, the superseded build 40757589184 and the CI history are
+recorded in [release-3.1.4.json](release-3.1.4.json).
 
 - Anthropic histories carrying recognized nested `tool_reference` blocks
   returned HTTP 500 on the bundled Froggeric v22.5 template, which has no
