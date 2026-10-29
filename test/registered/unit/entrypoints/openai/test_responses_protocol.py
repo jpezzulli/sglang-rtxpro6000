@@ -1,6 +1,12 @@
 import json
 import unittest
+from typing import get_args, get_origin
 
+from openai.types.responses import (
+    ResponseCustomToolCall,
+    ResponseFunctionToolCall,
+    ResponseReasoningItem,
+)
 from utils import make_serving  # noqa: F401 — bootstrap import
 
 from sglang.srt.entrypoints.openai.protocol import (
@@ -489,6 +495,165 @@ class ToolChoiceObjectFormTestCase(CustomTestCase):
             ort.ResponseCreatedEvent(
                 type="response.created", sequence_number=0, response=resp.model_dump()
             )
+
+
+def _fields(item):
+    """One input item as the serving layer reads it: SDK objects dump, wire
+    dicts pass through untouched."""
+    if hasattr(item, "model_dump"):
+        item = item.model_dump(exclude_none=True)
+    return item
+
+
+def _call(item_type="function_call", name="run", namespace="one", **extra):
+    item = {
+        "type": item_type,
+        "call_id": "call_1",
+        "name": name,
+        "namespace": namespace,
+    }
+    item["input" if item_type == "custom_tool_call" else "arguments"] = "{}"
+    item.update(extra)
+    return item
+
+
+def _union_members(annotation):
+    for arg in get_args(annotation):
+        yield arg
+        yield from _union_members(arg)
+
+
+class ResponsesInputItemUnionTestCase(CustomTestCase):
+    """``input`` must select the open dict arm before the SDK TypedDict arms.
+
+    Smart union selection lets a TypedDict arm win over the dict arm, and
+    TypedDicts silently discard fields they do not declare -- ``namespace``
+    first, anything newer after it. The loss happened inside request
+    validation, before any adapter or renderer saw the item (pydantic 2.14 /
+    pydantic-core 2.50 regression over openai 2.6.1).
+    """
+
+    def _roundtrip(self, request):
+        return ResponsesRequest.model_validate_json(request.model_dump_json())
+
+    def _assert_fields_survive(self, item):
+        """Every field the client sent must reach the serving layer, both
+        through direct construction and through a JSON revalidation (stored
+        response replay). Null padding a coerced SDK object adds is not field
+        loss; a dropped field is."""
+        request = ResponsesRequest(model="x", store=False, input=[item])
+        for stage, revalidated in (
+            ("validate", request),
+            ("roundtrip", self._roundtrip(request)),
+        ):
+            fields = _fields(revalidated.input[0])
+            for key, value in item.items():
+                self.assertEqual(
+                    fields.get(key, "<dropped>"), value, (stage, key, item)
+                )
+
+    def test_namespaced_function_call_keeps_its_identity(self):
+        self._assert_fields_survive(_call())
+
+    def test_namespaced_custom_tool_call_keeps_its_identity(self):
+        self._assert_fields_survive(
+            _call("custom_tool_call", name="exec", namespace="functions", input="code")
+        )
+
+    def test_fields_the_sdk_does_not_declare_yet_survive(self):
+        self._assert_fields_survive(_call(future_field={"x": 1}))
+
+    def test_constructed_sdk_objects_are_still_accepted(self):
+        function_call = ResponseFunctionToolCall(
+            type="function_call",
+            call_id="call_1",
+            name="run",
+            arguments="{}",
+            namespace="one",
+        )
+        custom_call = ResponseCustomToolCall(
+            type="custom_tool_call",
+            call_id="call_2",
+            name="exec",
+            input="code",
+            namespace="functions",
+        )
+        reasoning = ResponseReasoningItem(
+            id="rs_1",
+            type="reasoning",
+            summary=[],
+            content=[{"type": "reasoning_text", "text": "think"}],
+        )
+        request = ResponsesRequest(
+            model="x", store=False, input=[function_call, custom_call, reasoning]
+        )
+        for revalidated in (request, self._roundtrip(request)):
+            first, second, third = map(_fields, revalidated.input)
+            self.assertEqual(first["namespace"], "one", first)
+            self.assertEqual(second["namespace"], "functions", second)
+            self.assertEqual(second["input"], "code", second)
+            self.assertEqual(third["content"][0]["text"], "think", third)
+
+    def test_the_input_union_still_offers_every_sdk_item_arm(self):
+        # protocol.py binds ResponseInputOutputItem twice; the alias defined
+        # after ResponsesRequest is narrower and must not become the field's.
+        members = list(
+            _union_members(ResponsesRequest.model_fields["input"].annotation)
+        )
+        self.assertTrue(any(get_origin(m) is dict for m in members), members)
+        for arm in (ResponseFunctionToolCall, ResponseCustomToolCall):
+            self.assertIn(arm, members)
+
+    def test_ordinary_wire_items_still_validate(self):
+        self.assertEqual(ResponsesRequest(model="x", input="hello").input, "hello")
+        request = ResponsesRequest(
+            model="x",
+            store=False,
+            input=[
+                {"role": "user", "content": "before"},
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "done",
+                },
+                _call(),
+                {
+                    "type": "additional_tools",
+                    "tools": [{"type": "function", "name": "run", "parameters": {}}],
+                },
+            ],
+        )
+        self.assertEqual(len(request.input), 4)
+        self.assertEqual(_fields(request.input[3])["tools"][0]["name"], "run")
+        self.assertEqual(len(self._roundtrip(request).input), 4)
+
+    def test_invalid_namespace_is_retained_for_the_http_400_path(self):
+        # /v1/responses rejects a non-string namespace itself; validation must
+        # keep the offending value so that rejection names it instead of
+        # reporting a missing one.
+        request = ResponsesRequest(model="x", store=False, input=[_call(namespace=3)])
+        self.assertEqual(_fields(request.input[0]).get("namespace", "<dropped>"), 3)
+        self.assertEqual(
+            _fields(self._roundtrip(request).input[0]).get("namespace", "<dropped>"), 3
+        )
+
+    def test_retired_identities_that_would_collide_stay_distinct(self):
+        # (a, b__c) and (a__b, c) flatten to the same spelling without a
+        # namespace, so history replay cannot rely on the pair surviving.
+        retired = [
+            _call(name="b__c", namespace="a"),
+            _call(name="c", namespace="a__b", call_id="call_2"),
+        ]
+        request = self._roundtrip(
+            ResponsesRequest(model="x", store=False, input=retired)
+        )
+        self.assertEqual(
+            [
+                (_fields(i).get("namespace", "<dropped>"), _fields(i).get("name"))
+                for i in request.input
+            ],
+            [("a", "b__c"), ("a__b", "c")],
+        )
 
 
 if __name__ == "__main__":

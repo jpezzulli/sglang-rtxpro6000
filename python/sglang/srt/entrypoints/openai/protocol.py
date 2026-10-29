@@ -1681,9 +1681,20 @@ class ResponsesRequest(BaseModel):
     ] = None
     # Accept dict-shaped items as the loose arm; downstream normalization
     # handles replayed shapes that don't satisfy every openai TypedDict.
-    # Prefer the open wire object arm: SDK TypedDicts discard newer fields such
-    # as namespace, breaking callback replay even when validation succeeds.
-    input: Union[str, List[Union[Dict[str, Any], ResponseInputOutputItem]]]
+    # Select the dict arm first, deliberately: smart union selection lets the
+    # SDK TypedDict arms win over it, and those TypedDicts discard newer fields
+    # such as namespace, breaking callback replay even when validation
+    # succeeds. Left-to-right keeps wire objects as dicts and still lets
+    # constructed SDK models fall through to their own arm.
+    input: Union[
+        str,
+        List[
+            Annotated[
+                Union[Dict[str, Any], ResponseInputOutputItem],
+                Field(union_mode="left_to_right"),
+            ]
+        ],
+    ]
     instructions: Optional[str] = None
     max_output_tokens: Optional[int] = None
     max_tool_calls: Optional[int] = None
