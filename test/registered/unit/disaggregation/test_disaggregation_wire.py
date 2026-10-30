@@ -834,6 +834,7 @@ class TestQwen4StateWire(unittest.TestCase):
         pool.get_state_layer_ids = lambda: [2]
         pool.page_size = 4
         pool.qsa_compress_ratio = 2
+        pool.qsa_ring_span = pool.qsa_compress_ratio  # single-group ring
         pool.qsa_compressed_page_size = 2
         pool.full_attention_layer_id_mapping = {layer_id: 0}
         pool.qsa_key_state_buffer_pool = [torch.zeros((6, 1, 8), dtype=torch.bfloat16)]
@@ -907,6 +908,7 @@ class TestQwen4StateWire(unittest.TestCase):
         pool.get_state_layer_ids = lambda: [2]
         pool.page_size = 4
         pool.qsa_compress_ratio = 2
+        pool.qsa_ring_span = pool.qsa_compress_ratio  # single-group ring
         pool.qsa_compressed_page_size = 2
         pool.full_attention_layer_id_mapping = {}
         pool.qsa_key_state_buffer_pool = []

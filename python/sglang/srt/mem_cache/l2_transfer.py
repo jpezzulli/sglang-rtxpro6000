@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 from contextlib import contextmanager
 from functools import cache
@@ -13,6 +14,53 @@ from sglang.srt.utils import get_device_module
 
 logger = logging.getLogger(__name__)
 device_module = get_device_module()
+
+
+@contextmanager
+def _ffi_kernel_stream_bridge(enabled: bool):
+    """Bind TVM-FFI's launch stream to the surrounding torch stream context.
+
+    The JIT HiCache copy kernels are TVM-FFI modules: their C++ launchers
+    resolve the stream from TVM-FFI's own thread-local stream table
+    (``TVMFFIEnvGetStream``), and tvm-ffi 0.1.x does not refresh that table
+    when Python enters ``torch.cuda.stream(...)`` -- an unbound FFI launch
+    lands on the FFI default stream while the transfer-completion ACK event
+    is recorded on the dedicated transfer stream, so the ACK can publish
+    before the copy has actually run and the host slots get reused under an
+    in-flight write. Use the dependency's public ``use_torch_stream`` so the
+    prior FFI stream is restored for unrelated JIT calls after submission.
+
+    A no-op is safe only where no JIT kernel can be selected at all: a
+    non-kernel io backend never reaches a JIT entrypoint (the direct path
+    indexes with torch ops), a process without an accelerator submits no
+    device tensors, and without tvm-ffi every JIT HiCache selector
+    (``can_use_write_back_jit_kernel`` and friends) fails its ``load_jit``
+    probe at pool init -- the very flag the copy dispatch reads -- leaving
+    kernel-io submissions to prebuilt sgl-kernel/triton launches that
+    already read the torch current stream.
+
+    Where the dependency IS installed (required on this deployment), a
+    failure to enter the stream context aborts the submission BEFORE the
+    transfer body runs: continuing unbound would launch exactly the
+    ACK-before-copy corruption this bridge exists to prevent. A body
+    exception propagates unchanged and the prior FFI stream is restored by
+    the dependency context's exit either way.
+    """
+    if not (enabled and torch.cuda.is_available()):
+        yield
+        return
+    try:
+        import tvm_ffi
+    except ImportError:
+        logger.debug(
+            "tvm-ffi unavailable: the HiCache JIT selectors could not have "
+            "loaded their modules either, so kernel-io runs on torch-stream-"
+            "honoring launches; skipping the FFI stream binding."
+        )
+        yield
+        return
+    with tvm_ffi.use_torch_stream():
+        yield
 
 
 @cache
@@ -150,7 +198,9 @@ class L2TransferEngine:
             with device_module.stream(stream):
                 prepared_event.wait(stream)
                 ack_start.record()
-                yield prepared, completion
+                # io_backend == "kernel": keep JIT copies inside the ACK span.
+                with _ffi_kernel_stream_bridge(self.io_backend == "kernel"):
+                    yield prepared, completion
                 ack_finish.record()
                 finish_recorded = True
                 self._record_stream(transfers + prepared, stream)

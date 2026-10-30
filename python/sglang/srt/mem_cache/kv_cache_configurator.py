@@ -10,7 +10,10 @@ import msgspec
 import torch
 
 from sglang.srt.arg_groups.kv_cache_hook import draft_rows_refusal
-from sglang.srt.arg_groups.overrides import resolving_view
+from sglang.srt.arg_groups.overrides import (
+    max_speculative_num_draft_tokens,
+    resolving_view,
+)
 from sglang.srt.configs.draft_parallel import DraftParallelLayout
 from sglang.srt.configs.hybrid_arch import (
     hybrid_gdn_config,
@@ -2502,6 +2505,17 @@ class KVCacheConfigurator:
                 qsa_token_topk=qsa_profile.budget,
                 num_request_slots=req_to_token_pool.req_to_token.shape[0],
                 qsa_indexer_dtype=resolve_qsa_indexer_dtype(qsa_indexer_dtype),
+                # The pending ring must span the widest verify window the
+                # launch may ever publish (adaptive step-downs reuse this
+                # allocation; captured graphs bind these buffers). A
+                # non-speculative launch resolves to the historical
+                # single-group layout unchanged.
+                qsa_num_groups=QSATokenToKVPool.pending_ring_num_groups(
+                    max_num_draft_tokens=max_speculative_num_draft_tokens(
+                        self.server_args
+                    ),
+                    compress_ratio=qsa_profile.compress_ratio,
+                ),
             )
         token_to_kv_pool = pool_class(
             page_size=self.pool_page_size,

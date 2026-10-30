@@ -66,11 +66,39 @@ class QSATokenToKVPool(HybridLinearKVPool):
         compressed_dtype: torch.dtype = torch.bfloat16,
     ) -> int:
         """Per-token QSA index-cache cost: compressed keys only;
-        the per-request pending ring is budgeted with the other per-request buffers."""
+        the per-request pending ring is budgeted with the other per-request buffers.
+
+        The ring holds ``compress_ratio * qsa_num_groups`` slots per request
+        (the groups a verify window can still touch), so its total stays
+        bounded by the request-slot count and outside this per-token budget.
+        """
         index_k_bytes = _index_k_bytes(
             kv_heads=kv_heads, head_dim=head_dim, dtype=compressed_dtype
         )
         return index_k_bytes // compress_ratio * num_layers
+
+    @classmethod
+    def pending_ring_num_groups(
+        cls, *, max_num_draft_tokens, compress_ratio: int
+    ) -> int:
+        """Groups the pending ring must hold so the widest window it is sized
+        for fits without a within-forward collision.
+
+        Delegates to ``qsa.metadata.pending_ring_groups_required`` (see that
+        docstring for the window-plus-retained-prefix span and for why only
+        the one-row window keeps the shipped single-group layout). The count
+        is derived from the LAUNCH-MAXIMUM draft-token window, never the
+        active one: a narrower active width (an adaptive-MTP step-down) must
+        reuse this allocation, because CUDA graphs bind the ring buffers for
+        the graph's lifetime and geometry cannot be resized mid-serve.
+        """
+        from sglang.srt.layers.attention.qsa.metadata import (
+            pending_ring_groups_required,
+        )
+
+        return pending_ring_groups_required(
+            draft_tokens=max_num_draft_tokens, compress_ratio=compress_ratio
+        )
 
     def __init__(
         self,
@@ -88,6 +116,7 @@ class QSATokenToKVPool(HybridLinearKVPool):
         qsa_compress_ratio: int,
         qsa_token_topk: int,
         num_request_slots: int,
+        qsa_num_groups: int = 1,
         enable_memory_saver: bool = False,
         enable_kv_cache_copy: bool = False,
         start_layer: Optional[int] = None,
@@ -161,16 +190,31 @@ class QSATokenToKVPool(HybridLinearKVPool):
         # seen by the scoring kernels is one full-KV page's worth of groups.
         self.qsa_compressed_page_size = page_size // self.qsa_compress_ratio
         self.qsa_compressed_capacity = -(state_size // -self.qsa_compress_ratio)
-        # Pre-compression index-K state is a per-request ring, not a per-token cache:
-        # only the pending group's ``ratio`` members must survive a forward,
-        # addressed as ``req_pool_idx * ratio + position % ratio``.
-        # Request slot 0 is never allocated, so rows [0, ratio) are the inert dump.
+        # Pre-compression index-K state is a per-request ring, not a per-token
+        # cache: the groups a verify window can still touch must survive a
+        # forward, addressed as
+        # ``req_pool_idx * ratio * qsa_num_groups
+        #   + (position // ratio) % qsa_num_groups * ratio + position % ratio``
+        # (see qsa.metadata.pending_ring_slot; every producer derives slots
+        # from the same count). A verify forward publishes its whole window
+        # before compressing the groups it completes, and the first completed
+        # group may still read retained prefix members, so one group per
+        # request only fits a one-row window; ``qsa_num_groups`` sizes the
+        # ring for the launch-maximum window (pending_ring_num_groups).
+        # Request slot 0 is never allocated, so its whole span is inert:
+        # ring rows [0, ratio) double as the dump target for tokens whose
+        # group already compressed in the same forward, and that region stays
+        # disjoint from every allocated request at any group count.
         if num_request_slots <= 0:
             raise ValueError(
                 f"QSA pending ring needs request slots, got {num_request_slots}"
             )
+        if qsa_num_groups < 1:
+            raise ValueError(f"QSA pending ring needs groups, got {qsa_num_groups}")
         self.qsa_num_request_slots = int(num_request_slots)
-        ring_slots = self.qsa_num_request_slots * self.qsa_compress_ratio
+        self.qsa_num_groups = int(qsa_num_groups)
+        self.qsa_ring_span = self.qsa_compress_ratio * self.qsa_num_groups
+        ring_slots = self.qsa_num_request_slots * self.qsa_ring_span
         # These buffers participate in Mooncake PD transfer just like the base
         # KV and Mamba pools.  Keep their allocation in the same memory-saver
         # and Mooncake custom-pool regions; otherwise MNNVL cannot resolve the
@@ -273,7 +317,13 @@ class QSATokenToKVPool(HybridLinearKVPool):
         )
 
     def get_qsa_pending_state_buf_infos(self):
-        """Per-request pending key-state and RoPE ring transfer buffers."""
+        """Per-request pending key-state and RoPE ring transfer buffers.
+
+        A pending-state "page" is one request's whole ring: the PD payload
+        addresses it by ``req_pool_idx``, so the per-page item length covers
+        ``qsa_ring_span`` rows (equal to the historical ratio rows whenever
+        the ring holds one group).
+        """
         # A PP stage without a local QSA layer never writes the shared RoPE
         # ring.  Do not register it as a transfer source: otherwise that stage
         # can race with a QSA-owning stage and overwrite valid positions with
@@ -283,7 +333,7 @@ class QSATokenToKVPool(HybridLinearKVPool):
         tensors = [*self.qsa_key_state_buffer_pool, self.qsa_rope_position_buffer]
         return self._get_paged_state_buf_infos(
             tensors,
-            self.qsa_compress_ratio,
+            self.qsa_ring_span,
         )
 
     def get_qsa_pending_state_layer_ids(self):

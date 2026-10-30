@@ -552,7 +552,9 @@ class TestNixlUnified(CustomTestCase):
         """Zero-copy MLA batch_exists counts one storage key per logical key."""
         self.hicache.is_zero_copy = True
         self.hicache.is_mla_model = True
-        self.hicache.agent.query_memory = lambda *a, **kw: [object(), None]
+        # FILE existence is payload-validated: the fake matches what the
+        # posix backend's query_memory returns (size dict, or None).
+        self.hicache.agent.query_memory = lambda *a, **kw: [{"size": 4096}, None]
 
         self.assertEqual(self.hicache.batch_exists(["key1", "key2"]), 1)
 
@@ -561,8 +563,8 @@ class TestNixlUnified(CustomTestCase):
         self.hicache.is_zero_copy = True
         self.hicache.is_mla_model = False
         self.hicache.agent.query_memory = lambda *a, **kw: [
-            object(),
-            object(),
+            {"size": 4096},
+            {"size": 4096},
             None,
             None,
         ]

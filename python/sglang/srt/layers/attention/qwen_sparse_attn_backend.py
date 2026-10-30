@@ -32,6 +32,8 @@ from sglang.srt.layers.attention.qsa.metadata import (
     build_pending_ring_slots,
     build_rope_position_matrix,
     compressed_decode_view,
+    pending_ring_groups,
+    pending_ring_groups_required,
 )
 from sglang.srt.layers.attention.qsa.sparse_attn import (
     pack_qsa_prefill_kv,
@@ -289,13 +291,26 @@ class QwenSparseAttnBackend(AttentionBackend):
                 "Qwen QSA target verification supports only speculative_eagle_topk=1"
             )
         draft_tokens = int(getattr(spec_info, "draft_token_num", 0) or 0)
-        if draft_tokens > self.compress_ratio:
-            # The pending-group ring keys state by position % ratio; a verify
-            # window wider than the ratio would collide within one forward.
+        required_groups = pending_ring_groups_required(
+            draft_tokens=draft_tokens, compress_ratio=self.compress_ratio
+        )
+        held_groups = pending_ring_groups(self.token_to_kv_pool)
+        if required_groups > held_groups:
+            # A paged verify forward publishes its whole window into the
+            # pending ring before compressing any group it completes, and
+            # the first completed group may still read retained prefix
+            # members; the ring must keep that span apart (see
+            # qsa.metadata.pending_ring_groups_required for the span and for
+            # why only the one-row window fits one group -- an unaligned
+            # 2..ratio-row window overwrote a live member that a
+            # ratio-wide bound let through).
             raise NotImplementedError(
-                "Qwen QSA requires speculative_num_draft_tokens <= the QSA "
-                f"compress ratio ({self.compress_ratio}): the pending "
-                f"index-key ring holds one group; got {draft_tokens}"
+                "Qwen QSA target verify needs a pending index-key ring of "
+                f"{required_groups} compression groups for "
+                f"speculative_num_draft_tokens={draft_tokens} at compress "
+                f"ratio {self.compress_ratio}; the pool's ring holds "
+                f"{held_groups}. Size the launch with the widest draft "
+                "window it may serve."
             )
 
     @staticmethod
@@ -735,6 +750,7 @@ class QwenSparseAttnBackend(AttentionBackend):
                 logical_positions=ring_logical_positions,
                 compress_ratio=self.compress_ratio,
                 is_extend=group_member_rows is not None,
+                num_groups=pending_ring_groups(self.token_to_kv_pool),
             )
             if write_locs.numel():
                 if group_member_rows is not None:
@@ -752,6 +768,7 @@ class QwenSparseAttnBackend(AttentionBackend):
                         group_end_positions=group_positions.long(),
                         sequence_ids=group_sequence_ids.long(),
                         compress_ratio=self.compress_ratio,
+                        num_groups=pending_ring_groups(self.token_to_kv_pool),
                     )
         indexer_metadata = QSAIndexerMetadata(
             sequence_lengths=sequence_lengths,
@@ -919,7 +936,6 @@ class QwenSparseAttnBackend(AttentionBackend):
         forward_mode,
         spec_info,
     ) -> None:
-        self._require_chain_speculation(forward_mode, spec_info)
         if self.token_to_kv_pool is None:
             self.token_to_kv_pool = getattr(self.runner, "token_to_kv_pool", None)
             self._fused_kv_pool_eligible = self._supports_fused_kv_pool(
@@ -929,6 +945,10 @@ class QwenSparseAttnBackend(AttentionBackend):
             req_pool = getattr(self.runner, "req_to_token_pool", None)
             self.req_to_token = getattr(req_pool, "req_to_token", None)
             self.req_to_token_pool = req_pool
+        # After pool resolution: the verify-window guard asks the ring its
+        # pool-side capacity, and capture is where an unresolved pool first
+        # becomes one.
+        self._require_chain_speculation(forward_mode, spec_info)
         if self._graph_seq_lens is None or self.token_to_kv_pool is None:
             raise RuntimeError("QSA CUDA graph state is not initialized")
         pool = self.token_to_kv_pool
@@ -1180,6 +1200,7 @@ class QwenSparseAttnBackend(AttentionBackend):
                 logical_positions=current_positions,
                 compress_ratio=ratio,
                 is_extend=False,
+                num_groups=pending_ring_groups(pool),
             )
         )
         metadata.graph_ring_group_locs.copy_(
@@ -1188,6 +1209,7 @@ class QwenSparseAttnBackend(AttentionBackend):
                 group_end_positions=current_positions,
                 sequence_ids=metadata.token_to_batch_idx.long(),
                 compress_ratio=ratio,
+                num_groups=pending_ring_groups(pool),
             ).to(torch.int32)
         )
 
