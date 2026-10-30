@@ -911,6 +911,8 @@ class MambaPoolHost(HostKVCache):
 
         Only page-first layouts are supported for mamba storage zero-copy because
         each page slot in temporal/conv buffers is directly addressable.
+        Storage selectors must ask ``supports_storage_zero_copy`` before
+        calling; this guard is the fail-loud backstop for direct callers.
         """
         if self.slot_state_device_tensors:
             raise NotImplementedError(
@@ -972,6 +974,14 @@ class MambaPoolHost(HostKVCache):
                 ptr_list.append(conv_ptr)
                 element_size_list.append(conv_element_sizes[j])
         return ptr_list, element_size_list
+
+    def supports_storage_zero_copy(self) -> bool:
+        """Registered side states share the checkpoint slot but not the
+        temporal/conv descriptors, so a direct-descriptor page would omit
+        them; the whole-page bounce path (get_data_page /
+        set_from_flat_data_page) is the complete representation. Both
+        fail-loud declarations below defer to this single predicate."""
+        return not self.slot_state_device_tensors
 
     def is_stride_page_aligned(self, page_size_bytes: int = 4096) -> bool:
         if self.slot_state_device_tensors:

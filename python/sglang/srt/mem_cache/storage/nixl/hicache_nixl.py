@@ -502,6 +502,20 @@ class HiCacheNixl(HiCacheStorage):
             and hasattr(host_pool, "get_hybrid_pool_buffer")
         ):
             return False
+        if not host_pool.supports_storage_zero_copy():
+            # The host cannot export a complete page (every component buffer
+            # and every registered slot-side state) through direct
+            # descriptors: use the whole-page bounce path, whose payload is
+            # get_data_page/set_from_flat_data_page. Asked independently of
+            # the alignment gate below -- state completeness matters to
+            # every storage mode, alignment only to O_DIRECT.
+            logger.info(
+                "HiCacheNixl: hybrid host pool %s does not carry complete "
+                "page state in zero-copy descriptors; using whole-page "
+                "bounce storage.",
+                host_pool_name,
+            )
+            return False
         buffers = host_pool.get_hybrid_pool_buffer()
         if not buffers:
             return False

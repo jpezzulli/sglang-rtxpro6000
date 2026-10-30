@@ -41,6 +41,7 @@ class MockHybridPool:
         self.dtype = torch.uint8
         self.device = "cpu"
         self.pin_memory = False
+        self.expose_zero_copy = expose_zero_copy
         self.temporal_buffer = torch.zeros(
             (num_pages * page_size, component_bytes), dtype=self.dtype
         )
@@ -49,6 +50,15 @@ class MockHybridPool:
         ]
         if expose_zero_copy:
             self.get_hybrid_pool_buffer = self._get_hybrid_pool_buffer
+
+    def supports_storage_zero_copy(self):
+        # HostKVCache capability contract: this mock's direct descriptors are
+        # complete (temporal + conv, no registered slot side state), so the
+        # zero-copy-exposing fixture answers True; the explicit
+        # expose_zero_copy=False path (no buffer set to register) declares
+        # itself not zero-copy capable, mirroring a pool whose page would
+        # omit state.
+        return self.expose_zero_copy
 
     def _get_hybrid_pool_buffer(self):
         return [self.temporal_buffer, *self.conv_buffer]

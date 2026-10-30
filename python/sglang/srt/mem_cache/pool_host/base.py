@@ -580,6 +580,21 @@ class HostKVCache(abc.ABC):
         )
         return False
 
+    def supports_storage_zero_copy(self) -> bool:
+        """Whether whole-page export through ``get_page_buffer_meta`` is complete.
+
+        Storage plugins prefer zero-copy descriptors when the host pool can
+        represent a full checkpoint page -- every component buffer AND every
+        registered slot-side state -- as direct ``(ptr, size)`` regions.
+        A pool whose descriptors would omit state that
+        ``get_data_page``/``set_from_flat_data_page`` serialize must answer
+        False and let plugins use the whole-page bounce path (the contract
+        whole-page storage backends already use). This is a capability
+        statement, distinct from ``is_stride_page_aligned``: alignment only
+        concerns O_DIRECT, state completeness concerns every storage tier.
+        """
+        return True
+
     @synchronized
     def clear(self):
         # Initialize memory states and tracking structures.
