@@ -1,0 +1,51 @@
+From c84ae2ff261d08bb212f5d72867185876d9d71e7 Mon Sep 17 00:00:00 2001
+From: Penny <Pennyroyal@agentmail.to>
+Date: Fri, 9 Oct 2026 14:35:52 -0400
+Subject: [PATCH] Do not require the ASAN header from a non-ASAN SM120 build
+
+nvcc's host pass fails `common_memoryUtils.cuda.o` on any toolchain whose
+compiler package does not install the sanitizer headers, because the file asked
+for <sanitizer/asan_interface.h> unconditionally while using its macros only
+under its own TLLM_HAS_ASAN detection. Fedora 44's gcc-15.3.1 package is one such
+toolchain, and the same package set backs the published image, so the carried
+SM120 build could not compile this translation unit at all.
+
+The header is now asked for under the same condition the macros are used under.
+The condition is restated rather than reusing TLLM_HAS_ASAN, because the file
+defines that macro inside the namespace it opens, and a system header does not
+belong inside a namespace; the two branches are copied verbatim from the
+detection directly below, so they cannot drift without the macros disappearing.
+
+An ASAN-enabled build is unchanged: it still requires, and still receives, the
+real header. Nothing else in the file moves -- no stub header, no widened include
+path, no arithmetic, dispatch or toolchain change. Paths are relative to the
+site-packages directory the step is installing into, rather than the absolute
+site-packages paths the two accepted mailboxes name, so the step keeps working
+wherever the selected interpreter puts its packages.
+---
+ .../data/csrc/nv_internal/cpp/common/memoryUtils.cu       | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/flashinfer/data/csrc/nv_internal/cpp/common/memoryUtils.cu b/flashinfer/data/csrc/nv_internal/cpp/common/memoryUtils.cu
+index 48b7df9..4f71988 100644
+--- a/flashinfer/data/csrc/nv_internal/cpp/common/memoryUtils.cu
++++ b/flashinfer/data/csrc/nv_internal/cpp/common/memoryUtils.cu
+@@ -15,7 +15,15 @@
+  */
+ 
+ #include <curand_kernel.h>
++// ASAN_POISON_MEMORY_REGION and ASAN_UNPOISON_MEMORY_REGION are used below only
++// under this file's own TLLM_HAS_ASAN detection, and the ASAN interface header
++// provides nothing else this translation unit needs. Compiler packages do not
++// universally install that header, so ask for it under the same condition the
++// macros are used under. An ASAN-enabled build still requires the real header.
++#if defined(__SANITIZE_ADDRESS__) || \
++    (defined(__has_feature) && __has_feature(address_sanitizer))
+ #include <sanitizer/asan_interface.h>
++#endif
+ #include <sys/stat.h>
+ 
+ #include <unordered_map>
+-- 
+2.56.0
+

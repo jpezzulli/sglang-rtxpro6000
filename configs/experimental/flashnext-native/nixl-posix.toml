@@ -1,0 +1,11 @@
+# Qualified on a dedicated Samsung 9100 PRO XFS volume with NIXL POSIX,
+# io_uring, and O_DIRECT. These are whole-filesystem occupancy percentages,
+# not a directory byte quota. Recalculate them for the selected filesystem.
+use_direct_io = true
+l3_cleaner_enabled = true
+l3_cleaner_high_watermark = 54.6
+l3_cleaner_low_watermark = 53.0
+
+[plugin.posix]
+active = true
+use_uring = "true"

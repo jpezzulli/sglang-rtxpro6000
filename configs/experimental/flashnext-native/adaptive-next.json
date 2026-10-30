@@ -1,0 +1,21 @@
+{
+  "_comment": [
+    "Pennyroyal Next width policy: pass this file as --speculative-adaptive-config.",
+    "Keys are batch-size floors and candidate steps are speculative_num_steps; at topk=1 a",
+    "width's draft-token count is steps+1, so C1 is fixed at W8 (steps 7) and every batch of",
+    "two or more is fixed at W4 (steps 3). This is concurrency routing, not acceptance-driven",
+    "adaptation: one candidate per tier means the width is a lookup on the batch size and the",
+    "acceptance EMA can never move it, so no hysteresis or hold/backoff keys are needed or",
+    "honoured here.",
+    "Launch for it: --speculative-num-steps 7 --speculative-num-draft-tokens 8 (a candidate",
+    "wider than the launch width is refused, not resized, under captured graphs) and a BS1",
+    "bucket in --cuda-graph-bs-decode for the W8 state; without BS1 a C1 batch pads up into",
+    "the C>=2 tier and stays W4."
+  ],
+  "1": {
+    "candidate_steps": [7]
+  },
+  "2": {
+    "candidate_steps": [3]
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "_comment": [
+    "Pennyroyal Next fixed-W4 width policy: pass this file as --speculative-adaptive-config.",
+    "Keys are batch-size floors and candidate steps are speculative_num_steps; at topk=1 a",
+    "width's draft-token count is steps+1, so every concurrency, one request or many, is fixed",
+    "at W4 (steps 3). One candidate per tier means the width is a lookup on the batch size and",
+    "the acceptance EMA can never move it, so no hysteresis or hold/backoff keys are needed or",
+    "honoured here, and the narrowest launch is enough.",
+    "Launch for it: --speculative-num-steps 3 --speculative-num-draft-tokens 4. No BS1 W8",
+    "decode bucket is ever entered, so the C1 batch never pads up into a wider tier."
+  ],
+  "1": {
+    "candidate_steps": [3]
+  },
+  "2": {
+    "candidate_steps": [3]
+  }
+}
