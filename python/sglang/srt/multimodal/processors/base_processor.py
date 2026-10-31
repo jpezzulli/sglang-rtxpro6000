@@ -252,6 +252,10 @@ class BaseMultimodalProcessor(ABC):
     # Set by processors that already build input_ids from the request's own
     # tokens, so the retokenize-avoidance rebuild below has nothing to add.
     preserve_processor_input_ids = False
+    # Processors whose own process_mm_data hard-codes the fast-processor
+    # device must say so: an explicit SGLANG_MM_PREPROCESS_DEVICE selection
+    # is then rejected for them at call time, never silently ignored.
+    routes_mm_preprocess_device = True
     # None lets the worker count follow where preprocessing actually runs; a
     # model that measured its own optimum assigns a number instead. See
     # `_resolve_auto_mm_processor_worker_num`.
@@ -938,20 +942,25 @@ class BaseMultimodalProcessor(ABC):
                 yield
 
     def _require_preprocess_backend_supports_selection(self) -> None:
-        """An explicit CUDA selection must not be downgraded after validation.
+        """An explicit device selection must never be silently dropped.
 
         The constructor rejects ``SGLANG_MM_PREPROCESS_DEVICE=cuda:N`` with a
         PIL (slow) image processor backend; a subclass that forces that flag
-        after ``super().__init__()`` must fail the same way at request time
-        instead of silently skipping device routing while image decode still
-        honors the selection.
+        after ``super().__init__()``, or that pins its own fast-processor
+        device instead of routing the selection, must fail the same way at
+        request time instead of silently skipping device routing while image
+        decode still honors the selection.
         """
         preprocess_device = getattr(self, "mm_preprocess_device", None)
-        if (
-            preprocess_device is not None
-            and preprocess_device.startswith("cuda:")
-            and self.disable_fast_image_processor
-        ):
+        if preprocess_device is None:
+            return
+        if not self.routes_mm_preprocess_device:
+            raise ValueError(
+                f"{type(self).__name__} preprocessing pins its own device; "
+                "SGLANG_MM_PREPROCESS_DEVICE must stay unset for this model "
+                "(no device-parked preprocessing here)."
+            )
+        if preprocess_device.startswith("cuda:") and self.disable_fast_image_processor:
             raise ValueError(
                 "SGLANG_MM_PREPROCESS_DEVICE selects CUDA, but the PIL image "
                 "processor backend is configured. Enable the supported fast "
@@ -1385,6 +1394,9 @@ class BaseMultimodalProcessor(ABC):
         discard_alpha_channel: bool = True,
         audio_sample_rate: Optional[int] = None,
     ) -> BaseMultiModalProcessorOutput:
+        # Fail before any decode when this processor cannot honor the selection.
+        self._require_preprocess_backend_supports_selection()
+
         BaseMultimodalProcessor.validate_mm_data(image_data, video_data, audio_data)
 
         input_ids = prompt if isinstance(prompt, list) else None

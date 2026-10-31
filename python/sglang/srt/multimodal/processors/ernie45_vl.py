@@ -220,6 +220,10 @@ async def preprocess_video(
 # Compatible with Ernie-VL Series
 class Ernie4_5_VLImageProcessor(SGLangBaseProcessor):
     models = [Ernie4_5_VLMoeForConditionalGeneration]
+    # process_mm_data below pins device="cuda" for the fast processor instead
+    # of routing SGLANG_MM_PREPROCESS_DEVICE, so an explicit selection must
+    # fail rather than be silently ignored.
+    routes_mm_preprocess_device = False
 
     def __init__(self, hf_config, server_args, _processor, *args, **kwargs):
         super().__init__(hf_config, server_args, _processor, *args, **kwargs)
@@ -293,6 +297,9 @@ class Ernie4_5_VLImageProcessor(SGLangBaseProcessor):
         """
         process multimodal data with transformers AutoProcessor
         """
+        # This override pins its own device; refuse an explicit selection
+        # before decode or the pinned call below can silently ignore it.
+        self._require_preprocess_backend_supports_selection()
         if images:
             kwargs["images"] = images
             if self.image_config:

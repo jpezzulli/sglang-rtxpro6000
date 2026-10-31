@@ -419,6 +419,92 @@ class TestFastImageProcessorMemoryPool(CustomTestCase):
         )
 
 
+class TestBypassingProcessorSelection(CustomTestCase):
+    """Ernie4.5-VL's own process_mm_data pins device='cuda'.
+
+    An explicit selection must fail there -- preferably before any decode --
+    while the unset behavior (pinned cuda) is preserved exactly.
+    """
+
+    ERNIE = "sglang.srt.multimodal.processors.ernie45_vl"
+
+    def setUp(self):
+        reset_context()
+        self.addCleanup(reset_context)
+
+    def _processor(self, device):
+        from sglang.srt.multimodal.processors.ernie45_vl import (
+            Ernie4_5_VLImageProcessor,
+        )
+
+        processor = object.__new__(Ernie4_5_VLImageProcessor)
+        if device is not None:
+            processor.mm_preprocess_device = device
+        return processor
+
+    def test_explicit_selection_fails_before_the_pinned_call(self):
+        for device in ("cpu", "cuda:1"):
+            with self.subTest(device=device):
+                hf_processor = Mock()
+                processor = self._processor(device)
+                with self.assertRaisesRegex(
+                    ValueError, "SGLANG_MM_PREPROCESS_DEVICE"
+                ):
+                    processor.process_mm_data("test", processor=hf_processor)
+                hf_processor.assert_not_called()
+                with self.assertRaisesRegex(
+                    ValueError, "SGLANG_MM_PREPROCESS_DEVICE"
+                ):
+                    asyncio.run(processor.fast_load_mm_data("test", Mock()))
+                # The load funnel guards before decode, too.
+                with self.assertRaisesRegex(
+                    ValueError, "SGLANG_MM_PREPROCESS_DEVICE"
+                ):
+                    asyncio.run(
+                        processor.load_mm_data("test", Mock(), image_data=[b"x"])
+                    )
+
+    def test_unset_selection_keeps_the_pinned_device(self):
+        class ImageProcessor:
+            pass
+
+        seen = []
+
+        class Processor:
+            image_processor = ImageProcessor()
+            tokenizer = None
+
+            def __call__(self, **kwargs):
+                seen.append(kwargs.get("device"))
+                return {"images": None}
+
+        processor = self._processor(None)
+        processor.image_config = {}
+        processor.video_config = {}
+        processor.disable_fast_image_processor = False
+        processor.use_cuda_ipc = True
+        with patch.multiple(
+            self.ERNIE, _is_npu=False, BaseImageProcessor=ImageProcessor
+        ):
+            result = processor.process_mm_data("test", processor=Processor())
+        self.assertEqual(seen, ["cuda"])
+        self.assertEqual(result, {})
+
+    def test_supported_selections_stay_rejected_only_for_the_bypass(self):
+        from sglang.srt.multimodal.processors.ernie45_vl import (
+            Ernie4_5_VLImageProcessor,
+        )
+
+        self.assertFalse(Ernie4_5_VLImageProcessor.routes_mm_preprocess_device)
+        self.assertTrue(BaseMultimodalProcessor.routes_mm_preprocess_device)
+        processor = _make(base_gpu_id=0)
+        processor.disable_fast_image_processor = False
+        for device in ("cpu", "cuda:1"):
+            with self.subTest(device=device):
+                processor.mm_preprocess_device = device
+                processor._require_preprocess_backend_supports_selection()
+
+
 class TestGpuOomCpuRetryScope(CustomTestCase):
     """CPU-retry policy must clean the device that actually failed."""
 
