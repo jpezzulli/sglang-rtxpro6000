@@ -291,6 +291,11 @@ explains cache sizing, GPU selection, concurrency, and startup.
 The first start compiles kernels and captures CUDA graphs. Wait for the
 server-ready message, then [check the API](RUN.md#smoke-through-the-normal-api).
 
+**Help shape Penny Royal’s optimization priorities.** [Share your deployment and
+workload](https://github.com/jpezzulli/sglang-rtxpro6000/discussions/154). Your
+hardware, model, typical context size, concurrency, and biggest bottleneck help
+guide future performance, memory, serving, and compatibility work.
+
 ## Built for the way we use it
 
 Penny Royal started as my home runtime on thegrid. I wanted long conversations
