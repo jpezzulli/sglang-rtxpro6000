@@ -152,6 +152,27 @@ class EnvBool(EnvField):
         raise ValueError(f'"{value}" is not a valid boolean value')
 
 
+class EnvOptionalBool(EnvBool):
+    """Tri-state boolean: unset or blank reads as ``None`` (automatic).
+
+    For path selections where absence is itself the decision -- the runtime
+    applies its documented default selection -- while a saved explicit
+    true/false is honored verbatim as the compatibility/debug escape hatch. A
+    non-blank value that is not boolean still fails loudly.
+    """
+
+    def __init__(self, default: Any = None, secret: bool = False):
+        if default is not None:
+            raise ValueError("EnvOptionalBool only defaults to automatic (None)")
+        super().__init__(None, secret=secret)
+
+    def get(self) -> Any:
+        value = os.getenv(self.name)
+        if value is None or not value.strip():
+            return None
+        return self.parse(value)
+
+
 class EnvInt(EnvField):
     def parse(self, value: str) -> int:
         try:
@@ -1235,6 +1256,18 @@ class Envs:
     # since the block-scale MoE kernel lacks SwiGLU-OAI
     SGLANG_FORCE_MXFP8_BLOCK_CONVERT_DENSE = EnvBool(False)
     SGLANG_FP8_IGNORED_LAYERS = EnvStr("")
+    # Flash-Next (qwen4_exp) online row-wise FP8 on exact SM120. Unset or blank
+    # selects automatically from the loaded checkpoint metadata and the assigned
+    # device: eligible BF16 transformer projections (attention, GDN in/out,
+    # dense and shared-expert MLP, QSA indexer where the shape allows) and the
+    # output head become E4M3 with one FP32 scale per output channel, while
+    # NVFP4 experts, routers, PLE, BF16 GDN recurrent state and the
+    # HyperConnection mix weights keep their checkpoint representation. A saved
+    # explicit false/true is the private escape hatch; an explicit request on
+    # unsupported hardware fails boot. Selection is a representation change, so
+    # cache identities must key on the effective precision (see
+    # sglang.kernels.ops.gemm.sm120_online_fp8), not on this Boolean.
+    SGLANG_SM120_ONLINE_MXFP8 = EnvOptionalBool()
     SGLANG_FP4_IGNORED_LAYERS = EnvStr("")
     # On by default; set SGLANG_ENABLE_FP8_GEMM_CONFIG_TUNE=0 as a kill switch.
     # Consults the tuned per-(N, K, M) Triton tile config table in

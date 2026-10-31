@@ -68,6 +68,7 @@ from sglang.srt.speculative.dflash_utils import (
     compute_dflash_sampling_correct_drafts_and_bonus,
     is_dense_head_weight,
     is_dflash_sampling_verify_available,
+    is_rowwise_fp8_head_weight,
     parse_dflash_draft_config,
 )
 from sglang.srt.speculative.domino_utils import (
@@ -131,6 +132,25 @@ def _get_fused_kv_materialize_helper():
 
         _FusedKVMaterializeHelper = FusedKVMaterializeHelper
     return _FusedKVMaterializeHelper
+
+
+def _target_head_logits(lm_head, hidden_states: torch.Tensor) -> torch.Tensor:
+    """Logits from a head with no dense weight, via the head's own kernel.
+
+    An online row-wise FP8 head is not a GGUF-style packed weight: its method is
+    still the unquantized one the checkpoint shipped, so ``quant_method.apply``
+    would read the E4M3 codes as magnitudes. Route it to the rowwise kernel the
+    target's own logits path uses, so the scale pairing stays in one place.
+    """
+    from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+        is_rowwise_fp8_weight,
+        rowwise_fp8_lm_head_logits,
+    )
+
+    weight = getattr(lm_head, "weight", None)
+    if is_rowwise_fp8_weight(weight):
+        return rowwise_fp8_lm_head_logits(hidden_states, weight)
+    return lm_head.quant_method.apply(lm_head, hidden_states, None)
 
 
 class _DflashDraftSampler:
@@ -899,10 +919,12 @@ class DFlashWorkerV2(BaseSpecWorker):
 
         # A gate-admitted quantized head is capture-safe: the target's own
         # logits path already runs the same kernel under CUDA graphs.
-        head_supported = is_dense_head_weight(
-            getattr(lm_head, "weight", None)
-        ) or should_apply_lm_head_quant_method(
-            lm_head, getattr(lm_head, "quant_method", None)
+        head_supported = (
+            is_dense_head_weight(getattr(lm_head, "weight", None))
+            or is_rowwise_fp8_head_weight(getattr(lm_head, "weight", None))
+            or should_apply_lm_head_quant_method(
+                lm_head, getattr(lm_head, "quant_method", None)
+            )
         )
 
         if self.selector is not None:
@@ -1570,11 +1592,13 @@ class DFlashWorkerV2(BaseSpecWorker):
     ) -> torch.Tensor:
         """Greedy argmax over a target LM head that has no dense ``weight``.
 
-        A GGUF head stores packed ``qweight`` plus a type tag, so the dense path's
-        ``weight[:num_org]`` slicing has nothing to slice. Logits come from the
-        layer's own kernel instead -- the same call ``LogitsProcessor._get_logits``
-        makes for GGUF models. Padding rows are excluded so argmax cannot return
-        an id outside the real vocabulary.
+        A GGUF head stores packed ``qweight`` plus a type tag, and an online
+        row-wise FP8 head stores E4M3 codes with per-row scales, so the dense
+        path's ``weight[:num_org]`` slicing has nothing to slice in either case.
+        Logits come from the head's own kernel instead -- see
+        ``_target_head_logits`` -- which is the call ``LogitsProcessor`` makes for
+        the same weights. Padding rows are excluded so argmax cannot return an id
+        outside the real vocabulary.
         """
         tp_size = int(get_parallel().tp_group.world_size)
         if tp_size != 1:
@@ -1591,7 +1615,7 @@ class DFlashWorkerV2(BaseSpecWorker):
 
         for start in range(0, num_tokens, int(chunk_size)):
             end = min(num_tokens, start + int(chunk_size))
-            logits = lm_head.quant_method.apply(lm_head, hidden_states[start:end], None)
+            logits = _target_head_logits(lm_head, hidden_states[start:end])
             if num_org is not None and logits.shape[-1] > num_org:
                 logits = logits[:, :num_org]
             out_tokens[start:end] = torch.argmax(logits, dim=-1).to(torch.long)

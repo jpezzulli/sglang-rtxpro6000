@@ -180,6 +180,27 @@ def _qsa_index_share_requested(hf_config) -> bool:
     )
 
 
+def _restrict_head_to_hot_tokens(head: torch.Tensor, token_ids: torch.Tensor):
+    """Hot-token rows of a target head, keeping whatever the rows need to read.
+
+    ``head.data[token_ids]`` is enough for a dense head. An online row-wise FP8
+    head is two tensors that must move together -- the E4M3 codes and the FP32
+    scale of each row -- so selecting rows without the scales would hand the
+    draft head a full-vocabulary magnitudes-for-codes mismatch instead of a hot
+    set, with nothing left to detect it.
+    """
+    from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+        is_rowwise_fp8_weight,
+        select_rowwise_weight_rows,
+    )
+
+    if is_rowwise_fp8_weight(head):
+        return select_rowwise_weight_rows(head, token_ids)
+    head = head.clone()
+    head.data = head.data[token_ids]
+    return head
+
+
 class EagleDraftWorker(EagleDraftWorkerBase):
     # SGLang's side of the megakernel's EAGLE entries when it offers one
     # (init_attention_backends sets it); a class default, since unit-test harnesses
@@ -383,9 +404,8 @@ class EagleDraftWorker(EagleDraftWorkerBase):
 
         else:
             if self.hot_token_id is not None and head is not None:
-                head = head.clone()
                 self.hot_token_id = self.hot_token_id.to(head.device)
-                head.data = head.data[self.hot_token_id]
+                head = _restrict_head_to_hot_tokens(head, self.hot_token_id)
 
             # Share the embedding and lm_head
             self.draft_runner.model.set_embed_and_head(embed, head)

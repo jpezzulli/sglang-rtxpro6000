@@ -1205,9 +1205,27 @@ class LogitsProcessor(nn.Module):
         out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         quant_method = getattr(lm_head, "quant_method", None)
+        from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+            is_rowwise_fp8_weight,
+            rowwise_fp8_lm_head_logits,
+        )
+
         if hasattr(lm_head, "set_lora") and hasattr(lm_head, "apply_lora"):
             # This is a LoRA-wrapped module, use its forward method
             logits = lm_head(hidden_states)
+        elif is_rowwise_fp8_weight(getattr(lm_head, "weight", None)):
+            # Online row-wise FP8 head: checked before quant_method, because a
+            # draft that adopted the target's head keeps its own (stale) method
+            # on it, and neither the unquantized dense matmul nor that method can
+            # read E4M3 codes with their scales. FP32 logits would need a BF16
+            # copy of the head, which is the storage this conversion removed.
+            if self.use_fp32_lm_head or self.use_fp32_lm_head_output:
+                raise RuntimeError(
+                    "SM120 online FP8 lm_head is incompatible with an FP32 "
+                    "lm_head output (--enable-fp32-lm-head); use FP32 logits "
+                    "capture or keep the head BF16"
+                )
+            logits = rowwise_fp8_lm_head_logits(hidden_states, lm_head.weight)
         elif should_apply_lm_head_quant_method(lm_head, quant_method):
             logits = quant_method.apply(lm_head, hidden_states, embedding_bias)
         elif hasattr(lm_head, "weight"):

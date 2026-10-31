@@ -49,6 +49,7 @@ from sglang.srt.speculative.dflash_utils import (
     get_dflash_layer_types,
     is_dense_head_weight,
     is_nemotron_35_draft_config,
+    is_rowwise_fp8_head_weight,
     parse_dflash_draft_config,
 )
 from sglang.srt.utils import BumpAllocator, bind_or_assign, is_npu, set_weight_attrs
@@ -92,16 +93,31 @@ def _logical_linear_weight_shape(
 
 
 def _project_candidate_logits(
-    hidden: torch.Tensor, lm_head: nn.Module, *, num_org: int, use_quant_head: bool
+    hidden: torch.Tensor,
+    lm_head: nn.Module,
+    *,
+    num_org: int,
+    use_quant_head: bool,
+    use_rowwise_fp8_head: bool = False,
 ) -> torch.Tensor:
     """Project draft hiddens through the target head, restricted to the org vocab."""
-    if not use_quant_head:
+    if not (use_quant_head or use_rowwise_fp8_head):
         weight = lm_head.weight
         return torch.matmul(hidden.to(weight.dtype), weight[:num_org].T)
-    # A packed weight can't be row-sliced to the org vocab like the dense path,
-    # and flashinfer's radix top-k rejects the crop view (non-contiguous), so
-    # mask the padded tail out of the top-k instead.
-    logits = lm_head.quant_method.apply(lm_head, hidden, None).contiguous()
+    # A packed or rowwise-quantized weight cannot be row-sliced to the org vocab
+    # like the dense path (its scales travel with the rows), and flashinfer's
+    # radix top-k rejects the crop view (non-contiguous), so mask the padded
+    # tail out of the top-k instead.
+    if use_rowwise_fp8_head:
+        # The target's own rowwise kernel on the resident weight: the per-row
+        # scales keep their meaning and no dequantized copy of the head appears.
+        from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+            rowwise_fp8_lm_head_logits,
+        )
+
+        logits = rowwise_fp8_lm_head_logits(hidden, lm_head.weight).contiguous()
+    else:
+        logits = lm_head.quant_method.apply(lm_head, hidden, None).contiguous()
     if logits.shape[-1] > num_org:
         logits[:, num_org:] = float("-inf")
     return logits
@@ -125,10 +141,12 @@ def candidate_topk(
     weight = getattr(lm_head, "weight", None)
     quant_method = getattr(lm_head, "quant_method", None)
     use_quant_head = should_apply_lm_head_quant_method(lm_head, quant_method)
-    if not use_quant_head and not is_dense_head_weight(weight):
+    use_rowwise_fp8_head = not use_quant_head and is_rowwise_fp8_head_weight(weight)
+    if not (use_quant_head or use_rowwise_fp8_head or is_dense_head_weight(weight)):
         raise RuntimeError(
-            "DFlash candidate top-k requires a dense FP16/BF16/FP32 target lm_head "
-            "or a supported lm_head.quant_method."
+            "DFlash candidate top-k requires a dense FP16/BF16/FP32 target "
+            "lm_head, an online rowwise-FP8 head, or a supported "
+            "lm_head.quant_method."
         )
     tp = get_parallel().tp_size == 1
     num_org = (
@@ -137,7 +155,11 @@ def candidate_topk(
         else int(lm_head.shard_indices.num_org_elements)
     )
     logits = _project_candidate_logits(
-        hidden, lm_head, num_org=num_org, use_quant_head=use_quant_head
+        hidden,
+        lm_head,
+        num_org=num_org,
+        use_quant_head=use_quant_head,
+        use_rowwise_fp8_head=use_rowwise_fp8_head,
     )
     lse = None
     if with_partition:

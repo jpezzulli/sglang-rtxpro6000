@@ -1625,6 +1625,42 @@ class Qwen4ExpLayerExtensionMixin:
         )
 
         self._decode_moe_comm = _prepare_decode_moe_comm(self.mlp)
+        self._maybe_convert_linears_to_rowwise_fp8()
+
+    def _maybe_convert_linears_to_rowwise_fp8(self) -> None:
+        """Convert this layer's eligible, otherwise-unquantized linears to FP8.
+
+        The selection is automatic (no launch flag, no kernel question) and is
+        resolved from the ACTUAL loaded configuration and the device this model
+        is being built on, never from a directory name: an unrecognized
+        checkpoint, a non-BF16 compute dtype, a tied head or any other GPU keeps
+        the checkpoint's layout untouched. See
+        ``sglang.kernels.ops.gemm.sm120_online_fp8`` for the representation.
+        """
+        from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+            checkpoint_eligible,
+            configure_online_fp8,
+            install_rowwise_fp8_on_eligible_linears,
+        )
+        from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
+
+        cuda_available = torch.cuda.is_available()
+        self._online_fp8_linears = install_rowwise_fp8_on_eligible_linears(
+            self,
+            enabled=configure_online_fp8(
+                envs.SGLANG_SM120_ONLINE_MXFP8.get(),
+                cuda_available=cuda_available,
+                capability=(
+                    torch.cuda.get_device_capability() if cuda_available else None
+                ),
+                model_eligible=checkpoint_eligible(
+                    self.config, torch.get_default_dtype()
+                ),
+            ),
+            # Routers and PLE keep the representation they were configured with;
+            # online FP8 is bounded to the transformer projections.
+            excluded_module_type=(FusedMoE, Qwen4ExpPLELayer),
+        )
 
     @contextmanager
     def hc_norms(self, normalized_input, next_norm):
@@ -2271,6 +2307,69 @@ class Qwen4ExpForConditionalGeneration(Qwen3VLForConditionalGeneration):
         head = self.lm_head.weight if self.pp_group.is_last_rank else None
         return embed, head
 
+    def post_load_weights(self) -> None:
+        """Install the final online-FP8 head before any draft adopts it.
+
+        Called from the tail of this model's ``load_weights`` (the default
+        safetensors path never calls the loader's model-hook helper) and, for
+        the loaders that bypass ``load_weights``, by
+        ``sglang.srt.model_loader.loader.post_load_weights``; the conversion is
+        idempotent, so a loader that does both still converts once.
+
+        The draft workers adopt this module (``set_lm_head_from_target``,
+        ``set_embed_and_head``) or row-select it for a hot-token map, and both
+        read the resident Parameter, so the conversion has to be complete before
+        any of them runs: the E4M3 codes and their per-row scales become one
+        object that every consumer shares. Nothing is re-quantized per step and
+        no BF16 copy of the head is kept beside it. A later reload of that object
+        goes through the head's own loader, which knows the padded vocabulary and
+        this rank's shard, and is written in place -- so an adopted draft alias or
+        a captured graph cannot fall behind the target.
+
+        Only a head that owns no representation of its own is converted, the same
+        eligibility rule the projections are held to: ``ParallelLMHead`` takes its
+        method from the checkpoint's quantization config, and a BF16 head held by
+        an online-quant method belongs to that method -- it is converted again,
+        as BF16, by the method's own post-load hook, which would silently
+        reinterpret the E4M3 codes this module wrote.
+        """
+        from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+            online_fp8_enabled,
+            otherwise_unquantized,
+            replace_linear_weight_rowwise_fp8,
+        )
+
+        head = getattr(self, "lm_head", None)
+        if head is None or not self.pp_group.is_last_rank:
+            return
+        if not online_fp8_enabled():
+            return
+        if not otherwise_unquantized(head):
+            logger.info(
+                "Flash-Next online rowwise FP8 leaves the output head to its "
+                "checkpoint method %s; that method owns this weight's "
+                "representation and runs after this hook",
+                type(head.quant_method).__name__,
+            )
+            return
+        config = getattr(self.config, "text_config", self.config)
+        if getattr(self.config, "tie_word_embeddings", False) or getattr(
+            config, "tie_word_embeddings", False
+        ):
+            # A tied head is one tensor with two readers: converting it for the
+            # logits path would leave the embedding reader holding E4M3 codes.
+            raise RuntimeError(
+                "SGLANG_SM120_ONLINE_MXFP8 does not support tied input/lm_head weights"
+            )
+        original_bytes = replace_linear_weight_rowwise_fp8(head)
+        if original_bytes:
+            logger.info(
+                "Flash-Next online rowwise FP8 output head ready: %d MiB BF16 -> "
+                "E4M3 with per-row FP32 scales (GDN recurrent state and PLE "
+                "remain in their configured precision)",
+                max(1, original_bytes // (1024 * 1024)),
+            )
+
     @torch.no_grad()
     def forward(
         self,
@@ -2688,6 +2787,16 @@ class Qwen4ExpForConditionalGeneration(Qwen3VLForConditionalGeneration):
         for module in self.modules():
             if isinstance(module, Qwen3_5GatedDeltaNet):
                 module.finalize_fused_in_proj()
+
+        # The default loader calls ``model.load_weights`` and then the quant
+        # methods' postprocess -- it does not call ``post_load_weights`` on this
+        # path (only the loaders that bypass ``load_weights`` do, via
+        # ``loader.post_load_weights``). Model-side fixups that must be complete
+        # before anything reads the weights (the GDN fused projections above, the
+        # converted output head below) therefore belong here, the same place
+        # Qwen4Exp's checkpoint layout already puts them; the hook is idempotent
+        # so a loader that calls both converts once.
+        self.post_load_weights()
 
         return loaded_params
 
