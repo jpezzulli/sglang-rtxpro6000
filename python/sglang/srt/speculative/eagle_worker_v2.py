@@ -44,7 +44,10 @@ from sglang.srt.mem_cache.kv.alloc.iteration_ids import IterationIds
 from sglang.srt.model_executor.cuda_graph_config import (
     Backend,
     Phase,
+    adaptive_launch_capture_scope,
     check_cuda_graph_backend,
+    scoped_capture_cuda_graph_config,
+    set_adaptive_launch_capture_scope,
 )
 from sglang.srt.model_executor.forward_batch_info import (
     CaptureHiddenMode,
@@ -327,7 +330,15 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             self.draft_worker.init_cuda_graphs(capture_decode_cuda_graph=False)
             if check_cuda_graph_backend(Phase.PREFILL, Backend.BREAKABLE):
                 self.draft_runner.init_prefill_cuda_graph(force_for_draft_worker=True)
-            self._capture_cuda_graphs()
+            # The launch width's draft decode and draft-extend graphs capture
+            # only the buckets its adaptive policy can reach; the draft
+            # TpModelWorker provisioning above (shared logits, eager buffers)
+            # and the prefill graph stay on the FULL canonical list. Later
+            # per-width captures scope through _override_worker_state instead,
+            # with no pending scope, so this boundary is a no-op for them and
+            # for every fixed-width or non-adaptive draft worker.
+            with adaptive_launch_capture_scope():
+                self._capture_cuda_graphs()
 
         if (c := self.draft_runner.canary_manager) is not None:
             c.mark_init_finished()
@@ -1499,11 +1510,18 @@ class EAGLEWorkerV2(BaseSpecWorker):
                         cuda_graph_runner_for_draft_extend=self._draft_worker.cuda_graph_runner_for_draft_extend,
                     )
                 )
+                self._validate_adaptive_widths()
                 self.adaptive_controller.init_states(
+                    # The FULL canonical bucket list the launch capture read
+                    # (controller.launch_cuda_graph_bs), so the narrower
+                    # widths keep every routing bucket their slots can reach
+                    # even though the launch width's own capture was pruned.
+                    # Falls back to the canonical read when the scheduler did
+                    # not plan a launch scope (a harness that captures without
+                    # it), which is the pre-existing no-pruning behaviour.
                     cuda_graph_bs=(
-                        None
-                        if check_cuda_graph_backend(Phase.DECODE, Backend.DISABLED)
-                        else get_exec().graph.cuda_graph_bs_decode
+                        self.adaptive_controller.launch_cuda_graph_bs
+                        or self._decode_graph_capture_bs()
                     ),
                 )
 
@@ -1873,6 +1891,110 @@ class EAGLEWorkerV2(BaseSpecWorker):
 
     # -- Adaptive speculative decoding protocol --
 
+    def _decode_graph_capture_bs(self) -> list[int] | None:
+        """The decode buckets the adaptive states must be sized against.
+
+        Read from the canonical ``cuda_graph_config[decode].bs``, NOT from the
+        legacy ``cuda_graph_bs_decode`` leaf: the resolution pipeline folds the
+        legacy flags into the canonical config once at startup and
+        ``RuntimeContext.override`` does not synchronize the aliases back, so a
+        launch that set the canonical ``--cuda-graph-config`` (or only the
+        default projection of ``--cuda-graph-bs-decode``) would feed ``None``
+        here and the C1 wide states would be built with no bucket prerequisite
+        -- routing C1 onto a width whose BS1 graph nothing captured. ``None``
+        (no bucket list, decode graphs off) keeps the no-pruning semantics
+        ``init_states(cuda_graph_bs=None)`` already carries.
+        """
+        cfg = get_exec().graph.cuda_graph_config
+        if cfg is None or check_cuda_graph_backend(Phase.DECODE, Backend.DISABLED):
+            return None
+        return list(cfg.decode.bs) if cfg.decode.bs is not None else None
+
+    def prepare_adaptive_launch_capture(self):
+        """Plan the launch width's start-up capture prune before it begins.
+
+        ``Scheduler.init_all_cuda_graphs`` calls this BEFORE the target
+        worker's init_cuda_graphs (the launch state's target verify graphs are
+        captured there, first). The pruned config is queued, not applied
+        whole-worker: only the actual decode-capture boundaries -- the target
+        verify capture in cuda_graph_setup.capture_cuda_graphs and the initial
+        EagleDraftWorker draft decode / draft-extend capture -- consume it, so
+        GraphSharedOutput's process-shared logits buffer, the EagerRunner
+        fixed-max buffers and the prefill capture are provisioned off the FULL
+        canonical bucket list and keep serving every bucket and width the run
+        can reach (a shared buffer pruned to C6 cannot be widened after the
+        captured graphs bind it). init_states keeps sizing the narrower
+        candidate widths against the FULL list the controller retained, and the
+        scheduler clears the queue on every exit path.
+
+        No adaptive controller, decode graphs off, or a launch width that
+        already covers every bucket: nothing is queued and every boundary is an
+        ordinary no-op window.
+        """
+        controller = self.adaptive_controller
+        if controller is None:
+            return
+        full_bs = self._decode_graph_capture_bs()
+        reachable_bs = controller.plan_launch_capture(full_bs)
+        if reachable_bs is None or reachable_bs == sorted(full_bs or []):
+            return
+        set_adaptive_launch_capture_scope(
+            scoped_capture_cuda_graph_config(reachable_bs)
+        )
+
+    def _validate_adaptive_widths(self) -> None:
+        """Refuse a selectable width the fixed launch allocation cannot serve.
+
+        The candidate table can select a width only if the buffers CUDA graphs
+        bind for their lifetime were sized for it -- above all the QSA pending
+        index-K ring, whose group count the pool derives once from the resolved
+        launch-maximum draft-token window. Ask the ring's own span model
+        (``qsa.metadata.pending_ring_groups_required``, the single expression
+        that sizes the allocation and addresses it) of every width the run can
+        reach, the launch state's included, and raise at start-up: widening the
+        ring here would free the rows the captured graphs already point at, and
+        leaving it is what aliases two live verify positions onto one slot --
+        which the verify forward would otherwise only report at the first
+        sampled token, mid-serve.
+
+        The target and draft pools are both checked: a draft model with its own
+        QSA cache has its own ring, and one narrow ring is enough to corrupt.
+        """
+        controller = self.adaptive_controller
+        if controller is None:
+            return
+        from sglang.srt.layers.attention.qsa.metadata import (
+            pending_ring_groups_required,
+        )
+
+        widths = {steps + 1 for steps in controller.candidate_steps}
+        widths.add(self.speculative_num_draft_tokens)
+        pools = {
+            "target": self._target_worker.model_runner.token_to_kv_pool,
+            "draft": self._draft_worker.draft_runner.token_to_kv_pool,
+        }
+        for pool_name, pool in pools.items():
+            groups = getattr(pool, "qsa_num_groups", None)
+            compress_ratio = getattr(pool, "qsa_compress_ratio", None)
+            if groups is None or compress_ratio is None:
+                continue  # a pool with no pending index-K ring (tokenwise QSA / 27B)
+            for width in sorted(widths):
+                required = pending_ring_groups_required(
+                    draft_tokens=width, compress_ratio=compress_ratio
+                )
+                if required > groups:
+                    raise ValueError(
+                        f"adaptive speculative decoding cannot select a "
+                        f"{width}-token verify window: the {pool_name} QSA pending "
+                        f"index-key ring holds {groups} group(s) at compress ratio "
+                        f"{compress_ratio}, which covers "
+                        f"{groups * compress_ratio} published positions. Raise the "
+                        "launch maximum draft-token count (the adaptive "
+                        "candidate_steps table / --speculative-num-steps) so it "
+                        f"needs at most {required} groups; the ring is fixed at "
+                        "pool construction because CUDA graphs bind it."
+                    )
+
     def build_adaptive_runtime_state(
         self,
         speculative_num_steps: int,
@@ -2026,7 +2148,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
             dw.cuda_graph_runner_for_draft_extend,
             get_spec().speculative_num_steps,
             get_spec().speculative_num_draft_tokens,
-            get_exec().graph.cuda_graph_bs_decode,
+            get_exec().graph.cuda_graph_config,
             get_exec().graph.disable_cuda_graph,
         )
 
@@ -2043,10 +2165,15 @@ class EAGLEWorkerV2(BaseSpecWorker):
             # BS-aware adaptive spec may prune cuda_graph_bs to an empty list
             # for steps that no BS range uses (e.g. step=1). Disable graph
             # capture for those steps; restore in finally so subsequent steps
-            # are not affected.
+            # are not affected. Swap the canonical cuda_graph_config leaf --
+            # the capture-list consumers (get_batch_sizes_to_capture,
+            # check_cuda_graph_backend) read the config's decode phase, not the
+            # legacy aliases -- with fresh phase copies, so the published
+            # config is never mutated in place and the original object goes
+            # back whole on every exit path.
             get_context().override(
                 "adaptive_spec.capture_override",
-                cuda_graph_bs_decode=cuda_graph_bs,
+                cuda_graph_config=scoped_capture_cuda_graph_config(cuda_graph_bs),
                 **({"disable_cuda_graph": True} if not cuda_graph_bs else {}),
             )
         dw._rebuild_topk1_chain_buffers()
@@ -2070,7 +2197,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 "adaptive_spec.capture_restore",
                 speculative_num_steps=backup[10],
                 speculative_num_draft_tokens=backup[11],
-                cuda_graph_bs_decode=backup[12],
+                cuda_graph_config=backup[12],
                 disable_cuda_graph=backup[13],
             )
             dw._rebuild_topk1_chain_buffers()

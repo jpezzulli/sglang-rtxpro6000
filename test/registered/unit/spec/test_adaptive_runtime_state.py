@@ -105,16 +105,32 @@ class TestAdaptiveController(unittest.TestCase):
         controller.activate_step_by_batch(batch_size=8)
         self.assertEqual(worker.applied_steps, [3, 1])
 
-    def test_verify_feedback_can_activate_a_state(self):
+    def test_verify_feedback_feeds_the_policy_without_reconfiguring_the_worker(self):
         worker = _FakeWorker(initial_steps=3)
         policy = _FakePolicy()
         controller = AdaptiveController(worker, policy)
         controller.init_states()
 
-        controller.on_verify_complete([1], batch_size=1)
         policy.feedback_step = 1
         controller.on_verify_complete([1], batch_size=1)
+        # A completion of an older batch must not repoint the backends a batch
+        # already in flight is running against; the width lands at the next
+        # forward boundary, from that batch's own size.
+        self.assertEqual(worker.applied_steps, [3])
+        controller.activate_step_by_batch(batch_size=8)
         self.assertEqual(worker.applied_steps, [3, 1])
+
+    def test_init_states_refuses_a_candidate_wider_than_the_launch_width(self):
+        # The launch maximum is the capacity the captured graphs bind; a wider
+        # candidate is refused, never resized into existence.
+        worker = _FakeWorker(initial_steps=3)
+        policy = _FakePolicy()
+        policy.candidate_steps = [1, 3, 7]
+        controller = AdaptiveController(worker, policy)
+
+        with self.assertRaisesRegex(ValueError, "exceed the launch"):
+            controller.init_states(cuda_graph_bs=[1, 2, 4])
+        self.assertEqual(worker.build_calls, [], "refused before any capture")
 
     def test_missing_state_fails_loud(self):
         worker = _FakeWorker(initial_steps=3)

@@ -1,4 +1,5 @@
 import json
+import math
 import tempfile
 import unittest
 
@@ -245,6 +246,141 @@ class TestAdaptiveStepSlot(CustomTestCase):
         self.assertEqual(params.ceiling_coeff, 0)
 
 
+class TestSwitchGraceHold(CustomTestCase):
+    """Post-switch hold and reversal backoff, ported from the donor controller.
+
+    Donor source: https://github.com/aiueo52/sglang-rtxpro6000 snapshot
+    5105985, ``adaptive_confidence.py`` (grace setup 373-385, completed-feedback
+    gate 512-518, switch bookkeeping 624-632). The base policy re-decides on
+    every update, so an acceptance stream that alternates between the two C1
+    candidates flips the width on every single batch. The hold gates only the
+    re-decision: the EMA keeps learning, and the first decision after the hold
+    still follows sustained acceptance. Empty feedback is not a completed batch
+    and advances neither the warmup, the interval, nor the hold.
+    """
+
+    # The two shipped C1 widths, with the EMA knobs pinned so each case is a
+    # hand-checkable line of arithmetic instead of a decay curve.
+    _FAST = {
+        "candidate_steps": [3, 7],
+        "ema_alpha": 1.0,
+        "warmup_batches": 0,
+        "update_interval": 1,
+    }
+
+    def _slot(self, initial_steps: int, **hold):
+        return AdaptiveStepSlot(initial_steps=initial_steps, cfg={**self._FAST, **hold})
+
+    @staticmethod
+    def _alternating(batches: int) -> list[list[int]]:
+        """Rejected batch on odd batches, W4-sized acceptance on even ones."""
+        return [[0] if i % 2 else [3] for i in range(1, batches + 1)]
+
+    def _run(self, slot: AdaptiveStepSlot, feedback: list[list[int]]):
+        """Switches as (completed-batch index, new steps)."""
+        switches = []
+        for counts in feedback:
+            if slot.update(counts):
+                switches.append((slot._batch_count, slot.current_steps))
+        return switches
+
+    def test_omitting_the_keys_keeps_the_base_flip_every_batch_policy(self):
+        slot = self._slot(7)
+        self.assertEqual(slot.switch_grace_batches, 0)
+        self.assertEqual(slot.grace_backoff, 2.0)
+        self.assertEqual(slot.max_grace_batches, 80)
+
+        switches = self._run(slot, self._alternating(10))
+        # The reported pathology in miniature: no hold at all, a reversal every
+        # batch, 10 switches in 10 completed feedback batches.
+        self.assertEqual([steps for _, steps in switches], [3, 7] * 5)
+
+    def test_the_hold_gates_the_reversal_and_grows_capped_on_reversals(self):
+        slot = self._slot(
+            7, switch_grace_batches=4, grace_backoff=2.0, max_grace_batches=8
+        )
+
+        switches = self._run(slot, self._alternating(20))
+
+        # One switch, then a 4-batch hold, then 8, then the 8-batch cap. 3
+        # switches in 20 batches against 20 without the hold, and the width is
+        # still moving at batch 15, so the hold slowed the controller instead of
+        # freezing it.
+        self.assertEqual(switches, [(1, 3), (6, 7), (15, 3)])
+        self.assertEqual(slot._grace, 8.0, "the reversal hold is capped")
+        self.assertEqual(slot.ema_accept_len, 3.0, "the EMA kept updating")
+
+    def test_sustained_acceptance_is_honoured_the_batch_the_hold_expires(self):
+        slot = self._slot(7, switch_grace_batches=4)
+
+        self.assertTrue(slot.update([0]))  # 7 -> 3, hold through batch 5
+        self.assertEqual(slot.current_steps, 3)
+
+        for _ in range(3):
+            self.assertFalse(slot.update([7, 7]))
+        self.assertEqual(slot.ema_accept_len, 7.0, "the hold did not stop learning")
+        self.assertEqual(slot.current_steps, 3, "no re-decision inside the hold")
+
+        self.assertTrue(slot.update([7, 7]))  # batch 5: the hold expired
+        self.assertEqual(slot.current_steps, 7)
+
+    def test_empty_feedback_advances_neither_the_hold_nor_the_counters(self):
+        slot = self._slot(7, switch_grace_batches=4)
+
+        self.assertTrue(slot.update([0]))
+        for _ in range(10):
+            self.assertFalse(slot.update([]))
+        self.assertEqual(slot._batch_count, 1)
+        self.assertEqual(slot._grace_until, 5)
+
+        self.assertFalse(slot.update([3]))  # batch 2: still inside the hold
+        self.assertEqual(slot.current_steps, 3)
+
+    def test_same_direction_switches_keep_the_initial_hold(self):
+        # Three candidates, so the controller really can step 1 -> 3 -> 7: two
+        # SAME-direction switches in a row, then reversals. Both up-switches land
+        # on consecutive batches, which only the reset-to-initial-hold branch
+        # allows, and only the direction changes grow the hold -- up to its cap.
+        slot = self._slot(
+            1,
+            candidate_steps=[1, 3, 7],
+            switch_grace_batches=1,
+            grace_backoff=2.0,
+            max_grace_batches=3,
+        )
+        stream = [[2], [6], [1], [3], [3], [0], [0], [0]]
+
+        self.assertEqual(
+            self._run(slot, stream), [(1, 3), (2, 7), (3, 3), (5, 7), (8, 1)]
+        )
+        self.assertEqual(slot._grace, 3.0, "the reversal hold stops at the cap")
+
+    def test_invalid_hold_settings_are_rejected(self):
+        invalid = (
+            {"switch_grace_batches": -1},
+            {"switch_grace_batches": 1.5},
+            {"switch_grace_batches": "40"},
+            {"switch_grace_batches": True},
+            {"max_grace_batches": -1},
+            {"max_grace_batches": 0.5},
+            {"grace_backoff": 0.5},
+            {"grace_backoff": math.inf},
+            {"grace_backoff": "2x"},
+            {"switch_grace_batches": 40, "max_grace_batches": 10},
+        )
+        for cfg in invalid:
+            with self.subTest(**cfg):
+                with self.assertRaises(ValueError):
+                    self._slot(7, **cfg)
+
+    def test_a_valid_hold_below_the_cap_is_accepted(self):
+        slot = self._slot(
+            7, switch_grace_batches=40, grace_backoff=2.0, max_grace_batches=80
+        )
+        self.assertEqual(slot.switch_grace_batches, 40)
+        self.assertEqual(slot.max_grace_batches, 80)
+
+
 class TestAdaptiveSpeculativeParams(CustomTestCase):
     def test_default_config_loads(self):
         params = AdaptiveSpeculativeParams(initial_steps=3)
@@ -312,6 +448,22 @@ class TestAdaptiveSpeculativeParams(CustomTestCase):
             f.flush()
             with self.assertRaises(ValueError):
                 AdaptiveSpeculativeParams(initial_steps=3, cfg_path=f.name)
+
+    def test_unusable_hold_settings_raise_through_the_loader(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as f:
+            json.dump(
+                {
+                    "1": {
+                        "candidate_steps": [3, 7],
+                        "switch_grace_batches": 40,
+                        "max_grace_batches": 10,
+                    }
+                },
+                f,
+            )
+            f.flush()
+            with self.assertRaises(ValueError):
+                AdaptiveSpeculativeParams(initial_steps=7, cfg_path=f.name)
 
     def test_global_hysteresis_inherited(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json") as f:

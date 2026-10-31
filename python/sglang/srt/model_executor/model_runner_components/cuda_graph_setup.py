@@ -23,6 +23,7 @@ from sglang.srt.model_executor.cpu_graph_runner import CPUGraphRunner
 from sglang.srt.model_executor.cuda_graph_config import (
     Backend,
     Phase,
+    adaptive_launch_capture_scope,
     check_cuda_graph_backend,
 )
 from sglang.srt.model_executor.forward_batch_info import (
@@ -433,8 +434,14 @@ def capture_cuda_graphs(
         capture_time=0,
     )
     if capture_decode_cuda_graph:
-        if current_platform.capabilities.graph_capture:
-            decode = capture_decode_graph(model_runner=model_runner)
+        # Only the decode-graph capture list is scoped: an adaptive launch width
+        # captures its verify graphs for the batch sizes its policy can reach,
+        # while the shared logits buffer and the eager fixed-max buffer allocated
+        # above stay provisioned off the FULL canonical buckets. The scope is a
+        # no-op for every non-adaptive and fixed-width startup.
+        with adaptive_launch_capture_scope():
+            if current_platform.capabilities.graph_capture:
+                decode = capture_decode_graph(model_runner=model_runner)
     else:
         decode = GraphCapture(
             runner=eager_runner,
