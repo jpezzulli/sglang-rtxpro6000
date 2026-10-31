@@ -206,6 +206,168 @@ class CustomToolReplayTestCase(CustomTestCase):
         self.assertEqual(parts["content"], "/workspace")
 
 
+class NamespacedCustomToolTestCase(CustomTestCase):
+    """A custom tool offered as a namespace member, in either accepted shape.
+
+    A member written as ``{"function": {...}}`` is merged into its namespace group
+    as that inner object, so the envelope -- and with it ``custom`` and the input
+    format -- has to be put back on the declaration. Dropped on the floor, the
+    member is offered as a JSON function tool with no schema, stays out of the
+    custom spelling set, and its call stops reporting a freeform payload.
+    """
+
+    MEMBERS = {
+        "flat": {"type": "custom", "name": "c", "format": {"type": "text"}},
+        "wrapped": {
+            "type": "custom",
+            "function": {"name": "c", "format": {"type": "text"}},
+        },
+    }
+    CITY = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    }
+
+    def _serving(self):
+        serving = make_serving()
+        serving.reasoning_parser = None
+        serving.tool_call_parser = None
+        return serving
+
+    def _request(self, members, extra_tools=(), **kwargs):
+        payload = {
+            "model": "x",
+            "input": "run pwd",
+            "tools": [
+                *extra_tools,
+                {
+                    "type": "namespace",
+                    "name": "n",
+                    "description": "n tools",
+                    "tools": list(members),
+                },
+            ],
+            "tool_choice": "required",
+            "store": False,
+        }
+        payload.update(kwargs)
+        return ResponsesRequest(**payload)
+
+    def test_a_custom_member_is_shimmed_whichever_shape_it_came_in(self):
+        for shape, member in self.MEMBERS.items():
+            with self.subTest(shape=shape):
+                serving = self._serving()
+                request = self._request([member])
+                (tool,) = serving._response_tools_to_chat_tools(request)
+                self.assertEqual(tool.function.name, "n__c")
+                self.assertEqual(
+                    list(tool.function.parameters["properties"]), ["input"]
+                )
+                self.assertEqual(request._tool_state.custom_names, {"n__c"})
+
+                (item,) = serving._make_response_output_items(
+                    request,
+                    '[{"name":"n__c","parameters":{"input":"pwd"}}]',
+                    tokenizer=Mock(),
+                    require_reasoning=False,
+                )
+                self.assertEqual(item.type, "custom_tool_call")
+                self.assertEqual(
+                    (item.name, item.input, item.namespace), ("c", "pwd", "n")
+                )
+
+    def test_a_rebind_to_custom_keeps_the_siblings_the_group_already_offered(self):
+        serving = self._serving()
+        request = self._request(
+            [
+                {"type": "function", "name": "s", "parameters": self.CITY},
+                {"type": "function", "name": "c", "parameters": self.CITY},
+            ],
+            input=[
+                {"role": "user", "content": "before"},
+                {
+                    "type": "additional_tools",
+                    "tools": [
+                        {
+                            "type": "namespace",
+                            "name": "n",
+                            "tools": [self.MEMBERS["wrapped"]],
+                        }
+                    ],
+                },
+            ],
+        )
+        tools = {
+            tool.function.name: tool
+            for tool in serving._response_tools_to_chat_tools(request)
+        }
+        self.assertEqual(set(tools), {"n__c", "n__s"})
+        self.assertEqual(list(tools["n__c"].function.parameters["properties"]), ["input"])
+        self.assertEqual(tools["n__s"].function.parameters, self.CITY)
+        self.assertEqual(request._tool_state.custom_names, {"n__c"})
+
+        inventories = [
+            message["tools"]
+            for message in serving._construct_input_messages(request)
+            if "tools" in message
+        ]
+        self.assertEqual([tool["function"]["name"] for tool in inventories[-1]], ["n__c"])
+        self.assertEqual(
+            list(inventories[-1][0]["function"]["parameters"]["properties"]), ["input"]
+        )
+
+    def test_a_namespaced_custom_call_replays_under_the_bound_spelling(self):
+        for shape, member in self.MEMBERS.items():
+            with self.subTest(shape=shape):
+                serving = self._serving()
+                request = self._request([member])
+                message = OpenAIServingResponses._normalize_response_message_for_chat(
+                    {
+                        "type": "custom_tool_call",
+                        "call_id": "call_1",
+                        "namespace": "n",
+                        "name": "c",
+                        "input": "pwd",
+                    },
+                    identities=serving._tool_identities(request),
+                )
+                (call,) = message["tool_calls"]
+                self.assertEqual(call["id"], "call_1")
+                self.assertEqual(call["function"]["name"], "n__c")
+                self.assertEqual(
+                    decode_custom_tool_input(call["function"]["arguments"]), "pwd"
+                )
+
+    def test_a_contested_namespaced_custom_call_replays_its_own_spelling(self):
+        serving = self._serving()
+        # An ordinary tool already holds the flat spelling of the member, so the
+        # member is offered under the escaped form and its replay has to agree.
+        request = self._request(
+            [self.MEMBERS["wrapped"]],
+            extra_tools=[{"type": "function", "name": "n__c", "parameters": self.CITY}],
+        )
+        names = [
+            tool.function.name
+            for tool in serving._response_tools_to_chat_tools(request)
+        ]
+        self.assertEqual(names, ["n__c", "n.c"])
+        self.assertEqual(request._tool_state.custom_names, {"n.c"})
+        message = OpenAIServingResponses._normalize_response_message_for_chat(
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_1",
+                "namespace": "n",
+                "name": "c",
+                "input": "pwd",
+            },
+            identities=serving._tool_identities(request),
+        )
+        (call,) = message["tool_calls"]
+        self.assertEqual(call["function"]["name"], "n.c")
+        self.assertEqual(decode_custom_tool_input(call["function"]["arguments"]), "pwd")
+
+
 class CustomToolStreamTestCase(CustomTestCase):
     def _stream(self, chunks):
         serving = make_serving()

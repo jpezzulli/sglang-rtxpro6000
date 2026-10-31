@@ -378,6 +378,79 @@ class AdditionalToolsInventoryTestCase(CustomTestCase):
                 )
                 self.assertEqual(result.status_code, 400, getattr(result, "body", None))
 
+    def test_an_inline_namespace_member_yields_to_a_flat_name_it_collides_with(self):
+        serving = serving_for("qwen3_coder")
+        req = request(
+            [function("browser__search")],
+            input=[
+                {"role": "user", "content": "before"},
+                {"type": "additional_tools", "tools": [namespace("browser", "search")]},
+            ],
+            tool_choice={"type": "function", "namespace": "browser", "name": "search"},
+        )
+        messages, _, _, _ = asyncio.run(
+            serving._make_request(req, None, serving.tokenizer_manager.tokenizer)
+        )
+        # The history position advertises the escalated spelling the one request
+        # table picked, so the advertised call routes to the member instead of to
+        # the ordinary tool that already holds ``browser__search``.
+        self.assertEqual(
+            [[tool["function"]["name"] for tool in message["tools"]]
+            for message in messages
+            if "tools" in message],
+            [["browser.search"]],
+        )
+        chat = ChatCompletionRequest(
+            model="x", messages=messages, tools=serving._response_tools_to_chat_tools(req)
+        )
+        self.assertEqual(
+            [tool.function.name for tool in serving._effective_tools(chat)],
+            ["browser__search", "browser.search"],
+        )
+        self.assertEqual(
+            serving._chat_tool_choice(
+                req.effective_tool_choice(), serving._tool_identities(req)
+            ),
+            {"type": "function", "function": {"name": "browser.search"}},
+        )
+
+    def test_the_spelling_of_an_identity_ignores_which_inventory_declared_it(self):
+        serving = serving_for("qwen3_coder")
+        req = request(
+            input=[
+                {"type": "additional_tools", "tools": [namespace("browser", "search")]},
+                {"type": "additional_tools", "tools": [function("browser__search")]},
+            ]
+        )
+        self.assertEqual(
+            [[tool["function"]["name"] for tool in message["tools"]]
+            for message in serving._construct_input_messages(req)
+            if "tools" in message],
+            [["browser.search"], ["browser__search"]],
+        )
+
+    def test_a_muse_inline_member_is_advertised_under_the_escaped_spelling(self):
+        serving = serving_for("muse", MUSE_TEMPLATE)
+        req = request(
+            [function("browser.search")],
+            input=[
+                {"role": "user", "content": "before"},
+                {"type": "additional_tools", "tools": [namespace("browser", "search")]},
+            ],
+        )
+        advertised = [
+            [tool["function"]["name"] for tool in message["tools"]]
+            for message in serving._construct_input_messages(req)
+            if "tools" in message
+        ]
+        # Muse composes ``namespace.member`` itself, so the contested member lands
+        # on the escaped form rather than on a second flat name.
+        self.assertEqual(advertised, [["browser%2Esearch"]])
+        self.assertEqual(
+            [tool.function.name for tool in serving._response_tools_to_chat_tools(req)],
+            ["browser.search", "browser%2Esearch"],
+        )
+
     def test_unsupported_inline_declaration_is_a_bad_request(self):
         for bad in (
             {"type": "namespace", "name": "x"},

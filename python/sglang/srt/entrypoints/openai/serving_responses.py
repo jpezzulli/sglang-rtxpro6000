@@ -1471,8 +1471,13 @@ class OpenAIServingResponses(OpenAIServingChat):
         return tool_identities(
             self._effective_response_tools(request),
             replayed,
-            separator="." if self.tool_call_parser == "muse" else IDENTITY_SEPARATOR,
+            separator=self._identity_separator(),
         )
+
+    def _identity_separator(self) -> str:
+        """Muse composes ``<namespace>.<member>`` itself; every other parser gets
+        the reserved escape marker, so one request has one spelling space."""
+        return "." if self.tool_call_parser == "muse" else IDENTITY_SEPARATOR
 
     def _effective_response_tools(self, request: ResponsesRequest) -> list:
         """The declarations a request can actually call: its own tools plus every
@@ -1503,7 +1508,7 @@ class OpenAIServingResponses(OpenAIServingChat):
                     # The latest declaration carries the namespace metadata; its
                     # members merge over the ones an earlier group offered.
                     members["tool"] = tool
-                    for _, definition in namespace_members(tool):
+                    for member_type, definition in namespace_members(tool):
                         identity = (tool.name, definition["name"])
                         if identity in seen:
                             raise ValueError(
@@ -1513,7 +1518,14 @@ class OpenAIServingResponses(OpenAIServingChat):
                         seen.add(identity)
                         if identity not in callables:
                             order.append(identity)
-                        members["members"][definition["name"]] = definition
+                        # A member given as ``{"function": {...}}`` is stored
+                        # without its envelope, so the group re-tags it: a custom
+                        # member that merged through here must stay custom, keep
+                        # its format and stay in the custom shim set.
+                        members["members"][definition["name"]] = {
+                            **definition,
+                            "type": member_type,
+                        }
                         callables[identity] = tool.name
                     continue
                 if tool.type in ("function", "custom") and tool.name:
@@ -1586,8 +1598,6 @@ class OpenAIServingResponses(OpenAIServingChat):
         # ``function`` and ``custom`` tools -- including the members of a
         # namespace -- flow to chat; built-ins go through harmony. A custom tool
         # is shimmed into a single-string function tool.
-        chat_tools = []
-        is_muse = self.tool_call_parser == "muse"
         identities = self._tool_identities(
             request, self._replayed_tool_identities(request, prev_response)
         )
@@ -1602,9 +1612,17 @@ class OpenAIServingResponses(OpenAIServingChat):
             names=state.names or identities.names,
             custom_names=identities.custom_names,
         )
-        for tool in expand_tool_namespaces(
+        return self._chat_tools_from_declarations(
             self._effective_response_tools(request), identities
-        ):
+        )
+
+    def _chat_tools_from_declarations(
+        self, tools: list, identities: ToolIdentities
+    ) -> list[Tool]:
+        """Flatten declarations onto the spellings one table already picked."""
+        is_muse = self.tool_call_parser == "muse"
+        chat_tools = []
+        for tool in expand_tool_namespaces(tools, identities):
             if tool.type == "custom" and tool.name:
                 description = custom_tool_description(tool.description, tool.format)
                 parameters = custom_tool_parameters()
@@ -1624,23 +1642,23 @@ class OpenAIServingResponses(OpenAIServingChat):
             )
         return chat_tools
 
-    def _inline_tools_to_chat_tools(self, inventory: dict) -> list[Tool]:
+    def _inline_tools_to_chat_tools(
+        self, inventory: dict, identities: Optional[ToolIdentities] = None
+    ) -> list[Tool]:
         """One inline ``additional_tools`` inventory as chat function tools.
 
-        The declarations bind through the same table as the request's own tools,
-        so an inline member is spelled, selected and reported identically.
+        The inventory keeps its own declarations, so its schemas stay at their own
+        history position, but the names come from the request-wide table when one
+        is given: an inline member that collides with something else this request
+        offers has to be advertised under the spelling the constraint, the parser
+        and the response items will use, not under a second table of its own.
         """
         tools = ResponseAdditionalTools.model_validate(inventory).tools
-        return [
-            tool
-            for tool in self._response_tools_to_chat_tools(
-                ResponsesRequest(
-                    model=inventory.get("model") or "",
-                    input="",
-                    tools=tools,
-                )
+        if identities is None:
+            identities = tool_identities(
+                tools, separator=self._identity_separator()
             )
-        ]
+        return self._chat_tools_from_declarations(tools, identities)
 
     def _effective_tools(self, request: ChatCompletionRequest) -> list[Tool]:
         # The chat renderer keeps an inline inventory in message history, so the
@@ -1841,10 +1859,18 @@ class OpenAIServingResponses(OpenAIServingChat):
         if msg_type == "custom_tool_call":
             if not isinstance(message.get("input"), str):
                 raise ValueError("custom_tool_call must include a string input.")
-            # Replay through the same single-string shim the tool was offered as.
+            # Replay through the same single-string shim the tool was offered as,
+            # under the name it was offered under: a namespaced member has to
+            # come back as the escaped spelling the prompt advertised, exactly as
+            # a namespaced function_call does, and the payload stays encoded.
+            name = message.get("name")
+            if message.get("namespace"):
+                name = (identities or ToolIdentities(separator=".")).model_name(
+                    name, message["namespace"]
+                )
             return cls._chat_tool_call_message(
                 message,
-                message.get("name"),
+                name,
                 encode_custom_tool_input(message["input"]),
             )
         if msg_type == "agent_message":
@@ -2036,7 +2062,7 @@ class OpenAIServingResponses(OpenAIServingChat):
             ):
                 inventory = [
                     tool.model_dump(exclude_none=True)
-                    for tool in self._inline_tools_to_chat_tools(input_item)
+                    for tool in self._inline_tools_to_chat_tools(input_item, identities)
                 ]
                 messages.append(
                     {
