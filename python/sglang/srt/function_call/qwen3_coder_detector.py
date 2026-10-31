@@ -352,12 +352,43 @@ class Qwen3CoderDetector(BaseFormatDetector):
         A lazy first-close regex would expose later nested functions as siblings.
         Incomplete outer structures keep the existing end-of-input fallback.
         """
-        tokens = re.compile(re.escape(start_token) + "|" + re.escape(end_token))
+        parameter_prefix = "<parameter="
+        tokens = re.compile(
+            re.escape(start_token) + "|" + re.escape(end_token) + r"|<parameter=[^>]*>"
+        )
+        parameter_ends = iter(re.finditer(re.escape("</parameter>"), text))
+        parameter_end = next(parameter_ends, None)
         pos = 0
         while (start := text.find(start_token, pos)) != -1:
             depth = 1
             end = body_end = len(text)
+            parameter_body_end = 0
             for match in tokens.finditer(text, start + len(start_token)):
+                if match.start() < parameter_body_end:
+                    continue
+                if match.group().startswith(parameter_prefix):
+                    # A complete parameter owns its wrapper/function markers.
+                    # Counting them as structure can consume following prose or
+                    # close the outer call before its value has finished.
+                    while (
+                        parameter_end is not None
+                        and parameter_end.start() < match.end()
+                    ):
+                        parameter_end = next(parameter_ends, None)
+                    if (
+                        parameter_end is not None
+                        and text.find(
+                            parameter_prefix, match.end(), parameter_end.start()
+                        )
+                        == -1
+                    ):
+                        parameter_body_end = parameter_end.end()
+                    # A new parameter before the next close belongs to another
+                    # field. Do not hide intervening boundaries when the first
+                    # field used the legacy missing-close fallback.
+                    # With no closing parameter, retain the existing incomplete
+                    # structure fallback instead of inventing a delimiter.
+                    continue
                 depth += 1 if match.group() == start_token else -1
                 if depth == 0:
                     body_end, end = match.start(), match.end()

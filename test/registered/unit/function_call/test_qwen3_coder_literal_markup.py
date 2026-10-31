@@ -102,8 +102,40 @@ class LiteralMarkupTestCase(CustomTestCase):
                 self.assertEqual(calls, [("record", {"value": quoted})])
                 self.assertEqual(normal, "")
 
+    def test_parameter_wrapper_markers_do_not_consume_following_prose(self):
+        for value in (
+            "literal " + START + " marker",
+            "literal " + END + " marker",
+            "literal " + START + "example" + END + " marker",
+            "literal " + OPEN + "example> marker",
+        ):
+            source = "BEFORE" + call("record", value) + "TAIL"
+            for width in self.WIDTHS:
+                with self.subTest(value=value, width=width):
+                    if width is None:
+                        result = Qwen3CoderDetector().detect_and_parse(source, [tool()])
+                        normal = result.normal_text
+                        calls = [(c.name, c.parameters) for c in result.calls]
+                    else:
+                        normal, calls = streamed(source, [tool()], width)
+                    self.assertEqual(normal, "BEFORETAIL")
+                    self.assertEqual(
+                        [(name, json.loads(args)) for name, args in calls],
+                        [("record", {"value": value})],
+                    )
+
 
 class IncompleteCallTestCase(CustomTestCase):
+    def test_missing_parameter_close_does_not_consume_a_later_call(self):
+        first = START + OPEN + "record>" + P_OPEN + "value>one" + CLOSE + END
+        source = "BEFORE" + first + "BETWEEN" + call("record", "two") + "TAIL"
+        result = Qwen3CoderDetector().detect_and_parse(source, [tool()])
+        self.assertEqual(result.normal_text, "BEFOREBETWEENTAIL")
+        self.assertEqual(
+            [(c.name, json.loads(c.parameters)) for c in result.calls],
+            [("record", {"value": "one"}), ("record", {"value": "two"})],
+        )
+
     def test_trailing_wrapper_stays_prose_after_a_complete_call(self):
         done = call("record", "one")
         source = done + "\n" + START + OPEN + "record>" + P_OPEN + "value>two"
