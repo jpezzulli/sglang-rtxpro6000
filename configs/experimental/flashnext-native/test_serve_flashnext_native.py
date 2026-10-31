@@ -154,6 +154,15 @@ class TestServeRecipeStatic(unittest.TestCase):
         )
         self.assertIn("gdn_fp16_accum_mma=$GDN_FP16_ACCUM_MMA", SCRIPT)
 
+    def test_parked_preprocess_device_joins_the_nixl_identity(self):
+        # Only an explicit selection names itself in the identity; the unset
+        # baseline namespace must not churn.
+        self.assertIn(
+            'MM_DEVICE_FIELD=(--field "mm_preprocess_device=$MM_PREPROCESS_DEVICE")',
+            uncommented(SCRIPT),
+        )
+        self.assertIn('"${MM_DEVICE_FIELD[@]}"', SCRIPT)
+
     def test_fp8_identity_hashes_what_is_resident_not_what_was_requested(self):
         body = uncommented(SCRIPT)
         self.assertIn('--field "online_fp8_precision=$ONLINE_FP8_PRECISION"', body)
@@ -293,10 +302,48 @@ class TestEmittedArgv(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, env)
             self.assertIn(message, result.stderr, env)
 
-    def test_mm_preprocess_device_parking_fails_clearly(self):
-        result, _ = self.launch(sglang_mm_preprocess_device="cuda:1")
+    def test_mm_preprocess_device_parking_is_carried_opt_in(self):
+        # Unset keeps the baseline launch byte-for-byte: pil default, no
+        # surprise device claims.
+        result, argv = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.value_after(argv, "--image-processor-backend"), "pil")
+        self.assertIn(
+            "Media preprocessing: model/platform-selected", result.stdout
+        )
+        result, argv = self.launch(sglang_mm_preprocess_device="cpu")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.value_after(argv, "--image-processor-backend"), "pil")
+        self.assertIn("Media preprocessing: parked on cpu", result.stdout)
+
+    def test_cuda_preprocess_device_selects_the_fast_backend(self):
+        result, argv = self.launch(sglang_mm_preprocess_device="cuda:1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.value_after(argv, "--image-processor-backend"), "torchvision"
+        )
+        self.assertIn("Media preprocessing: parked on cuda:1", result.stdout)
+        _, argv = self.launch(
+            sglang_mm_preprocess_device="cuda:1", image_processor_backend="auto"
+        )
+        self.assertEqual(self.value_after(argv, "--image-processor-backend"), "auto")
+
+    def test_cuda_preprocess_device_refuses_the_pil_backend(self):
+        result, _ = self.launch(
+            sglang_mm_preprocess_device="cuda:1", image_processor_backend="pil"
+        )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("not wired", result.stderr)
+        self.assertIn("fast image processor backend", result.stderr)
+
+    def test_invalid_mm_preprocess_device_values_fail_clearly(self):
+        for value in ("cuda", "cuda:x", "cuda:-1", "gpu:1", "tpu"):
+            result, _ = self.launch(sglang_mm_preprocess_device=value)
+            self.assertNotEqual(result.returncode, 0, value)
+            self.assertIn("SGLANG_MM_PREPROCESS_DEVICE", result.stderr)
+        # An explicit empty value reads as unset in bash; it must not reach
+        # the Python resolver as an invalid string.
+        result, _ = self.launch(sglang_mm_preprocess_device="")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_width_policy_difference_is_announced_not_claimed(self):
         result, argv = self.launch(mtp_policy="fixed-w4")

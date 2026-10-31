@@ -1,4 +1,5 @@
 import asyncio
+import os
 import pickle
 import threading
 import unittest
@@ -317,6 +318,18 @@ class TestEncoderPreprocessorOffEventLoop(CustomTestCase):
 
         output = self._run_with_loop_handshake(process)
         self.assertIs(output["image_grid_thw"], grid)
+
+    def test_explicit_preprocess_device_fails_closed_in_separate_encoder(self):
+        # The tokenizer-path parking knob must not silently no-op here.
+        with (
+            patch.dict(os.environ, {"SGLANG_MM_PREPROCESS_DEVICE": "cpu"}),
+            self.assertRaisesRegex(ValueError, "separate encoder preprocessing"),
+        ):
+            EncoderPreprocessor(
+                SimpleNamespace(),
+                SimpleNamespace(hf_config=SimpleNamespace(model_type="test")),
+                SimpleNamespace(),
+            )
 
 
 class TestEncoderPreprocessorKimiGrid(CustomTestCase):

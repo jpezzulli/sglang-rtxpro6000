@@ -192,6 +192,38 @@ class TestBaseProcessorConfigExtraction(CustomTestCase):
         self.assertEqual(proc.mm_processor_worker_num, 2)
         self.assertIsNotNone(proc.mm_processor_executor)
 
+    def test_device_parking_moves_the_worker_count_decision(self):
+        """The worker count follows where preprocessing actually runs once a
+        device is selected: the scheduler-GPU path stays at one worker, while
+        CPU-parked or secondary-GPU preprocessing is real parallelism."""
+        from transformers import BaseImageProcessor
+
+        image_processor = MagicMock(spec=BaseImageProcessor)
+        for device, expected in (("cpu", 2), ("cuda:1", 2), ("cuda:0", 1)):
+            with (
+                self.subTest(device=device),
+                envs.SGLANG_MM_PREPROCESS_DEVICE.override(device),
+                patch("torch.cuda.is_available", return_value=True),
+                patch("torch.cuda.device_count", return_value=2),
+                self._patch_platform(cuda_alike=True, device_type="cuda"),
+            ):
+                proc = self._make_processor({}, image_processor=image_processor)
+                self.assertEqual(proc.mm_processor_worker_num, expected)
+
+    def test_preprocess_device_choice_is_propagated_to_worker_payload(self):
+        """Opt-in parking reaches the fingerprint payload every cache worker
+        derives artifact keys from; the unset baseline payload is unchanged."""
+        baseline = self._make_processor({})
+        self.assertNotIn(
+            "mm_preprocess_device", baseline.preprocess_fingerprint_payload()
+        )
+        with envs.SGLANG_MM_PREPROCESS_DEVICE.override("cpu"):
+            proc = self._make_processor({})
+        self.assertEqual(proc.mm_preprocess_device, "cpu")
+        payload = proc.preprocess_fingerprint_payload()
+        self.assertEqual(payload["mm_preprocess_device"], "cpu")
+        self.assertIs(payload["gpu_image_decode"], False)
+
     def test_gpu_preprocessing_path_stays_at_one_worker(self):
         """A fast image processor submits to the device the scheduler serves
         from, so a second worker there only contends for it: flat on H200 and

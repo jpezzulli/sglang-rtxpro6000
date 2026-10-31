@@ -31,12 +31,15 @@ set -euo pipefail
 #   --gdn-mtp-cache-mode none   not carried: this base has no such flag; its
 #                     GDN MTP verify keeps the intermediate h-state cache (the
 #                     v3.1.4 'full' behavior). Parity is a cache-work item.
-#   media processing  this base has NO SGLANG_MM_PREPROCESS_DEVICE consumer:
-#                     preprocessing is not device-parked and A4000 offload is
-#                     NOT claimed. CPU baseline; --image-processor-backend
-#                     (auto|torchvision|pil) remains the real knob. Exporting
-#                     SGLANG_MM_PREPROCESS_DEVICE=cuda:N fails here rather
-#                     than pretending.
+#   media processing  SGLANG_MM_PREPROCESS_DEVICE is carried: unset keeps the
+#                     model/platform-selected behavior, cpu parks image loading
+#                     and fast preprocessing on the CPU, and cuda:N parks it on
+#                     that logical device (a secondary GPU, e.g. an A4000,
+#                     after CUDA_VISIBLE_DEVICES remapping). cuda:N requires
+#                     the fast image processor backend, so the recipe's default
+#                     switches to torchvision for it and a pinned pil backend
+#                     fails at launch. Actual device offload is only claimed
+#                     once a runtime check on the serving host proves it.
 #
 # Flag mapping from the v3.1.4 recipe (verified against this base's argument
 # surface by test_serve_flashnext_native.py):
@@ -53,7 +56,10 @@ set -euo pipefail
 #   CONTEXT_LENGTH (524288), MODEL_OVERRIDE_JSON (default: the YaRN override),
 #   MAX_RUNNING_REQUESTS (6) MAX_MAMBA_CACHE_SIZE (36) MAX_TOTAL_TOKENS (unset),
 #   TP_SIZE (1), CHAT_TEMPLATE (optional pinned file),
-#   IMAGE_PROCESSOR_BACKEND (pil), TOKEN_MAP (full mode; unset = full-vocabulary
+#   IMAGE_PROCESSOR_BACKEND (pil, or torchvision when
+#   SGLANG_MM_PREPROCESS_DEVICE=cuda:N; auto|torchvision|pil stays the real
+#   backend knob), SGLANG_MM_PREPROCESS_DEVICE (unset|cpu|cuda:N; see above),
+#   TOKEN_MAP (full mode; unset = full-vocabulary
 #   draft and only validated when speculative decode actually launches),
 #   PENNY_REASONING_EFFORT (medium default; OpenAI tiers),
 #   MTP_POLICY=tiered|fixed-w4 (full mode), FLASHINFER_GDN_FP16_ACCUM_MMA (1; see below),
@@ -69,13 +75,24 @@ set -euo pipefail
 # NIXL namespace below; anything but the literal 1 is the FP32-accumulate
 # (stock-representation) cache identity.
 export NUMPY_MADVISE_HUGEPAGE="${NUMPY_MADVISE_HUGEPAGE:-0}"
-case "${SGLANG_MM_PREPROCESS_DEVICE:-}" in
-  ""|cpu) ;;
-  *) echo "SGLANG_MM_PREPROCESS_DEVICE='$SGLANG_MM_PREPROCESS_DEVICE' is not wired on this base (no device-parked preprocessing exists here); unset it or use cpu" >&2; exit 1 ;;
+MM_PREPROCESS_DEVICE="${SGLANG_MM_PREPROCESS_DEVICE:-}"
+case "$MM_PREPROCESS_DEVICE" in
+  ""|cpu) MM_BACKEND_DEFAULT=pil ;;
+  cuda:*)
+    [[ "$MM_PREPROCESS_DEVICE" =~ ^cuda:[0-9]+$ ]] || { echo "SGLANG_MM_PREPROCESS_DEVICE must be cpu or a logical cuda:N such as cuda:1; got '$MM_PREPROCESS_DEVICE'" >&2; exit 1; }
+    MM_BACKEND_DEFAULT=torchvision ;;
+  *) echo "SGLANG_MM_PREPROCESS_DEVICE must stay unset (model/platform-selected) or select cpu or cuda:N; got '$MM_PREPROCESS_DEVICE'" >&2; exit 1 ;;
 esac
-IMAGE_PROCESSOR_BACKEND="${IMAGE_PROCESSOR_BACKEND:-pil}"
+# bash treats an empty export as unset; the Python resolver reads "" as an
+# explicit invalid value, so make the child environment agree with the guard.
+if [[ -z "$MM_PREPROCESS_DEVICE" ]]; then unset SGLANG_MM_PREPROCESS_DEVICE; else export SGLANG_MM_PREPROCESS_DEVICE="$MM_PREPROCESS_DEVICE"; fi
+IMAGE_PROCESSOR_BACKEND="${IMAGE_PROCESSOR_BACKEND:-$MM_BACKEND_DEFAULT}"
 case "$IMAGE_PROCESSOR_BACKEND" in
-  auto|torchvision|pil) ;;
+  auto|torchvision) ;;
+  pil)
+    if [[ "$MM_PREPROCESS_DEVICE" == cuda:* ]]; then
+      echo "SGLANG_MM_PREPROCESS_DEVICE=$MM_PREPROCESS_DEVICE preprocesses on a CUDA device and needs the fast image processor backend; set IMAGE_PROCESSOR_BACKEND=auto or torchvision, not pil" >&2; exit 1
+    fi ;;
   *) echo "IMAGE_PROCESSOR_BACKEND must be auto, torchvision or pil; got '$IMAGE_PROCESSOR_BACKEND'" >&2; exit 1 ;;
 esac
 export FLASHINFER_GDN_FP16_ACCUM_MMA="${FLASHINFER_GDN_FP16_ACCUM_MMA:-1}"
@@ -221,6 +238,12 @@ export TOKENIZERS_PARALLELISM=false
 SGLANG_REV="$(git -C "$REPO_ROOT" rev-parse --short=10 HEAD)"
 TORCH_VERSION="$("$PYTHON" -c 'import torch; print(torch.__version__)' 2>/dev/null || echo unknown)"
 
+if [[ -n "$MM_PREPROCESS_DEVICE" ]]; then
+  MM_DEVICE_FIELD=(--field "mm_preprocess_device=$MM_PREPROCESS_DEVICE")
+else
+  MM_DEVICE_FIELD=()
+fi
+
 launch_args=(serve
   --warmups=structured_output
   --model-path "$TARGET_MODEL"
@@ -312,6 +335,7 @@ if [[ "$BRINGUP" != 1 ]]; then
       --model "target=$TARGET_MODEL" \
       --field "chat_template_sha256=$CHAT_TEMPLATE_SHA" \
       --field "image_processor_backend=$IMAGE_PROCESSOR_BACKEND" \
+      "${MM_DEVICE_FIELD[@]}" \
       --field "context_length=$CONTEXT_LENGTH" \
       --field "tp_size=$TP_SIZE" \
       --field "page_size=$PAGE_SIZE" \
@@ -356,5 +380,9 @@ fi
 printf 'flashnext-native profile: %s\n  served model id: %s\n  runtime: %s\n  target: %s\n  cache root: %s\n  NIXL root: %s\n' \
   "$([[ "$BRINGUP" == 1 ]] && echo bringup || echo "$([[ "$NIXL" == on ]] && echo full+nixl || echo full)")" \
   "$SERVED_MODEL_NAME" "$SGLANG_EXE" "$TARGET_MODEL" "$CACHE_BASE" "${NIXL_STORAGE:-off}"
-echo "Media preprocessing: CPU baseline (this base has no SGLANG_MM_PREPROCESS_DEVICE consumer; image processor backend: $IMAGE_PROCESSOR_BACKEND)"
+if [[ -n "$MM_PREPROCESS_DEVICE" ]]; then
+  echo "Media preprocessing: parked on $MM_PREPROCESS_DEVICE (image processor backend: $IMAGE_PROCESSOR_BACKEND)"
+else
+  echo "Media preprocessing: model/platform-selected (image processor backend: $IMAGE_PROCESSOR_BACKEND)"
+fi
 exec "$SGLANG_EXE" "${launch_args[@]}"
