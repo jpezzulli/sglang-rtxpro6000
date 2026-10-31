@@ -452,6 +452,44 @@ class TestAnthropicServing(unittest.TestCase):
         )
         self.assertEqual(messages[2]["content"], "Ready")
 
+    def test_tool_reference_without_a_renderer_falls_back_to_text(self):
+        """A template that ignores nested reference parts would drop the name
+        entirely, so the referent is carried as text in the same part order."""
+        request = self._tool_result_request(
+            [
+                {"type": "text", "text": "Tool loaded"},
+                {"type": "tool_reference", "tool_name": "Bash"},
+            ]
+        )
+        serving = self._serving(chat_template=self.INLINE_SYSTEM_TEMPLATE)
+        messages = serving._convert_to_chat_completion_request(request).model_dump(
+            exclude_none=True
+        )["messages"]
+
+        self.assertEqual([m["role"] for m in messages], ["tool"])
+        self.assertEqual(
+            messages[0]["content"],
+            [
+                {"type": "text", "text": "Tool loaded"},
+                {"type": "text", "text": "Tool reference: Bash"},
+            ],
+        )
+
+    def test_tool_reference_a_template_renders_stays_a_structured_part(self):
+        """The fallback is chosen by probing the selected template, not by
+        assuming no template renders references."""
+        request = self._tool_result_request(
+            [{"type": "tool_reference", "tool_name": "Bash"}]
+        )
+        serving = self._serving(chat_template=self.GLM_TOOL_RESULT_TEMPLATE)
+        messages = serving._convert_to_chat_completion_request(request).model_dump(
+            exclude_none=True
+        )["messages"]
+
+        self.assertEqual(
+            messages[0]["content"], [{"type": "tool_reference", "name": "Bash"}]
+        )
+
     def test_mixed_tool_reference_content_renders_text_and_schema(self):
         template = Environment().from_string(self.GLM_TOOL_RESULT_TEMPLATE)
         request = self._tool_result_request(
@@ -893,13 +931,22 @@ class TestAnthropicServing(unittest.TestCase):
             f"expected unenforced-budget warning: {log.output}",
         )
 
-    def test_request_thinking_enabled_requires_budget_tokens(self):
-        """SDK requires ``budget_tokens`` for ``type=enabled`` — Pydantic 400."""
-        from pydantic import ValidationError
-
-        with self.assertRaises(ValidationError) as ctx:
-            self._anthropic_request(thinking={"type": "enabled"}, stream=False)
-        self.assertIn("budget_tokens", str(ctx.exception))
+    def test_request_thinking_enabled_without_budget_tokens_is_accepted(self):
+        """``enabled`` with ``budget_tokens`` absent or null parses and enables
+        reasoning through the same path. The backend never enforced a budget, so
+        a missing one must not 400 — and no number is fabricated for it."""
+        serving = self._serving()
+        for thinking in (
+            {"type": "enabled"},
+            {"type": "enabled", "budget_tokens": None},
+        ):
+            with self.subTest(thinking=thinking):
+                request = self._anthropic_request(thinking=thinking, stream=False)
+                self.assertIsNone(request.thinking.budget_tokens)
+                serving._convert_to_chat_completion_request(request)
+        self.assertEqual(
+            serving.openai_serving_chat.apply_reasoning_calls, [True, True]
+        )
 
     def test_request_thinking_enabled_budget_below_min_is_rejected(self):
         """SDK doc: ``budget_tokens`` must be >= 1024."""

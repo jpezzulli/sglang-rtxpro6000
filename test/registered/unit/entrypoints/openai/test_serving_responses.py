@@ -525,9 +525,10 @@ class ChatToolForwardingTestCase(CustomTestCase):
         request = ResponsesRequest(
             model="IFM/K2-Horizon-7B",
             input="hi",
-            # Template kwargs are the final render inputs, so the server default
-            # below takes precedence over this API convenience field.
-            reasoning={"effort": "medium"},
+            # An omitted effort leaves the schema's materialized default behind,
+            # and template kwargs are the final render inputs, so the server
+            # default below takes precedence over it.
+            reasoning={"summary": "auto"},
             store=False,
         )
 
@@ -547,6 +548,87 @@ class ChatToolForwardingTestCase(CustomTestCase):
         )
         self.assertEqual(output_items[0].content[0].text, "work")
         self.assertEqual(output_items[1].content[0].text, "\nanswer")
+
+    def test_explicit_reasoning_effort_beats_the_server_default(self):
+        """A caller that supplied ``reasoning.effort`` selected it; the effort the
+        schema materialized for every request is not such a choice, so a launcher
+        default may not replace it, and the output parser has to follow the
+        delimiters the prompt was actually rendered with."""
+        serving = make_serving()
+        serving.reasoning_parser = "k2_horizon"
+        serving.default_chat_template_kwargs = {"reasoning_effort": "low"}
+        serving.template_manager.chat_template_name = None
+        serving.tokenizer_manager.tokenizer.apply_chat_template.return_value = [4, 5, 6]
+        request = ResponsesRequest(
+            model="IFM/K2-Horizon-7B",
+            input="hi",
+            reasoning={"effort": "high"},
+            store=False,
+        )
+
+        asyncio.run(
+            serving._make_request(request, None, serving.tokenizer_manager.tokenizer)
+        )
+
+        render_call = serving.tokenizer_manager.tokenizer.apply_chat_template.call_args
+        self.assertEqual(render_call.kwargs["reasoning_effort"], "high")
+        self.assertEqual(request.chat_template_kwargs["reasoning_effort"], "high")
+
+        output_items = serving._make_response_output_items(
+            request,
+            "work</ifm|think>\nanswer",
+            tokenizer=Mock(),
+            require_reasoning=True,
+        )
+        self.assertEqual(
+            [item.content[0].text for item in output_items], ["work", "\nanswer"]
+        )
+
+    def test_summary_only_reasoning_leaves_the_template_default_alone(self):
+        """``reasoning.summary`` alone does not choose an effort: the materialized
+        schema default must not outrank the launcher default either."""
+        serving = make_serving()
+        serving.reasoning_parser = "k2_horizon"
+        serving.default_chat_template_kwargs = {"reasoning_effort": "low"}
+        serving.template_manager.chat_template_name = None
+        serving.tokenizer_manager.tokenizer.apply_chat_template.return_value = [4, 5, 6]
+        request = ResponsesRequest(
+            model="IFM/K2-Horizon-7B",
+            input="hi",
+            reasoning={"summary": "auto"},
+            store=False,
+        )
+
+        asyncio.run(
+            serving._make_request(request, None, serving.tokenizer_manager.tokenizer)
+        )
+
+        render_call = serving.tokenizer_manager.tokenizer.apply_chat_template.call_args
+        self.assertEqual(render_call.kwargs["reasoning_effort"], "low")
+        self.assertEqual(request.chat_template_kwargs["reasoning_effort"], "low")
+
+    def test_request_template_kwargs_still_win_over_an_explicit_effort(self):
+        """The kwargs are what Jinja receives, so they remain the last word."""
+        serving = make_serving()
+        serving.reasoning_parser = "k2_horizon"
+        serving.default_chat_template_kwargs = {"reasoning_effort": "low"}
+        serving.template_manager.chat_template_name = None
+        serving.tokenizer_manager.tokenizer.apply_chat_template.return_value = [4, 5, 6]
+        request = ResponsesRequest(
+            model="IFM/K2-Horizon-7B",
+            input="hi",
+            reasoning={"effort": "high"},
+            chat_template_kwargs={"reasoning_effort": "medium"},
+            store=False,
+        )
+
+        asyncio.run(
+            serving._make_request(request, None, serving.tokenizer_manager.tokenizer)
+        )
+
+        render_call = serving.tokenizer_manager.tokenizer.apply_chat_template.call_args
+        self.assertEqual(render_call.kwargs["reasoning_effort"], "medium")
+        self.assertEqual(request.chat_template_kwargs["reasoning_effort"], "medium")
 
 
 class ReasoningRequestForwardingTestCase(unittest.TestCase):
@@ -1817,7 +1899,7 @@ class HarmonyResponsesTestCase(CustomTestCase):
                 parameters={"type": "object"},
             ),
             ResponseTool(type="web_search"),
-            ResponseTool(type="namespace", name="codex"),
+            ResponseTool(type="namespace", name="codex", tools=[]),
             ResponseTool(type="mcp"),
         ]
         msg = get_developer_message(instructions="be helpful", tools=tools)

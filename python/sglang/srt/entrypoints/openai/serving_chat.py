@@ -1328,7 +1328,9 @@ class OpenAIServingChat(OpenAIServingBase):
         is_multimodal = self.tokenizer_manager.model_config.is_multimodal
 
         # Process messages and apply chat template
-        processed_messages = self._process_messages(request, is_multimodal)
+        processed_messages = self._process_messages(
+            request, is_multimodal, request_first_reasoning_effort=True
+        )
         # Build sampling parameters
         sampling_params = request.to_sampling_params(
             stop=processed_messages.stop,
@@ -1797,6 +1799,7 @@ class OpenAIServingChat(OpenAIServingBase):
         is_multimodal: bool,
         *,
         output_constrained: bool = False,
+        request_first_reasoning_effort: bool = False,
     ) -> MessageProcessingResult:
         """Process chat messages and apply chat template"""
         if self.is_minimax_m3:
@@ -1806,6 +1809,16 @@ class OpenAIServingChat(OpenAIServingBase):
         if self.default_chat_template_kwargs:
             ctk = dict(request.chat_template_kwargs or {})
             for k, v in self.default_chat_template_kwargs.items():
+                # An API effort the caller selected is not a unset option, so a
+                # launcher default must not reinsert itself over that choice and
+                # then be read back as the request's effort. Callers that only
+                # render (tokenize) keep default-first precedence.
+                if (
+                    request_first_reasoning_effort
+                    and k == "reasoning_effort"
+                    and request.reasoning_effort is not None
+                ):
+                    continue
                 ctk.setdefault(k, v)
             request.chat_template_kwargs = ctk
             effort = ctk.get("reasoning_effort")

@@ -137,7 +137,8 @@ class NamespaceToolTemplateTestCase(CustomTestCase):
         self.assertTrue(tool["function"]["defer_loading"])
 
     def test_non_muse_keeps_existing_function_and_custom_tool_schemas(self):
-        """Muse-only metadata must not change another model's rendered tools."""
+        """A namespace adds its flattened member to another model's tools, but
+        Muse-only metadata must not change the schemas it already rendered."""
         custom = {
             "type": "custom",
             "name": "execute",
@@ -161,19 +162,26 @@ class NamespaceToolTemplateTestCase(CustomTestCase):
                 self.assertEqual(
                     expected[1]["function"]["parameters"]["required"], ["input"]
                 )
-                for namespaces in ([], [BROWSER]):
-                    with self.subTest(namespaces=bool(namespaces)):
-                        actual = self._template_tools(
-                            _request(
-                                tools=[
-                                    *namespaces,
-                                    LOOKUP,
-                                    {**custom, "defer_loading": True},
-                                ]
-                            ),
-                            parser,
-                        )
-                        self.assertEqual(actual, expected)
+                actual = self._template_tools(
+                    _request(
+                        tools=[BROWSER, LOOKUP, {**custom, "defer_loading": True}]
+                    ),
+                    parser,
+                )
+                by_name = {
+                    tool["function"]["name"]: tool["function"] for tool in actual
+                }
+                for tool in expected:
+                    self.assertEqual(
+                        by_name[tool["function"]["name"]], tool["function"]
+                    )
+                (member,) = [
+                    name for name in by_name if name not in {"lookup", "execute"}
+                ]
+                self.assertEqual(member, "browser__search")
+                self.assertIn("Browse the web", by_name[member]["description"])
+                # A member's own defer_loading is Muse-only metadata as well.
+                self.assertNotIn("defer_loading", by_name[member])
 
     def test_namespace_does_not_hide_custom_tool_schema(self):
         """Adding a namespace must not remove a custom tool from the prompt."""
@@ -319,9 +327,9 @@ class NamespaceToolCallOutputTestCase(CustomTestCase):
 
 
 class NamespaceToolCallReplayTestCase(CustomTestCase):
-    def test_replayed_call_is_rejoined_only_for_muse(self):
-        """The template and the tool-call parser know the call as
-        ``<namespace>.<function>``; a replayed item carries the two separately."""
+    def test_replayed_call_is_rejoined_through_the_binding(self):
+        """The prompt and the tool-call parser know a member by its bound
+        spelling; a replayed item carries the two halves separately."""
         request = _request(
             input=[
                 {"role": "user", "content": "search"},
@@ -351,7 +359,10 @@ class NamespaceToolCallReplayTestCase(CustomTestCase):
                         for message in messages
                         for call in message.get("tool_calls", [])
                     ],
-                    ["browser.search" if parser == "muse" else "search", "lookup"],
+                    [
+                        "browser.search" if parser == "muse" else "browser__search",
+                        "lookup",
+                    ],
                 )
 
 

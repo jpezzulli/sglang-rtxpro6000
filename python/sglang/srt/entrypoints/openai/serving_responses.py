@@ -10,7 +10,15 @@ import logging
 import time
 from contextlib import AsyncExitStack
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, AsyncGenerator, AsyncIterator, Optional, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Iterable,
+    Optional,
+    Union,
+)
 
 import jinja2
 import openai.types.responses as openai_responses_types
@@ -65,6 +73,7 @@ from sglang.srt.entrypoints.openai.protocol import (
     ChatCompletionMessageParam,
     ChatCompletionRequest,
     Function,
+    ResponseAdditionalTools,
     MessageProcessingResult,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
@@ -72,12 +81,16 @@ from sglang.srt.entrypoints.openai.protocol import (
     ResponsesLifecycleEvent,
     ResponsesRequest,
     ResponsesResponse,
+    ResponseToolState,
     Tool,
     UsageInfo,
 )
 from sglang.srt.entrypoints.openai.responses_adapters import (
+    IDENTITY_SEPARATOR,
+    ToolIdentities,
+    WireIdentity,
+    namespace_members,
     custom_tool_description,
-    custom_tool_names,
     custom_tool_parameters,
     decode_custom_tool_input,
     decode_custom_tool_input_prefix,
@@ -85,9 +98,9 @@ from sglang.srt.entrypoints.openai.responses_adapters import (
     encode_custom_tool_input,
     encode_reasoning_state,
     label_developer_content,
-    namespace_function_names,
-    namespace_functions,
+    expand_tool_namespaces,
     response_tool_name,
+    tool_identities,
 )
 from sglang.srt.entrypoints.openai.responses_tools.beam import (
     BeamToolAdapter,
@@ -363,10 +376,9 @@ class OpenAIServingResponses(OpenAIServingChat):
             )
 
         tool_choice = request.effective_tool_choice()
-        if isinstance(tool_choice, dict) and not any(
-            tool.type in ("function", "custom") and tool.name == tool_choice["name"]
-            for tool in request.tools or []
-        ):
+        if isinstance(tool_choice, dict) and not self._tool_identities(
+            request
+        ).declares(tool_choice["name"], tool_choice.get("namespace")):
             return self.create_error_response(
                 f"Tool {tool_choice['name']!r} is not declared in tools",
                 param="tool_choice",
@@ -742,14 +754,20 @@ class OpenAIServingResponses(OpenAIServingChat):
             request, prev_response, tool_adapter=tool_adapter
         )
 
-        chat_tools = self._response_tools_to_chat_tools(request)
+        chat_tools = self._response_tools_to_chat_tools(request, prev_response)
         chat_request = ChatCompletionRequest(
             model=request.model,
             messages=messages,
             stream=request.stream,
             tools=chat_tools or None,
             tool_choice=(
-                self._chat_tool_choice(request.effective_tool_choice())
+                self._chat_tool_choice(
+                    request.effective_tool_choice(),
+                    self._tool_identities(
+                        request,
+                        self._replayed_tool_identities(request, prev_response),
+                    ),
+                )
                 if chat_tools
                 else "none"
             ),
@@ -762,7 +780,9 @@ class OpenAIServingResponses(OpenAIServingChat):
             reasoning_effort=(request.reasoning.effort if request.reasoning else None),
             chat_template_kwargs=request.chat_template_kwargs,
         )
-        chat_request._template_tools = self._response_tools_to_template_tools(request)
+        chat_request._template_tools = self._response_tools_to_template_tools(
+            request, prev_response
+        )
 
         media_error = self._validate_media_content(chat_request)
         if media_error:
@@ -773,16 +793,24 @@ class OpenAIServingResponses(OpenAIServingChat):
             chat_request,
             is_multimodal,
             output_constrained=request.has_json_schema_constraint(),
+            # The schema materializes medium even for summary-only reasoning, so
+            # only an effort the caller actually supplied may outrank the launch
+            # default; anything else keeps default-first precedence.
+            request_first_reasoning_effort=(
+                request.reasoning is not None
+                and "effort" in request.reasoning.model_fields_set
+            ),
         )
         # ``_process_messages`` merges server defaults into the temporary Chat
         # request before rendering. Response parsing happens later from the
         # original request, so carry over the exact template kwargs that selected
         # the wire-format delimiters.
-        request.chat_template_kwargs = (
-            dict(chat_request.chat_template_kwargs)
-            if chat_request.chat_template_kwargs is not None
-            else None
-        )
+        merged_kwargs = dict(chat_request.chat_template_kwargs or {})
+        if chat_request.reasoning_effort is not None:
+            # The parser reading this dict must pick the delimiters the prompt was
+            # rendered with, not the default that lost the merge.
+            merged_kwargs.setdefault("reasoning_effort", chat_request.reasoning_effort)
+        request.chat_template_kwargs = merged_kwargs or None
 
         _, engine_prompt = self._engine_prompt(processed_messages, is_multimodal)
         request_prompts = [engine_prompt]
@@ -1197,7 +1225,7 @@ class OpenAIServingResponses(OpenAIServingChat):
             reasoning_content = None
             content = final_output
 
-        tool_choice = request.effective_tool_choice()
+        tool_choice = self._parser_tool_choice(request, request.effective_tool_choice())
         is_required = tool_choice == "required" or isinstance(tool_choice, dict)
         calls: list[ToolCallItem] = []
         parsed_via_native = False
@@ -1274,15 +1302,11 @@ class OpenAIServingResponses(OpenAIServingChat):
                 type="message",
             )
             output_items.append(message)
-        custom_names = custom_tool_names(request.tools)
+        custom_names = request._tool_state.custom_names
+        # Namespace members are bound in the request's identity table, so a
+        # parsed call resolves through the same bindings the prompt was built
+        # from; a name the request never declared is reported untouched.
         tool_names = request._tool_state.names
-        if self.tool_call_parser == "muse":
-            tool_names = {
-                call_name: {"namespace": namespace, "name": name}
-                for call_name, (namespace, name) in namespace_function_names(
-                    request.tools
-                ).items()
-            }
         for call in calls:
             item = self._make_tool_call_item(
                 call.name, call.parameters, custom_names, tool_names
@@ -1373,11 +1397,15 @@ class OpenAIServingResponses(OpenAIServingChat):
         return normal_text, calls
 
     def _uses_required_tool_json(
-        self, request: ResponsesRequest, chat_tools: list[Tool]
+        self,
+        request: ResponsesRequest,
+        chat_tools: list[Tool],
+        tool_choice: Any = None,
     ) -> bool:
         """Whether required/named tool output is constrained to the generic JSON
         array, rather than to the configured detector's native framing."""
-        tool_choice = request.effective_tool_choice()
+        if tool_choice is None:
+            tool_choice = request.effective_tool_choice()
         if not chat_tools or not (
             tool_choice == "required" or isinstance(tool_choice, dict)
         ):
@@ -1393,43 +1421,195 @@ class OpenAIServingResponses(OpenAIServingChat):
         return not self._tool_parser_owns_format(probe)
 
     @staticmethod
-    def _chat_tool_choice(tool_choice: Any) -> Any:
+    def _chat_tool_choice(
+        tool_choice: Any, identities: Optional[ToolIdentities] = None
+    ) -> Any:
         """Nest an ``effective_tool_choice()`` result the way chat expects:
-        ``{"type":"function","name":X}`` -> ``{...,"function":{"name":X}}``."""
+        ``{"type":"function","name":X}`` -> ``{...,"function":{"name":X}}``. A
+        namespaced selection names the spelling the prompt advertised, not the
+        bare leaf the caller happened to write."""
         if not isinstance(tool_choice, dict):
             return tool_choice
-        return {"type": "function", "function": {"name": tool_choice["name"]}}
+        return {
+            "type": "function",
+            "function": {
+                "name": (identities or ToolIdentities()).model_name(
+                    tool_choice["name"], tool_choice.get("namespace")
+                )
+            },
+        }
 
-    def _response_tools_to_chat_tools(self, request: ResponsesRequest) -> list[Tool]:
-        # ``function`` and ``custom`` tools flow to chat; built-ins go through
-        # harmony. A custom tool is shimmed into a single-string function tool.
+    def _parser_tool_choice(
+        self,
+        request: ResponsesRequest,
+        tool_choice: Any,
+        identities: Optional[ToolIdentities] = None,
+    ) -> Any:
+        """A named choice in the spelling the tool-call parser was offered.
+
+        Only the name reaches the constraint, so a namespace is folded in here
+        rather than dropped on the way to the parser.
+        """
+        if not isinstance(tool_choice, dict) or not tool_choice.get("namespace"):
+            return tool_choice
+        bound = (identities or self._tool_identities(request)).model_name(
+            tool_choice["name"], tool_choice["namespace"]
+        )
+        return {**tool_choice, "name": bound}
+
+    def _tool_identities(
+        self,
+        request: ResponsesRequest,
+        replayed: Iterable[WireIdentity] = (),
+    ) -> ToolIdentities:
+        """The one identity table for this request.
+
+        Muse spells a namespace member ``<namespace>.<function>``, so the table
+        derives that spelling and every path that shows, selects, parses or
+        replays a name reads it back out of the same bindings.
+        """
+        return tool_identities(
+            self._effective_response_tools(request),
+            replayed,
+            separator="." if self.tool_call_parser == "muse" else IDENTITY_SEPARATOR,
+        )
+
+    def _effective_response_tools(self, request: ResponsesRequest) -> list:
+        """The declarations a request can actually call: its own tools plus every
+        inline ``additional_tools`` inventory in its history.
+
+        A client rebinds a leaf by declaring it again, so the last declaration of
+        an identity is the callable one while the siblings a rebinding did not
+        mention stay offered, and the namespace they belong to keeps rendering as
+        one group. A duplicate inside a single inventory is ambiguous rather than
+        a rebind, and built-ins keep their own execution paths.
+        """
+        inventories = [request.tools]
+        for item in self._response_input_history(request):
+            if isinstance(item, dict) and item.get("type") == "additional_tools":
+                inventories.append(ResponseAdditionalTools.model_validate(item).tools)
+
+        order: list = []
+        callables: dict = {}
+        namespaces: dict = {}
+        builtins = []
+        for inventory in inventories:
+            seen = set()
+            for tool in inventory or []:
+                if tool.type == "namespace" and tool.name:
+                    members = namespaces.setdefault(
+                        tool.name, {"tool": tool, "members": {}}
+                    )
+                    # The latest declaration carries the namespace metadata; its
+                    # members merge over the ones an earlier group offered.
+                    members["tool"] = tool
+                    for _, definition in namespace_members(tool):
+                        identity = (tool.name, definition["name"])
+                        if identity in seen:
+                            raise ValueError(
+                                "Callable tool names must be unique within each "
+                                "inventory and namespace."
+                            )
+                        seen.add(identity)
+                        if identity not in callables:
+                            order.append(identity)
+                        members["members"][definition["name"]] = definition
+                        callables[identity] = tool.name
+                    continue
+                if tool.type in ("function", "custom") and tool.name:
+                    identity = (None, tool.name)
+                    if identity in seen:
+                        raise ValueError(
+                            "Callable tool names must be unique within each "
+                            "inventory and namespace."
+                        )
+                    seen.add(identity)
+                    if identity not in callables:
+                        order.append(identity)
+                    callables[identity] = tool
+                    continue
+                builtins.append(tool)
+
+        merged = []
+        for identity in order:
+            if identity[0] is None:
+                merged.append(callables[identity])
+                continue
+            group = namespaces[identity[0]]
+            if group.get("merged"):
+                continue
+            group["merged"] = True
+            merged.append(
+                group["tool"].model_copy(
+                    update={"tools": list(group["members"].values())}
+                )
+            )
+        return [*merged, *builtins]
+
+    def _replayed_tool_identities(
+        self,
+        request: ResponsesRequest,
+        prev_response: Optional[ResponsesResponse] = None,
+    ) -> list[WireIdentity]:
+        """Explicit wire identities named by replayed call items.
+
+        History can name a tool the request no longer declares; binding those
+        keeps a retired tool from landing on the spelling of something callable.
+        """
+        entries: list = []
+        if not isinstance(request.input, str):
+            entries.extend(request.input or [])
+        if prev_response is not None:
+            entries.extend(prev_response.output or [])
+        replayed = []
+        for item in entries:
+            if hasattr(item, "model_dump"):
+                item = item.model_dump(exclude_none=True)
+            if not isinstance(item, dict) or item.get("type") not in (
+                "function_call",
+                "custom_tool_call",
+            ):
+                continue
+            name = item.get("name")
+            if isinstance(name, str) and name:
+                namespace = item.get("namespace")
+                replayed.append(
+                    (namespace if isinstance(namespace, str) else None, name)
+                )
+        return replayed
+
+    def _response_tools_to_chat_tools(
+        self,
+        request: ResponsesRequest,
+        prev_response: Optional[ResponsesResponse] = None,
+    ) -> list[Tool]:
+        # ``function`` and ``custom`` tools -- including the members of a
+        # namespace -- flow to chat; built-ins go through harmony. A custom tool
+        # is shimmed into a single-string function tool.
         chat_tools = []
         is_muse = self.tool_call_parser == "muse"
-        for tool in request.tools:
-            if is_muse and tool.type == "namespace" and tool.name:
-                # Members are called as ``<namespace>.<function>``; register those
-                # names so the tool-call parser accepts the calls.
-                for member in namespace_functions(tool):
-                    chat_tools.append(
-                        Tool(
-                            type="function",
-                            function=Function(
-                                name=f"{tool.name}.{member['name']}",
-                                description=member.get("description"),
-                                parameters=member.get("parameters"),
-                                strict=bool(member.get("strict", False)),
-                                defer_loading=member.get("defer_loading"),
-                            ),
-                        )
-                    )
-                continue
-            if tool.type == "function":
-                description, parameters = tool.description, tool.parameters
-            elif tool.type == "custom" and tool.name:
+        identities = self._tool_identities(
+            request, self._replayed_tool_identities(request, prev_response)
+        )
+        # ``names`` is the callable half of the bindings, in the shape every
+        # output path already reads, so the prompt, the parsed calls and the
+        # response items cannot drift apart. An adapter that flattened the
+        # inventory itself already published the authoritative table.
+        state = request._tool_state
+        request._tool_state = ResponseToolState(
+            public_tools=state.public_tools,
+            public_choice=state.public_choice,
+            names=state.names or identities.names,
+            custom_names=identities.custom_names,
+        )
+        for tool in expand_tool_namespaces(
+            self._effective_response_tools(request), identities
+        ):
+            if tool.type == "custom" and tool.name:
                 description = custom_tool_description(tool.description, tool.format)
                 parameters = custom_tool_parameters()
             else:
-                continue
+                description, parameters = tool.description, tool.parameters
             chat_tools.append(
                 Tool(
                     type="function",
@@ -1444,9 +1624,38 @@ class OpenAIServingResponses(OpenAIServingChat):
             )
         return chat_tools
 
+    def _inline_tools_to_chat_tools(self, inventory: dict) -> list[Tool]:
+        """One inline ``additional_tools`` inventory as chat function tools.
+
+        The declarations bind through the same table as the request's own tools,
+        so an inline member is spelled, selected and reported identically.
+        """
+        tools = ResponseAdditionalTools.model_validate(inventory).tools
+        return [
+            tool
+            for tool in self._response_tools_to_chat_tools(
+                ResponsesRequest(
+                    model=inventory.get("model") or "",
+                    input="",
+                    tools=tools,
+                )
+            )
+        ]
+
+    def _effective_tools(self, request: ChatCompletionRequest) -> list[Tool]:
+        # The chat renderer keeps an inline inventory in message history, so the
+        # constraint and parser inventory must use the same latest binding of a
+        # leaf that the prompt renders instead of offering it twice.
+        return list(
+            {
+                tool.function.name: tool for tool in super()._effective_tools(request)
+            }.values()
+        )
+
     def _response_tools_to_template_tools(
         self,
         request: ResponsesRequest,
+        prev_response: Optional[ResponsesResponse] = None,
     ) -> Optional[list[dict]]:
         """Tools for Muse's chat template when the request has namespace tools:
         namespaces stay nested, so the template can render namespace metadata and
@@ -1455,33 +1664,60 @@ class OpenAIServingResponses(OpenAIServingChat):
             tool.type == "namespace" for tool in request.tools
         ):
             return None
+        # The template composes a member call name itself, so nesting is only
+        # usable while the bound spelling is exactly that composition. A
+        # contested member goes through the flattened list instead, which renders
+        # the name the parser and the response items will report.
+        identities = self._tool_identities(
+            request, self._replayed_tool_identities(request, prev_response)
+        )
         template_tools: list[dict] = []
-        for tool in request.tools:
+        for tool in self._effective_response_tools(request):
             if tool.type == "namespace" and tool.name:
-                namespace = {
-                    "type": "namespace",
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "tools": [dict(member) for member in namespace_functions(tool)],
-                }
-                if tool.defer_loading is not None:
-                    namespace["defer_loading"] = tool.defer_loading
-                template_tools.append(namespace)
-            elif tool.type in ("function", "custom") and tool.name:
-                function = {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.parameters,
-                }
-                if tool.type == "custom":
-                    function["description"] = custom_tool_description(
-                        tool.description, tool.format
-                    )
-                    function["parameters"] = custom_tool_parameters()
-                if tool.defer_loading is not None:
-                    function["defer_loading"] = tool.defer_loading
-                template_tools.append({"type": "function", "function": function})
+                members = []
+                for member_type, definition in namespace_members(tool):
+                    bound = identities.model_name(definition["name"], tool.name)
+                    if bound != f"{tool.name}.{definition['name']}":
+                        template_tools.extend(
+                            self._template_tool_definitions([tool], identities)
+                        )
+                        break
+                    members.append({**definition, "type": member_type})
+                else:
+                    namespace = {
+                        "type": "namespace",
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "tools": members,
+                    }
+                    if tool.defer_loading is not None:
+                        namespace["defer_loading"] = tool.defer_loading
+                    template_tools.append(namespace)
+                continue
+            template_tools.extend(self._template_tool_definitions([tool], identities))
         return template_tools
+
+    @staticmethod
+    def _template_tool_definitions(tools, identities: ToolIdentities) -> list[dict]:
+        """Ordinary declarations in the shape Muse's template renders flat tools."""
+        rendered = []
+        for tool in expand_tool_namespaces(tools, identities):
+            if tool.type not in ("function", "custom"):
+                continue
+            function = {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            }
+            if tool.type == "custom":
+                function["description"] = custom_tool_description(
+                    tool.description, tool.format
+                )
+                function["parameters"] = custom_tool_parameters()
+            if tool.defer_loading is not None:
+                function["defer_loading"] = tool.defer_loading
+            rendered.append({"type": "function", "function": function})
+        return rendered
 
     @staticmethod
     def _normalize_response_content_part_for_chat(content_part: Any) -> Any:
@@ -1554,7 +1790,11 @@ class OpenAIServingResponses(OpenAIServingChat):
 
     @classmethod
     def _normalize_response_message_for_chat(
-        cls, message: Any, *, tool_call_parser: Optional[str] = None
+        cls,
+        message: Any,
+        *,
+        tool_call_parser: Optional[str] = None,
+        identities: Optional[ToolIdentities] = None,
     ) -> Any:
         """Convert one Responses-API input item to a chat-completions message."""
         if hasattr(message, "model_dump"):
@@ -1590,16 +1830,56 @@ class OpenAIServingResponses(OpenAIServingChat):
             else:
                 raw = "{}"
             name = message.get("name")
-            if tool_call_parser == "muse" and message.get("namespace"):
-                name = f"{message['namespace']}.{name}"
+            if message.get("namespace"):
+                # History names an identity, not a string to concatenate: a
+                # retired or renamed declaration cannot take the spelling a
+                # callable tool already holds.
+                name = (identities or ToolIdentities(separator=".")).model_name(
+                    name, message["namespace"]
+                )
             return cls._chat_tool_call_message(message, name, raw)
         if msg_type == "custom_tool_call":
+            if not isinstance(message.get("input"), str):
+                raise ValueError("custom_tool_call must include a string input.")
             # Replay through the same single-string shim the tool was offered as.
             return cls._chat_tool_call_message(
                 message,
                 message.get("name"),
-                encode_custom_tool_input(message.get("input") or ""),
+                encode_custom_tool_input(message["input"]),
             )
+        if msg_type == "agent_message":
+            # Plaintext inter-agent messages are conversation content; routing and
+            # orchestration stay the client's responsibility.
+            texts = []
+            content = message.get("content")
+            if not isinstance(content, list):
+                raise ValueError(
+                    "agent_message content must be a list of input_text parts."
+                )
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != "input_text":
+                    raise ValueError(
+                        "Only plaintext input_text agent_message content is supported."
+                    )
+                if not isinstance(part.get("text"), str):
+                    raise ValueError(
+                        "agent_message input_text parts must include a string text."
+                    )
+                texts.append(part["text"])
+            if not texts:
+                raise ValueError(
+                    "agent_message must contain plaintext input_text content."
+                )
+            agent = message.get("agent")
+            if agent is not None and not isinstance(agent, dict):
+                raise ValueError("agent_message agent must be an object or null.")
+            author = message.get("author") or (agent or {}).get("agent_name")
+            header = "[agent message"
+            if author:
+                header += f" from {author}"
+            if message.get("recipient"):
+                header += f" to {message['recipient']}"
+            return {"role": "user", "content": header + "]\n" + "\n".join(texts)}
         if msg_type in ("function_call_output", "custom_tool_call_output"):
             return {
                 "role": "tool",
@@ -1738,6 +2018,9 @@ class OpenAIServingResponses(OpenAIServingChat):
         tool_adapter=None,
     ) -> list[ChatCompletionMessageParam]:
         messages: list[ChatCompletionMessageParam] = []
+        identities = self._tool_identities(
+            request, self._replayed_tool_identities(request, prev_response)
+        )
         if request.instructions:
             messages.append(
                 {
@@ -1746,11 +2029,37 @@ class OpenAIServingResponses(OpenAIServingChat):
                 }
             )
 
+        has_inline_tools = False
         for input_item in self._response_input_history(request):
+            if isinstance(input_item, dict) and input_item.get("type") == (
+                "additional_tools"
+            ):
+                inventory = [
+                    tool.model_dump(exclude_none=True)
+                    for tool in self._inline_tools_to_chat_tools(input_item)
+                ]
+                messages.append(
+                    {
+                        "role": "system",
+                        # Native encoders consume message.tools; Jinja templates
+                        # need the inventory in content at this history position.
+                        "content": (
+                            ""
+                            if self.chat_encoding_spec is not None
+                            else "Additional tools:\n"
+                            + json.dumps(inventory, ensure_ascii=False)
+                        ),
+                        "tools": inventory,
+                    }
+                )
+                has_inline_tools = True
+                continue
             if tool_adapter is not None:
                 input_item = tool_adapter.input_item(input_item)
             normalized = self._normalize_response_message_for_chat(
-                input_item, tool_call_parser=self.tool_call_parser
+                input_item,
+                tool_call_parser=self.tool_call_parser,
+                identities=identities,
             )
             if normalized is not None:
                 messages.append(normalized)
@@ -1759,6 +2068,13 @@ class OpenAIServingResponses(OpenAIServingChat):
         # (message + function_call(s)); collapse them into one chat message
         # so chat templates render a single assistant block per turn.
         messages = self._merge_consecutive_assistant_messages(messages)
+
+        if has_inline_tools:
+            # A later inventory must never migrate into the initial system
+            # prompt. Empty inventories also keep their position.
+            if request.tools and "tools" in messages[0]:
+                messages.insert(0, {"role": "system", "content": ""})
+            return messages
 
         # Preserve the history prefix when a later instruction is appended.
         if self.supports_inline_system:
@@ -2297,14 +2613,12 @@ class OpenAIServingResponses(OpenAIServingChat):
             )
 
         chat_tools = self._response_tools_to_chat_tools(request)
-        custom_names = custom_tool_names(request.tools)
-        namespace_names = (
-            namespace_function_names(request.tools)
-            if self.tool_call_parser == "muse"
-            else {}
+        custom_names = request._tool_state.custom_names
+        identities = self._tool_identities(request)
+        tool_choice = self._parser_tool_choice(
+            request, request.effective_tool_choice(), identities
         )
-        tool_choice = request.effective_tool_choice()
-        required_json = self._uses_required_tool_json(request, chat_tools)
+        required_json = self._uses_required_tool_json(request, chat_tools, tool_choice)
         encoding_output = self._encoding_output()
         token_stream = (
             encoding_output.new_responses_stream(
@@ -2542,9 +2856,6 @@ class OpenAIServingResponses(OpenAIServingChat):
             message_state["open"] = False
             return events
 
-        def _namespace_field(state: dict) -> dict:
-            return {"namespace": state["namespace"]} if state["namespace"] else {}
-
         def _close_tool_call_state(tool_index: int):
             state = tool_call_states.get(tool_index)
             if state is None or state.get("done"):
@@ -2602,7 +2913,6 @@ class OpenAIServingResponses(OpenAIServingChat):
                     type="function_call",
                     id=state["item_id"],
                     status=item_status,
-                    **_namespace_field(state),
                 )
                 events.append(
                     _send_event(
@@ -2825,7 +3135,9 @@ class OpenAIServingResponses(OpenAIServingChat):
                             current_output_index += 1
                             name = call.name or ""
                             is_custom = name in custom_names
-                            namespace, name = namespace_names.get(name, (None, name))
+                            # The identity table resolves a model name back to
+                            # its declaration when the item is built, so no name
+                            # is guessed apart here.
                             state = {
                                 "item_id": (
                                     f"ctc_{random_uuid()[:8]}"
@@ -2835,7 +3147,6 @@ class OpenAIServingResponses(OpenAIServingChat):
                                 "call_id": f"call_{random_uuid()[:24]}",
                                 "output_index": current_output_index,
                                 "name": name,
-                                "namespace": namespace,
                                 "arguments": "",
                                 "custom": is_custom,
                                 "payload": "",
@@ -2865,7 +3176,6 @@ class OpenAIServingResponses(OpenAIServingChat):
                                     type="function_call",
                                     id=state["item_id"],
                                     status="in_progress",
-                                    **_namespace_field(state),
                                 )
                             yield _send_event(
                                 openai_responses_types.ResponseOutputItemAddedEvent(

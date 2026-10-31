@@ -1885,8 +1885,49 @@ class ResponseTool(BaseModel):
 
     @model_validator(mode="after")
     def validate_function_tool(self) -> ResponseTool:
-        if self.type == "function" and not self.name:
-            raise ValueError("Function tools must include a name.")
+        # A callable declaration without its name cannot be bound to a model
+        # visible spelling, and a namespace without members offers nothing.
+        # Members are validated in their unwrapped form because templates accept
+        # both ``{"name": ...}`` and ``{"function": {...}}`` spellings.
+        if self.type in ("function", "custom", "namespace") and not self.name:
+            raise ValueError(f"{self.type.capitalize()} tools must include a name.")
+        if self.type == "namespace":
+            if self.tools is None:
+                raise ValueError("Namespace tools must include a tools list.")
+            for child in self.tools:
+                if not isinstance(child, dict):
+                    raise ValueError(
+                        "Namespace entries must be function or custom tools."
+                    )
+                member_type = child.get("type", "function")
+                if member_type not in ("function", "custom"):
+                    raise ValueError(
+                        "Namespace entries must be function or custom tools."
+                    )
+                definition = child.get("function", child)
+                if not isinstance(definition, dict) or not definition.get("name"):
+                    raise ValueError(
+                        f"Namespace {member_type} entries must include a name."
+                    )
+        return self
+
+
+class ResponseAdditionalTools(BaseModel):
+    """A tool inventory appearing at one position in the request history."""
+
+    type: Literal["additional_tools"]
+    tools: List[ResponseTool]
+
+    @model_validator(mode="after")
+    def validate_tools(self) -> ResponseAdditionalTools:
+        # Built-ins execute through their own paths and cannot be introduced
+        # mid-history, so an inline inventory carries callables only.
+        if any(
+            tool.type not in ("function", "custom", "namespace") for tool in self.tools
+        ):
+            raise ValueError(
+                "additional_tools supports function, custom and namespace tools."
+            )
         return self
 
 
@@ -1896,6 +1937,9 @@ class ResponseToolState(msgspec.Struct, frozen=True):
     public_tools: list[ResponseTool] | None = None
     public_choice: str | dict[str, Any] | None = None
     names: dict[str, dict[str, str]] = {}
+    # Model-visible spellings of ``custom`` tools, whose call carries a freeform
+    # payload instead of JSON arguments.
+    custom_names: set[str] = set()
 
 
 class ResponseInputMessageParam(EasyInputMessageParam, total=False):
@@ -1914,6 +1958,7 @@ class ResponseOutputMessage(OpenAIResponseOutputMessage):
 ResponseInputOutputItem: TypeAlias = Union[
     ResponseInputMessageParam,
     ResponseFunctionCallInputParam,
+    ResponseAdditionalTools,
     ResponseOutputMessage,
     ResponseInputItemParam,
     "ResponseReasoningItem",
@@ -2057,6 +2102,14 @@ class ResponsesRequest(PDRoutingFields):
     def _normalize_input_item_for_validation(item):
         if not isinstance(item, dict):
             return item
+
+        if item.get("type") == "additional_tools":
+            # Validate an inline inventory at parse time, while the request can
+            # still answer 400, and keep the items as plain dicts so the history
+            # position and any newer fields survive.
+            return ResponseAdditionalTools.model_validate(item).model_dump(
+                exclude_none=True
+            )
 
         # an output item replayed into input carries a string id; without this it'd
         # be read as an item-reference, drop its content, and fail as an empty {}.

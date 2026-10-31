@@ -2112,6 +2112,44 @@ class ServingChatTestCase(CustomTestCase):
 
         self.assertEqual(req.reasoning_effort, "high")
 
+    def test_request_reasoning_effort_beats_the_server_default(self):
+        """A launcher default fills an unset effort; it cannot replace the one the
+        caller asked for, because the merged kwargs are read back as the
+        request's effort before the template renders."""
+        self.template_manager.chat_template_name = None
+        self.template_manager.jinja_template_content_format = "string"
+        self.tm.tokenizer.apply_chat_template.return_value = [1, 2, 3]
+        self.chat.default_chat_template_kwargs = {"reasoning_effort": "medium"}
+
+        req = ChatCompletionRequest(
+            model="x",
+            messages=[{"role": "user", "content": "What is 2+2?"}],
+            reasoning_effort="high",
+        )
+
+        self.chat._convert_to_internal_request(req)
+
+        kwargs = self.tm.tokenizer.apply_chat_template.call_args.kwargs
+        self.assertEqual(req.reasoning_effort, "high")
+        self.assertEqual(kwargs["reasoning_effort"], "high")
+
+    def test_server_default_reasoning_effort_still_applies_when_unset(self):
+        self.template_manager.chat_template_name = None
+        self.template_manager.jinja_template_content_format = "string"
+        self.tm.tokenizer.apply_chat_template.return_value = [1, 2, 3]
+        self.chat.default_chat_template_kwargs = {"reasoning_effort": "medium"}
+
+        req = ChatCompletionRequest(
+            model="x",
+            messages=[{"role": "user", "content": "What is 2+2?"}],
+        )
+
+        self.chat._convert_to_internal_request(req)
+
+        kwargs = self.tm.tokenizer.apply_chat_template.call_args.kwargs
+        self.assertEqual(req.reasoning_effort, "medium")
+        self.assertEqual(kwargs["reasoning_effort"], "medium")
+
     def test_hunyuan_default_reasoning_effort_is_normalized_for_template(self):
         self.template_manager.chat_template_name = None
         self.template_manager.jinja_template_content_format = "string"

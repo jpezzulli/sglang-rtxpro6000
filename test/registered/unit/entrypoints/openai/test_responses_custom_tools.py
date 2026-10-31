@@ -2,6 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import Mock
 
+from pydantic import ValidationError
 from utils import (
     StreamFixture,
     engine_chunk,
@@ -76,10 +77,12 @@ class CustomToolShimTestCase(CustomTestCase):
         self.assertEqual(list(tool.function.parameters["properties"]), ["input"])
         self.assertEqual(tool.function.parameters["required"], ["input"])
 
-        nameless = ResponsesRequest(
-            model="x", input="hi", tools=[{"type": "custom"}], store=False
-        )
-        self.assertEqual(make_serving()._response_tools_to_chat_tools(nameless), [])
+        # A callable declaration without its name cannot be bound to a model
+        # visible spelling, so it is rejected rather than quietly dropped.
+        with self.assertRaises(ValidationError):
+            ResponsesRequest(
+                model="x", input="hi", tools=[{"type": "custom"}], store=False
+            )
 
     def test_grammar_format_is_described_to_the_model(self):
         request = _custom_request(

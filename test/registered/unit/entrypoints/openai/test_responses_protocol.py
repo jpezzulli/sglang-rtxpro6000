@@ -1,6 +1,7 @@
 import json
 import unittest
 
+from pydantic import ValidationError
 from utils import make_serving  # noqa: F401 — bootstrap import
 
 from sglang.srt.entrypoints.openai.protocol import (
@@ -85,6 +86,8 @@ class ResponsesRequestTestCase(CustomTestCase):
             )
 
     def test_extended_tool_types_accepted(self):
+        # Built-ins pass validation bare because nothing has to resolve them to
+        # a callable spelling; custom and namespace declarations must carry it.
         for tool_type in (
             "web_search",
             "web_search_preview",
@@ -94,8 +97,6 @@ class ResponsesRequestTestCase(CustomTestCase):
             "computer_use_preview",
             "local_shell",
             "mcp",
-            "custom",
-            "namespace",
         ):
             request = ResponsesRequest(
                 model="x",
@@ -104,6 +105,14 @@ class ResponsesRequestTestCase(CustomTestCase):
                 store=False,
             )
             self.assertEqual(request.tools[0].type, tool_type)
+        for tool in (
+            {"type": "custom"},
+            {"type": "namespace"},
+            {"type": "namespace", "name": "x"},
+            {"type": "namespace", "name": "x", "tools": [{"parameters": {}}]},
+        ):
+            with self.subTest(tool=tool), self.assertRaises(ValidationError):
+                ResponsesRequest(model="x", input="hi", tools=[tool], store=False)
 
     def test_namespace_tool_carries_inner_tools_list(self):
         request = ResponsesRequest(
