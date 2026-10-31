@@ -11,8 +11,11 @@ exist on this checkout's CLI, features this base does not have must stay out
 of it (documented, not silently dropped), and the template, parser, YaRN,
 served-id and cache-identity settings must survive the port. The recipe is
 EXECUTED against a recording fake CLI, so assertions run on the emitted argv
-and the real bash expansions, not on literals. Nothing here imports sglang,
-torch or CUDA and nothing touches a GPU.
+and the real bash expansions, not on literals. The cache-identity checks drive
+the recipe's real FP8 identity adapter with an interpreter whose torch reports a
+chosen device, because that answer -- not the requested Boolean -- decides the
+namespace. Nothing here imports sglang, torch or CUDA in the test process and
+nothing touches a GPU.
 """
 
 import json
@@ -29,12 +32,15 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[2]
 SCRIPT = (HERE / "serve-flashnext-native.sh").read_text()
 NAMESPACE_HELPER = (REPO_ROOT / "scripts/pennyroyal/derive_namespace.py").read_text()
-# the launcher's own non-sglang flag surface: derive_namespace's argparse plus
-# git rev-parse --short
-HELPER_FLAGS = set(re.findall(r'add_argument\("(--[a-z-]+)"', NAMESPACE_HELPER)) | {
-    "--field",
-    "--short",
-}
+FP8_IDENTITY_HELPER = (HERE / "online_fp8_identity.py").read_text()
+# the launcher's own non-sglang flag surface: the namespace helper's and the FP8
+# identity adapter's argparse plus git rev-parse --short
+_ADD_ARGUMENT = re.compile(r'add_argument\(\s*"(--[a-z-]+)"')
+HELPER_FLAGS = (
+    set(_ADD_ARGUMENT.findall(NAMESPACE_HELPER))
+    | set(_ADD_ARGUMENT.findall(FP8_IDENTITY_HELPER))
+    | {"--field", "--short"}
+)
 
 
 def sglang_cli_flags() -> set[str]:
@@ -147,6 +153,14 @@ class TestServeRecipeStatic(unittest.TestCase):
             SCRIPT,
         )
         self.assertIn("gdn_fp16_accum_mma=$GDN_FP16_ACCUM_MMA", SCRIPT)
+
+    def test_fp8_identity_hashes_what_is_resident_not_what_was_requested(self):
+        body = uncommented(SCRIPT)
+        self.assertIn('--field "online_fp8_precision=$ONLINE_FP8_PRECISION"', body)
+        self.assertNotIn("online_fp8_requested_mode", body)
+        # Resolved through the recipe's own adapter, not an inline guess.
+        self.assertIn('FP8_IDENTITY_HELPER="$SCRIPT_DIR/online_fp8_identity.py"', body)
+        self.assertIn('--requested "$ONLINE_FP8_MODE"', body)
 
     def test_adaptive_policies_only_use_supported_knobs(self):
         supported = {
@@ -292,7 +306,35 @@ class TestEmittedArgv(unittest.TestCase):
         result, argv = self.launch()
         self.assertEqual(self.value_after(argv, "--speculative-num-steps"), "7")
 
-    def _namespace(self, **env):
+    def _fake_device(self, capability):
+        """A PYTHON whose torch reports one chosen device.
+
+        The recipe's identity adapter asks the serving interpreter what device
+        it is on, and the answer decides the namespace -- so the check has to
+        drive that question instead of trusting whichever GPU (if any) happens
+        to host the test worker. ``None`` stands for "no CUDA at all"; the fake
+        also blocks the installed ``sglang`` package so the adapter resolves
+        through this checkout's copy.
+        """
+        stub = self.root / f"device-{capability}"
+        stub.mkdir(exist_ok=True)
+        (stub / "sitecustomize.py").write_text(
+            "import sys, types\n"
+            "cuda = types.SimpleNamespace("
+            f"is_available=lambda: {capability is not None}, "
+            f"get_device_capability=lambda: {capability!r})\n"
+            "torch = types.ModuleType('torch')\n"
+            "torch.__version__ = '0.0+test-device'\n"
+            "torch.cuda = cuda\n"
+            "torch.bfloat16 = 'bfloat16'\n"
+            "sys.modules['sglang'] = None\n"
+            "sys.modules['torch'] = torch\n"
+        )
+        return stub
+
+    def _namespace(self, device=None, **env):
+        if device is not None:
+            env["pythonpath"] = device
         env = {**env, "nixl": "on", "nixl_storage_base": self.root / "nixl"}
         result, _ = self.launch(**env)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -308,10 +350,55 @@ class TestEmittedArgv(unittest.TestCase):
         mapped = self._namespace(token_map=token_map)
         self.assertNotEqual(plain, mapped)
 
-    def test_nixl_identity_separates_online_fp8_requested_mode(self):
-        plain = self._namespace()
-        forced = self._namespace(sglang_sm120_online_mxfp8="true")
-        self.assertNotEqual(plain, forced)
+    def test_nixl_identity_merges_automatic_and_explicit_fp8(self):
+        """Eligible checkpoint on SM120: one resident representation, one namespace.
+
+        The recipe used to hash the requested mode, so ``unset`` and ``true`` --
+        the same E4M3 weights and per-row scales -- landed in separate NIXL
+        namespaces and a qualified disk tier was re-read for a change of spelling.
+        """
+        sm120 = self._fake_device((12, 0))
+        self.assertEqual(
+            self._namespace(device=sm120),
+            self._namespace(device=sm120, sglang_sm120_online_mxfp8="true"),
+        )
+
+    def test_nixl_identity_merges_automatic_off_and_explicit_false(self):
+        """Where eligibility does not hold, automatic and explicit false are the
+        same untouched BF16 checkpoint, and must share its namespace."""
+        grid = self._fake_device((9, 0))
+        self.assertEqual(
+            self._namespace(device=grid),
+            self._namespace(device=grid, sglang_sm120_online_mxfp8="false"),
+        )
+
+    def test_nixl_identity_separates_the_two_resident_formats(self):
+        self.assertNotEqual(
+            self._namespace(device=self._fake_device((12, 0))),
+            self._namespace(device=self._fake_device((9, 0))),
+        )
+
+    def test_fp8_identity_announces_the_requested_mode_as_a_diagnostic(self):
+        result, _ = self.launch(
+            nixl="on",
+            nixl_storage_base=self.root / "nixl",
+            pythonpath=self._fake_device((12, 0)),
+            sglang_sm120_online_mxfp8="true",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Online FP8: resident=rowwise_fp8 requested=true", result.stdout)
+
+    def test_explicit_fp8_on_unsupported_hardware_aborts_before_a_namespace(self):
+        result, _ = self.launch(
+            nixl="on",
+            nixl_storage_base=self.root / "nixl",
+            pythonpath=self._fake_device((9, 0)),
+            sglang_sm120_online_mxfp8="true",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires exactly SM120", result.stderr)
+        self.assertIn("Cannot name the online-FP8 precision", result.stderr)
+        self.assertNotIn("NIXL FILE namespace:", result.stdout)
 
 
 if __name__ == "__main__":

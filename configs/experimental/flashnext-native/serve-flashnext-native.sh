@@ -57,8 +57,8 @@ set -euo pipefail
 #   draft and only validated when speculative decode actually launches),
 #   PENNY_REASONING_EFFORT (medium default; OpenAI tiers),
 #   MTP_POLICY=tiered|fixed-w4 (full mode), FLASHINFER_GDN_FP16_ACCUM_MMA (1; see below),
-#   SGLANG_SM120_ONLINE_MXFP8 (unset|true|false; the requested mode is part of
-#   the NIXL identity so auto/true/false never share a cache namespace).
+#   SGLANG_SM120_ONLINE_MXFP8 (unset|true|false; NIXL identity uses effective
+#   resident precision, so equivalent automatic/explicit modes share a namespace).
 #
 # Accepted FlashInfer GDN mode: run the patched SM12x delta-rule prefill kernels
 # in FP16-accumulate MMA mode (scripts/pennyroyal/flashinfer/install.py); this
@@ -81,10 +81,14 @@ esac
 export FLASHINFER_GDN_FP16_ACCUM_MMA="${FLASHINFER_GDN_FP16_ACCUM_MMA:-1}"
 GDN_FP16_ACCUM_MMA=off
 if [[ "$FLASHINFER_GDN_FP16_ACCUM_MMA" == 1 ]]; then GDN_FP16_ACCUM_MMA=on; fi
-# The online-FP8 escape hatch is another task's runtime; this launcher only
-# normalizes it. The REQUESTED mode joins the NIXL identity because it changes
-# the weights the KV state was produced from; the resolved-precision identity
-# (what eligibility actually decided) is that task's own follow-up.
+# Normalize the online-FP8 escape hatch and state what will be resident.
+# What joins the NIXL identity
+# is the EFFECTIVE precision (online_fp8_identity.py, on this checkpoint's
+# metadata, this launch's dtype and the device this recipe makes visible), not
+# the requested mode: automatic and explicit true are the same row-wise E4M3
+# weights, and automatic-off and explicit false are the same untouched BF16
+# checkpoint, so the requested mode would split equivalent launches into
+# separate KV namespaces. It stays in the boot banner as a diagnostic.
 ONLINE_FP8_MODE=auto
 case "${SGLANG_SM120_ONLINE_MXFP8:-}" in
   "") SGLANG_SM120_ONLINE_MXFP8=""; export SGLANG_SM120_ONLINE_MXFP8 ;;
@@ -170,8 +174,10 @@ if [[ "$NIXL" == on ]]; then
   NIXL_STORAGE_BASE="${NIXL_STORAGE_BASE:?Set NIXL_STORAGE_BASE to the FILE cache root}"
   NIXL_CONFIG="${NIXL_CONFIG:-$SCRIPT_DIR/nixl-posix.toml}"
   NAMESPACE_HELPER="$REPO_ROOT/scripts/pennyroyal/derive_namespace.py"
+  FP8_IDENTITY_HELPER="$SCRIPT_DIR/online_fp8_identity.py"
   [[ -r "$NIXL_CONFIG" ]] || { echo "NIXL config missing: $NIXL_CONFIG" >&2; exit 1; }
   [[ -f "$NAMESPACE_HELPER" ]] || { echo "Namespace helper missing: $NAMESPACE_HELPER" >&2; exit 1; }
+  [[ -f "$FP8_IDENTITY_HELPER" ]] || { echo "FP8 identity helper missing: $FP8_IDENTITY_HELPER" >&2; exit 1; }
 fi
 [[ -f "$TARGET_MODEL/config.json" && -f "$TARGET_MODEL/model.safetensors.index.json" ]] || {
   echo "Incomplete target checkpoint: $TARGET_MODEL" >&2; exit 1
@@ -290,6 +296,15 @@ if [[ "$BRINGUP" != 1 ]]; then
     --speculative-draft-model-quantization unquant "${TOKEN_MAP_ARGS[@]}")
   if [[ "$NIXL" == on ]]; then
     echo "Deriving NIXL namespace; checkpoint identity hashing may take time..."
+    # Resident representation, resolved from the checkpoint, this dtype and the
+    # visible device -- so an explicit true on hardware this build cannot serve
+    # aborts the launch here, before a namespace is claimed for it.
+    if ! ONLINE_FP8_PRECISION="$("$PYTHON" "$FP8_IDENTITY_HELPER" \
+        --model "$TARGET_MODEL" --dtype "$COMPUTE_DTYPE" --requested "$ONLINE_FP8_MODE")"; then
+      echo "Cannot name the online-FP8 precision of this launch (requested: $ONLINE_FP8_MODE)" >&2
+      exit 1
+    fi
+    echo "Online FP8: resident=$ONLINE_FP8_PRECISION requested=$ONLINE_FP8_MODE"
     NIXL_STORAGE="$("$PYTHON" "$NAMESPACE_HELPER" \
       --base-root "$NIXL_STORAGE_BASE" \
       --slug "flashnext_${CONTEXT_LENGTH}_nextn_${SGLANG_REV}" \
@@ -311,7 +326,7 @@ if [[ "$BRINGUP" != 1 ]]; then
       --field "speculative_adaptive_policy_sha256=$ADAPTIVE_SHA" \
       --field "speculative_draft_quantization=unquant" \
       --field "speculative_token_map_sha256=$TOKEN_MAP_SHA" \
-      --field "online_fp8_requested_mode=$ONLINE_FP8_MODE" \
+      --field "online_fp8_precision=$ONLINE_FP8_PRECISION" \
       --field "gdn_fp16_accum_mma=$GDN_FP16_ACCUM_MMA" \
       --field "hicache_io_backend=kernel" \
       --field "hicache_mem_layout=page_first" \
