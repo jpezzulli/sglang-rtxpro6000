@@ -168,6 +168,32 @@ _RENORMALIZE_SUM_EPSILON = 1e-20
 _skip_hip_pad_mask = get_bool_env_var("SGLANG_MORI_NO_PAD_MASK", "False")
 
 
+# Packed-key softmax router for bf16 logits (moe_router_softmax_fast.py): the
+# Triton router's weights and ids bit for bit, one warp reduction per pick.
+# Eligible Flash-Next SM120 launches select it through the accepted rowwise-FP8
+# default selection; elsewhere it stays off unless explicitly requested, and a
+# saved explicit true/false remains the private escape hatch. Resolved per call,
+# so module import order can never pin the decision before model eligibility.
+def _router_fast_topk_enabled() -> bool:
+    from sglang.kernels.ops.gemm.sm120_online_fp8 import gated_by_fast_paths
+
+    return gated_by_fast_paths(envs.SGLANG_ROUTER_FAST_TOPK.get())
+
+
+def _router_fast_zero_bias(scores: torch.Tensor) -> Optional[torch.Tensor]:
+    """The fp32 zero bias the packed-key router reads, or None if not available.
+
+    ``fused_topk`` passes the Triton router no bias (it keeps the zeros in
+    registers); the packed-key kernel takes a bias pointer like every other
+    router caller, so the zeros are cached per (expert count, device) instead of
+    launched per call.  ``None`` -- first use inside a CUDA graph capture --
+    keeps the call on the Triton router.
+    """
+    from sglang.kernels.ops.moe import moe_router_softmax_fast as _rfast
+
+    return _rfast.get_zero_bias(scores)
+
+
 def _use_rocm_triton_softmax_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -1322,17 +1348,31 @@ def fused_topk(
         # ===== END TO BE REFACTORED ====
         elif _is_cuda or use_rocm_triton:
             # Unified Triton router (subsumes the AOT topk_softmax CUDA kernel).
+            from sglang.kernels.ops.moe import moe_router_softmax_fast as _rfast
             from sglang.kernels.ops.moe.moe_fused_gate import (
                 moe_fused_gate as _jit_moe_fused_gate,
             )
 
-            topk_weights, topk_ids = _jit_moe_fused_gate(
-                gating_output,
-                None,
-                topk,
-                scoring_func="softmax",
-                renormalize=renormalize,
+            # The packed-key router replaces exactly this call, and only where
+            # it declares the call covered; the ROCm triton route and every
+            # uncovered shape keep the JIT router with no bias at all, as before.
+            fast_bias = (
+                _router_fast_zero_bias(gating_output)
+                if _is_cuda and _router_fast_topk_enabled()
+                else None
             )
+            if fast_bias is not None and _rfast.covered(gating_output, fast_bias, topk):
+                topk_weights, topk_ids = _rfast.route_softmax_fast(
+                    gating_output, fast_bias, topk, renormalize=renormalize
+                )
+            else:
+                topk_weights, topk_ids = _jit_moe_fused_gate(
+                    gating_output,
+                    None,
+                    topk,
+                    scoring_func="softmax",
+                    renormalize=renormalize,
+                )
         else:
             topk_softmax(
                 topk_weights,

@@ -56,6 +56,16 @@ _SCALE_ATTR = "_sm120_rowwise_scale"
 #: The loader the layer was built with, kept so a reload can still use it.
 _NATIVE_LOADER_ATTR = "_sm120_native_weight_loader"
 _online_fp8_enabled = False
+#: The accepted small-batch companions of this selection (W8A16 GEMV, fused
+#: gated norm, MTP FC GEMV, draft MoE GEMV, fast router).  One resolution per
+#: launch, published next to the FP8 switch, so the bundle engages and retreats
+#: as one decision instead of five flags that can disagree across imports.
+_fast_paths_enabled = False
+
+#: Hard row limit of the donor dense GEMV (``assert M <= 16`` in
+#: ``sglang.srt.layers.quantization.w8a16_gemv``); the budget knob may only
+#: shrink it, and the kernels' own low-row shapes stop at the C5 verify width.
+_W8A16_GEMV_DONOR_MAX_M = 16
 
 #: Cache-identity marker for the effective row-wise FP8 representation.  A
 #: precision switch is a representation switch, so persistence namespaces must
@@ -92,8 +102,38 @@ def _resolve_switch(
     Flash-Next checkpoint.  ``False`` propagates the opt-out silently.  ``True``
     keeps the fail-loud contract for explicit requests this build cannot serve.
     """
+    return _resolve_bundle(
+        requested,
+        cuda_available=cuda_available,
+        capability=capability,
+        model_eligible=model_eligible,
+    )[0]
+
+
+def _resolve_bundle(
+    requested: Optional[bool],
+    *,
+    cuda_available: bool,
+    capability: Optional[tuple[int, int]],
+    model_eligible: bool,
+) -> tuple[bool, bool]:
+    """``(rowwise FP8, accepted small-batch fast paths)`` for one request.
+
+    Automatic selection turns both on together, and both off together: they are
+    the measured bundle, and a kernel fast path with no FP8 conversion behind it
+    would either die on the first ``float8_e4m3fn`` load or force the very BF16
+    dequantization this conversion exists to avoid.
+
+    An explicit ``true`` still selects FP8 on an exact-SM120 machine that this
+    metadata does not recognize as Flash-Next, and keeps the bundle off there:
+    the fast-path tiles and the draft-MoE one-token GEMV were tuned and accepted
+    for Flash-Next, so an explicit request on an unfamiliar model gets the
+    already-tested FP8 GEMM dispatch it asked for, not a foreign kernel.
+
+    ``False`` propagates the opt-out silently and takes the companions with it.
+    """
     if requested is False:
-        return False
+        return False, False
     if requested is True:
         if not cuda_available:
             raise RuntimeError("SGLANG_SM120_ONLINE_MXFP8 requires CUDA")
@@ -102,8 +142,9 @@ def _resolve_switch(
                 "SGLANG_SM120_ONLINE_MXFP8 requires exactly SM120; "
                 f"detected compute capability {capability}"
             )
-        return True
-    return bool(cuda_available and capability == (12, 0) and model_eligible)
+        return True, bool(model_eligible)
+    automatic = bool(cuda_available and capability == (12, 0) and model_eligible)
+    return automatic, automatic
 
 
 def configure_online_fp8(
@@ -120,8 +161,8 @@ def configure_online_fp8(
     directory or file name.  Calling it again with the same arguments is a
     no-op, so every layer of a shard-resolved launch sees one decision.
     """
-    global _online_fp8_enabled
-    _online_fp8_enabled = _resolve_switch(
+    global _online_fp8_enabled, _fast_paths_enabled
+    _online_fp8_enabled, _fast_paths_enabled = _resolve_bundle(
         requested,
         cuda_available=cuda_available,
         capability=capability,
@@ -132,6 +173,118 @@ def configure_online_fp8(
 
 def online_fp8_enabled() -> bool:
     return _online_fp8_enabled
+
+
+def configure_for_model(model_config: object) -> bool:
+    """``configure_online_fp8`` resolved from one model's own configuration.
+
+    For a decision that must not wait for some other module's conversion hook:
+    a draft (NEXTN) MoE block can be built before anything has published the
+    bundle, and would otherwise leave the draft layers on the CUTLASS runner.
+    The same arguments resolve to the same decision, so a caller that runs after
+    the per-layer hook changes nothing; a caller that runs before it must treat
+    this as arming only, never disarming, because a draft's own metadata is not
+    the launch's eligibility evidence.  An explicit request this build cannot
+    serve still fails the boot from here rather than later.
+    """
+    available = torch.cuda.is_available()
+    hf_config = getattr(model_config, "hf_config", model_config)
+    return configure_online_fp8(
+        _env_request(),
+        cuda_available=available,
+        capability=torch.cuda.get_device_capability() if available else None,
+        model_eligible=checkpoint_eligible(hf_config, torch.get_default_dtype()),
+    )
+
+
+def fast_paths_enabled() -> bool:
+    """Whether unset companion fast-path switches follow the FP8 selection.
+
+    Published by ``configure_online_fp8`` alongside the FP8 switch, so one
+    launch's decision cannot half-apply across module import order.
+    """
+    return _fast_paths_enabled
+
+
+def gated_by_fast_paths(requested: Optional[bool]) -> bool:
+    """Resolution shared by every companion switch of the accepted bundle.
+
+    A saved explicit ``true``/``false`` is honored verbatim as the private
+    compatibility/debug escape hatch; unset or blank follows the default
+    selection of the rowwise-FP8 bundle, so the whole bundle engages or retreats
+    together and never leaks onto other models.
+    """
+    return fast_paths_enabled() if requested is None else requested
+
+
+def w8a16_gemv_enabled() -> bool:
+    """Whether a low-row FP8 GEMM may route through the donor W8A16 GEMV."""
+    from sglang.srt.environ import envs
+
+    return gated_by_fast_paths(envs.SGLANG_FP8_W8A16_GEMV.get())
+
+
+def w8a16_gemv_row_budget() -> int:
+    """Row budget, clamped to what the ported kernel promises (never above 16)."""
+    from sglang.srt.environ import envs
+
+    return max(1, min(envs.SGLANG_FP8_W8A16_GEMV_MAX_M.get(), _W8A16_GEMV_DONOR_MAX_M))
+
+
+def w8a16_gemv_supported(
+    hidden_states: torch.Tensor, weight: torch.Tensor, scale: Optional[torch.Tensor]
+) -> bool:
+    """Whether one resident rowwise-FP8 projection call takes the GEMV.
+
+    The donor's contract (``Fp8LinearMethod._w8a16_gemv_ok`` in its fp8.py),
+    restated for this candidate's two resident layouts: weight-only FP8 with one
+    FP32 scale per output row, no activation quantization, a BF16 2-D activation
+    within the row budget, and a weight whose K axis is contiguous -- which is
+    how the row-wise ``Parameter`` is stored for the head, and what
+    ``layer.weight.t()`` restores for a projection whose resident view is
+    ``[K, N]``.
+
+    Everything the kernel cannot serve stays on the path it already had instead
+    of being approximated: the feature switch, the row budget (the C5 verify
+    width of 6 is inside it, the C6 target's 24 rows are not), BF16 activations
+    on the weight's device, and a scale that is exactly one FP32 value per output
+    row in row order.
+    """
+    if scale is None or hidden_states.dim() != 2:
+        return False
+    return bool(
+        w8a16_gemv_enabled()
+        and _online_fp8_enabled
+        and 1 <= hidden_states.shape[0] <= w8a16_gemv_row_budget()
+        and hidden_states.dtype is torch.bfloat16
+        and hidden_states.stride(1) == 1
+        and hidden_states.shape[1] == weight.shape[1]
+        and hidden_states.device == weight.device
+        and weight.dtype is torch.float8_e4m3fn
+        and weight.stride(1) == 1
+        and scale.dtype is torch.float32
+        and 1 <= scale.dim() <= 2
+        and scale.is_contiguous()
+        and scale.numel() == weight.shape[0]
+        # [N], [N, 1] and [1, N] are the same row order; a square tensor is not.
+        and (scale.dim() == 1 or min(scale.shape) == 1)
+        and scale.device == weight.device
+    )
+
+
+def _prealloc_w8a16_gemv_scratch(device: torch.device) -> None:
+    """Materialize the GEMV's split-K scratch outside any graph pool.
+
+    Every hook here runs before CUDA graphs are captured (weight postprocess,
+    ``post_load_weights``, draft head adoption), and the ported kernel refuses
+    to allocate during a capture rather than tie a lifetime-long buffer to one
+    graph's private pool.
+    """
+    if not w8a16_gemv_enabled():
+        return
+    from sglang.srt.layers.quantization.w8a16_gemv import prealloc
+
+    prealloc(device)
 
 
 def _metadata_names(node: object, depth: int, names: set[str]) -> None:
@@ -455,6 +608,8 @@ def replace_linear_weight_rowwise_fp8(linear: torch.nn.Module) -> int:
         setattr(linear, _NATIVE_LOADER_ATTR, original_loader)
         new_parameter.weight_loader = functools.partial(_reload_rowwise_weight, linear)
     linear.weight = new_parameter
+    # Head conversion is the last hook before CUDA graphs are captured.
+    _prealloc_w8a16_gemv_scratch(new_parameter.device)
     return original_bytes
 
 
@@ -475,6 +630,9 @@ def select_rowwise_weight_rows(
     )
     _copy_parameter_attrs(weight, selected)
     setattr(selected, _SCALE_ATTR, scale.index_select(0, row_indices))
+    # A draft that adopts this view is still before any graph capture, and the
+    # GEMV scratch is per-device and lifetime-long, so it comes with the head.
+    _prealloc_w8a16_gemv_scratch(weight.device)
     return selected
 
 
@@ -542,6 +700,11 @@ def _build_rowwise_fp8_method() -> Any:
                     "Flash-Next online rowwise-FP8 post-processing produced "
                     f"invalid weight/scale state for {type(module).__name__}"
                 )
+            if w8a16_gemv_enabled():
+                # Warm-up runs at prefill widths, where every call falls back to
+                # the FP8 GEMM, so without this the split-K scratch would first
+                # be allocated inside a capture.
+                _prealloc_w8a16_gemv_scratch(module.weight.device)
             signature = (
                 type(module).__name__,
                 tuple(module.weight.shape),
@@ -554,6 +717,100 @@ def _build_rowwise_fp8_method() -> Any:
                     "module=%s weight(K,N)=%s scale=per-output-channel-fp32 %s",
                     *signature,
                 )
+
+        # -- accepted small-batch consumer (SGLANG_FP8_W8A16_GEMV) ----------- #
+        #
+        # Donor ``Fp8LinearMethod._w8a16_gemv_ok`` / ``apply`` /
+        # ``apply_norm_gated`` (sglang-rtxpro6000 @5105985116eb fp8.py:986/1010/
+        # 1031), bound to *these* modules only -- a generic ``--quantization fp8``
+        # user's method is untouched -- and re-expressed against this candidate's
+        # resident layout: ``weight`` is the [K, N] view of [N, K] FP8 storage and
+        # ``weight_scale`` holds one FP32 scale per output channel, so the GEMV is
+        # handed ``layer.weight.t()`` (an [N, K] weight with K contiguous, the one
+        # layout the donor tile table was measured on) and the per-channel test is
+        # against ``weight.shape[1]``, this view's output channels.
+        #
+        # Lifetime/scale invariants of the routed call: the E4M3 codes and their
+        # FP32 row scales are the ones this postprocess produced, read from the
+        # same resident tensors (no dequantized BF16 copy is materialized, which
+        # is what the conversion freed), scaled inside the same kernel that reads
+        # the codes.  A call the kernel cannot serve keeps the tested
+        # ``apply_fp8_linear`` dispatch on those same tensors; it is never routed
+        # through a BF16 cache and never through a GEMV past its row budget.
+
+        def _w8a16_gemv_ok(self, layer, x) -> bool:
+            """Whether ``apply`` would route this call through the GEMV.
+
+            ``layer.weight`` is the ``[K, N]`` view of ``[N, K]`` FP8 storage and
+            ``layer.weight_scale`` one FP32 scale per output channel, so the
+            operand handed over is ``layer.weight.t()`` and the scale-count test
+            inside ``w8a16_gemv_supported`` is this view's output-channel count.
+            """
+            return bool(
+                # A fused quant producer can hand this fork's apply() a
+                # (fp8, scale) tuple; the donor runtime never did, and the GEMV
+                # is weight-only FP8 with no activation scale to read.
+                isinstance(x, torch.Tensor)
+                and not self.use_marlin
+                and not self.block_quant
+                and not self.use_mxfp8
+                and w8a16_gemv_supported(x, layer.weight.t(), layer.weight_scale)
+            )
+
+        def apply(self, layer, x, bias=None):
+            if self._w8a16_gemv_ok(layer, x):
+                from sglang.srt.layers.quantization.w8a16_gemv import w8a16_gemv
+
+                y = w8a16_gemv(x, layer.weight.t(), layer.weight_scale)
+                if bias is not None:
+                    y = y + bias
+                return y
+            return super().apply(layer, x, bias=bias)
+
+        def apply_norm_gated(
+            self,
+            layer,
+            x,
+            z,
+            norm_weight,
+            group_size,
+            eps,
+            sigmoid_gate=False,
+            bias=None,
+        ):
+            """``apply(layer, gated_rms_norm(x, z))`` in one launch, or ``None``.
+
+            Each contiguous ``group_size`` slice of an ``x`` row is one RMS
+            group, normalised, scaled by ``norm_weight``, gated by ``silu(z)``
+            (or ``sigmoid(z)``) and rounded to BF16 before the same k-loop
+            consumes it.  Numerics: the FP32 sum of squares is re-associated
+            into the GEMV tile's thread layout, so the pre-round value can
+            differ in the last FP32 bit; after the BF16 round the result is
+            within 1 ulp of the separate norm + GEMV pair.  ``None`` means this
+            call cannot take that path, and the caller keeps both kernels.
+            """
+            if bias is not None or not self._w8a16_gemv_ok(layer, x):
+                return None
+            from sglang.srt.layers.quantization.w8a16_gemv import (
+                w8a16_gemv_norm_gated,
+                w8a16_gemv_norm_gated_supported,
+            )
+
+            w = layer.weight.t()
+            if not w8a16_gemv_norm_gated_supported(
+                x, w, layer.weight_scale, z, norm_weight, group_size
+            ):
+                return None
+            return w8a16_gemv_norm_gated(
+                x,
+                w,
+                layer.weight_scale,
+                z,
+                norm_weight,
+                group_size,
+                eps,
+                sigmoid_gate,
+            )
 
     config = Fp8Config(
         is_checkpoint_fp8_serialized=False,
@@ -711,6 +968,15 @@ def rowwise_fp8_lm_head_logits(
     if hidden_2d.shape[1] != weight.shape[1]:
         raise RuntimeError(
             "SM120 online FP8 lm_head input width does not match its weight"
+        )
+    if w8a16_gemv_supported(hidden_2d, weight, scale):
+        # Decode and MTP verification widths on the accepted low-row kernel: the
+        # same resident E4M3 codes and the same FP32 row scales, applied in the
+        # same kernel, with no BF16 materialization behind them.
+        from sglang.srt.layers.quantization.w8a16_gemv import w8a16_gemv
+
+        return w8a16_gemv(hidden_2d, weight, scale).reshape(
+            *original_shape, weight.shape[0]
         )
     from sglang.kernels.ops.gemm.sm120_rowwise_fp8 import rowwise_fp8_linear
 

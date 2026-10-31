@@ -1268,6 +1268,37 @@ class Envs:
     # cache identities must key on the effective precision (see
     # sglang.kernels.ops.gemm.sm120_online_fp8), not on this Boolean.
     SGLANG_SM120_ONLINE_MXFP8 = EnvOptionalBool()
+    # Accepted Flash-Next small-batch fast paths. Each is a tri-state with the
+    # same contract as SGLANG_SM120_ONLINE_MXFP8: unset or blank follows the
+    # resolved default selection of the rowwise-FP8 bundle (see
+    # sglang.kernels.ops.gemm.sm120_online_fp8.fast_paths_enabled), so the whole
+    # bundle engages or retreats together and never leaks onto other models;
+    # a saved explicit true/false is honored verbatim as the private
+    # compatibility/debug escape hatch.
+    # Route the resident rowwise-FP8 output head and the converted dense
+    # projections through the donor's low-row W8A16 Triton GEMV. Larger row
+    # counts and unsupported layouts keep the existing kernels.
+    SGLANG_FP8_W8A16_GEMV = EnvOptionalBool()
+    # The donor kernel's own hard limit is 16 rows, so this can only shrink the
+    # row budget, never raise it past what the kernel promises.
+    SGLANG_FP8_W8A16_GEMV_MAX_M = EnvInt(16)
+    # Fused gated-RMSNorm prologue for the GDN out_proj GEMV
+    # (layers/quantization/w8a16_gemv.py, models/qwen3_5.py). Each call
+    # re-resolves, so import order never pins the choice; every shape the
+    # fusion cannot serve keeps the separate norm + GEMM pair.
+    SGLANG_NORM_INTO_GEMV = EnvOptionalBool()
+    # Route the draft MTP entry fusion's BF16 fc_embedding/fc_hidden GEMMs
+    # through the resident donor dense GEMV at decode widths (rows <= 16);
+    # everything else keeps the cuBLAS fallback.
+    SGLANG_MTP_FC_GEMV = EnvOptionalBool()
+    # Draft (MTP) NVFP4 MoE layers on the FlashInfer CUTLASS runner: run a
+    # one-token call as a W4A16 Triton GEMV (layers/moe/draft_moe_gemv.py).
+    # Changes draft numerics only (BF16 activations instead of FP4).
+    SGLANG_OPT_DRAFT_MOE_GEMV = EnvOptionalBool()
+    # Packed-key softmax router for BF16 logits (kernels/ops/moe/
+    # moe_router_softmax_fast.py): the Triton router's weights and ids bit for
+    # bit, one warp reduction per pick.
+    SGLANG_ROUTER_FAST_TOPK = EnvOptionalBool()
     SGLANG_FP4_IGNORED_LAYERS = EnvStr("")
     # On by default; set SGLANG_ENABLE_FP8_GEMM_CONFIG_TUNE=0 as a kill switch.
     # Consults the tuned per-(N, K, M) Triton tile config table in

@@ -344,6 +344,32 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             self.experts.runner_backend,
             routing_method_type=self.experts.routing_method_type,
         )
+        if is_nextn:
+            # Tri-state: a saved explicit SGLANG_OPT_DRAFT_MOE_GEMV wins; unset
+            # follows the Flash-Next/SM120 default selection, so 27B drafts and
+            # every unsupported automatic case keep the original runner.  Only
+            # the draft's one-token calls are opted in, and
+            # enable_draft_moe_gemv refuses a layer whose resident layout it
+            # cannot read (see layers/moe/draft_moe_gemv.py).
+            #
+            # This block can be built before the layer whose conversion
+            # publishes the bundle (a draft worker builds the draft alone), so
+            # resolve it from this config here rather than leaving every draft
+            # layer on the CUTLASS runner.  Only upward: a decision the target
+            # model already published is the launch's, and a draft's own config
+            # must not disarm the conversion whose weights are already resident.
+            from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+                configure_for_model,
+                gated_by_fast_paths,
+                online_fp8_enabled,
+            )
+
+            if not online_fp8_enabled():
+                configure_for_model(config)
+            if gated_by_fast_paths(envs.SGLANG_OPT_DRAFT_MOE_GEMV.get()):
+                from sglang.srt.layers.moe.draft_moe_gemv import enable_draft_moe_gemv
+
+                enable_draft_moe_gemv(self.experts)
 
         self.gate = ReplicatedLinear(
             config.hidden_size,
