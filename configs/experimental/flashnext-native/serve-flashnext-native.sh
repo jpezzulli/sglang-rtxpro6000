@@ -11,20 +11,24 @@ set -euo pipefail
 #   BRINGUP=0  the full configuration below (the default).
 #
 # Full configuration (the v3.1.4 shapes, mapped to this base):
-#   native NEXTN MTP with the batch-tiered width policy (launch W8 = steps 7 /
-#   8 draft tokens; W4 from batch 2), C6 with 36 recurrent-state slots, 524288
+#   native NEXTN MTP with a selectable batch-tiered width policy (MTP_POLICY:
+#   tiered / fixed-w4 / adaptive; the accepted adaptive table runs W4/W8 at
+#   batch 1 behind the post-switch hold and W4 from batch 2, all launched at
+#   W8 = steps 7 / 8 draft tokens), C6 with 36 recurrent-state slots, 524288
 #   context via the YaRN override of a 262144-native checkpoint, page 64,
 #   chunked prefill 4096, KV fp8_e4m3, HiCache with a write-through host tier
 #   and the optional NIXL POSIX FILE tier under NIXL_STORAGE_BASE.
 #
 # Differences this recipe states instead of hiding (see the boot banners):
-#   width policy      this base implements candidate_steps and the hysteresis
-#                     knobs only; the live v3.0.2 adaptive policy's
-#                     switch_grace_batches/grace_backoff/max_grace_batches keys
-#                     are silently ignored here, so only tiered and fixed-w4
-#                     are offered. A tiered run is NOT equivalent to, and not
-#                     qualified against, the live adaptive-policy service until
-#                     matched-policy measurements are done.
+#   width policy      this base implements candidate_steps, the hysteresis knobs
+#                     and the v3.0.2 switch_grace_batches/grace_backoff/
+#                     max_grace_batches hold, so MTP_POLICY=adaptive honours the
+#                     accepted table. What this base cannot claim yet is
+#                     qualification: no matched-policy capture, replay or
+#                     throughput measurement has been done here, so every
+#                     policy -- tiered, fixed-w4 and adaptive alike -- is
+#                     announced as mapped-and-configured, never as matched or
+#                     qualified against the live adaptive-policy service.
 #   FR-Spec           TOKEN_MAP is an optional input (the qualified 64K map is
 #                     a baseline artifact, not shipped here). Unset means a
 #                     full-vocabulary draft baseline, not a matched FR-Spec run.
@@ -62,7 +66,7 @@ set -euo pipefail
 #   TOKEN_MAP (full mode; unset = full-vocabulary
 #   draft and only validated when speculative decode actually launches),
 #   PENNY_REASONING_EFFORT (medium default; OpenAI tiers),
-#   MTP_POLICY=tiered|fixed-w4 (full mode), FLASHINFER_GDN_FP16_ACCUM_MMA (1; see below),
+#   MTP_POLICY=tiered|fixed-w4|adaptive (full mode), FLASHINFER_GDN_FP16_ACCUM_MMA (1; see below),
 #   SGLANG_SM120_ONLINE_MXFP8 (unset|true|false; NIXL identity uses effective
 #   resident precision, so equivalent automatic/explicit modes share a namespace).
 #
@@ -280,16 +284,21 @@ if [[ "$BRINGUP" != 1 ]]; then
   if [[ ! "$HICACHE_SIZE_GB" =~ ^[1-9][0-9]*$ ]]; then
     echo "PENNY_HICACHE_SIZE_GB must be a positive integer number of GB, got '$HICACHE_SIZE_GB'" >&2; exit 1
   fi
-  # The approved native-MTP width policy ships as an ordinary
-  # --speculative-adaptive-config file beside this script. A candidate wider
+  # The approved native-MTP width policies ship as ordinary
+  # --speculative-adaptive-config files beside this script. A candidate wider
   # than the launch width is refused, not resized, under captured graphs, so
   # the policy and the launch maximum are selected together; the default
-  # spec-decode capture list keeps the BS1 bucket the W8 tier needs.
+  # spec-decode capture list keeps the BS1 bucket that every wide (steps 7) C1
+  # tier needs -- without it a batch of one pads into the C>=2 tier and stays W4.
   MTP_POLICY="${MTP_POLICY:-tiered}"
   case "$MTP_POLICY" in
     tiered)   MTP_POLICY_FILE=adaptive-next.json;          MTP_SPEC_STEPS=7; MTP_DRAFT_TOKENS=8 ;;
     fixed-w4) MTP_POLICY_FILE=adaptive-next-fixed-w4.json; MTP_SPEC_STEPS=3; MTP_DRAFT_TOKENS=4 ;;
-    *) echo "MTP_POLICY must be tiered or fixed-w4; got '$MTP_POLICY' (the v3.0.2 adaptive hold/backoff policy is not implemented on this base)" >&2; exit 1 ;;
+    # The accepted v3.0.2 table: C1 chooses W4 or W8 behind the 40-batch
+    # post-switch hold (doubled per reversal, capped at 80); C>=2 is fixed W4.
+    # Same launch maximum as the tiered table, so the same W8 capture bounds.
+    adaptive) MTP_POLICY_FILE=adaptive-next-v3.0.2.json;   MTP_SPEC_STEPS=7; MTP_DRAFT_TOKENS=8 ;;
+    *) echo "MTP_POLICY must be tiered, fixed-w4 or adaptive; got '$MTP_POLICY'" >&2; exit 1 ;;
   esac
   ADAPTIVE_CONFIG="$SCRIPT_DIR/$MTP_POLICY_FILE"
   [[ -r "$ADAPTIVE_CONFIG" ]] || { echo "MTP width policy is missing or unreadable: $ADAPTIVE_CONFIG" >&2; exit 1; }
@@ -308,7 +317,8 @@ if [[ "$BRINGUP" != 1 ]]; then
     TOKEN_MAP_SHA=full-vocabulary
     echo "FR-Spec: off (full-vocabulary NEXTN draft baseline, not the qualified reduced-vocabulary run)"
   fi
-  echo "MTP width policy: $MTP_POLICY (launch W$((MTP_SPEC_STEPS + 1))); this base routes widths by batch size only -- it does not implement the live v3.0.2 hold/backoff adaptation, so this launch is stated as mapped, not as matched or qualified."
+  echo "MTP width policy: $MTP_POLICY ($MTP_POLICY_FILE, launch W$((MTP_SPEC_STEPS + 1))); the selected table's hold/backoff keys are honoured on this base, and every width switch lands at a batch boundary inside the captured buckets --" \
+    "this launch is stated as mapped, not as matched or qualified (no matched-policy capture, replay or throughput measurement on this base yet)."
   launch_args+=(
     --enable-hierarchical-cache --hicache-size "$HICACHE_SIZE_GB" --hicache-host-memory-mode cache
     --hicache-write-policy write_through --hicache-io-backend kernel

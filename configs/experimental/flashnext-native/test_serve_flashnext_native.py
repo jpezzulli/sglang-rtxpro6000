@@ -100,7 +100,9 @@ class TestServeRecipeStatic(unittest.TestCase):
         self.assertNotIn("--tp ", body)
         self.assertIn("--tp-size", body)
         self.assertIn("--speculative-draft-model-quantization unquant", body)
-        self.assertNotIn("adaptive-next-v3.0.2", body)
+        # The accepted v3.0.2 hold/backoff policy IS implemented on this base,
+        # so the recipe must name its file rather than exclude it.
+        self.assertIn("adaptive-next-v3.0.2.json", body)
 
     def test_qualified_launch_shape_is_preserved(self):
         body = uncommented(SCRIPT)
@@ -180,8 +182,17 @@ class TestServeRecipeStatic(unittest.TestCase):
             "up_hysteresis",
             "down_hysteresis",
             "ceiling_coeff",
+            # Implemented on this base: the post-switch hold, its reversal
+            # backoff multiplier and the cap on that hold.
+            "switch_grace_batches",
+            "grace_backoff",
+            "max_grace_batches",
         }
-        for name in ("adaptive-next.json", "adaptive-next-fixed-w4.json"):
+        for name in (
+            "adaptive-next.json",
+            "adaptive-next-fixed-w4.json",
+            "adaptive-next-v3.0.2.json",
+        ):
             cfg = json.loads((HERE / name).read_text())
             for key, entry in cfg.items():
                 if key == "_comment":
@@ -189,6 +200,19 @@ class TestServeRecipeStatic(unittest.TestCase):
                 self.assertTrue(key.isdigit(), key)
                 self.assertTrue(entry["candidate_steps"])
                 self.assertLessEqual(set(entry), supported, name)
+        # Concurrency routing still holds in every shipped table: a batch of two
+        # or more has exactly one candidate, W4, so no policy forces W8 wide.
+        for name in ("adaptive-next.json", "adaptive-next-v3.0.2.json"):
+            cfg = json.loads((HERE / name).read_text())
+            self.assertEqual(cfg["2"]["candidate_steps"], [3], name)
+        # The hold keys belong to the C1 tier only: a single-candidate tier has
+        # no re-decision to delay, and its width must land immediately.
+        v302 = json.loads((HERE / "adaptive-next-v3.0.2.json").read_text())
+        self.assertEqual(
+            sorted(k for k in v302["1"] if k.split("_")[0] in ("switch", "grace", "max")),
+            ["grace_backoff", "max_grace_batches", "switch_grace_batches"],
+        )
+        self.assertNotIn("switch_grace_batches", v302["2"])
 
 
 class TestEmittedArgv(unittest.TestCase):
@@ -294,7 +318,10 @@ class TestEmittedArgv(unittest.TestCase):
 
     def test_full_mode_still_refuses_stale_full_mode_inputs(self):
         for env, message in (
-            ({"mtp_policy": "obsolete"}, "MTP_POLICY must be tiered or fixed-w4"),
+            (
+                {"mtp_policy": "obsolete"},
+                "MTP_POLICY must be tiered, fixed-w4 or adaptive",
+            ),
             ({"token_map": str(self.root / "does-not-exist.pt")}, "token map is not readable"),
             ({"penny_hicache_size_gb": "zero"}, "PENNY_HICACHE_SIZE_GB must be a positive integer"),
         ):
@@ -345,13 +372,40 @@ class TestEmittedArgv(unittest.TestCase):
         result, _ = self.launch(sglang_mm_preprocess_device="")
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_width_policy_difference_is_announced_not_claimed(self):
-        result, argv = self.launch(mtp_policy="fixed-w4")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("does not implement the live v3.0.2", result.stdout)
-        self.assertEqual(self.value_after(argv, "--speculative-num-steps"), "3")
-        result, argv = self.launch()
+    def test_every_width_policy_maps_to_its_file_and_launch_maximum(self):
+        # policy -> (shipped config file, steps, draft tokens)
+        expected = {
+            "tiered": ("adaptive-next.json", "7", "8"),
+            "fixed-w4": ("adaptive-next-fixed-w4.json", "3", "4"),
+            "adaptive": ("adaptive-next-v3.0.2.json", "7", "8"),
+        }
+        for policy, (cfg_file, steps, tokens) in expected.items():
+            result, argv = self.launch(mtp_policy=policy)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                self.value_after(argv, "--speculative-adaptive-config"),
+                str(HERE / cfg_file),
+                policy,
+            )
+            self.assertEqual(self.value_after(argv, "--speculative-num-steps"), steps, policy)
+            self.assertEqual(
+                self.value_after(argv, "--speculative-num-draft-tokens"), tokens, policy
+            )
+            # Nothing may be claimed as qualified before matched-policy GPU
+            # measurement, and no policy is presented as a wide-C1-only run.
+            self.assertIn("not as matched or qualified", result.stdout)
+            self.assertNotIn("does not implement the live v3.0.2", result.stdout)
+            # The wide C1 tier needs the BS1 decode bucket, which the base's
+            # default spec-decode capture list carries: the recipe must not
+            # replace that list with one that drops it.
+            self.assertNotIn("--cuda-graph-bs-decode", argv, policy)
+        # The default stays the batch-tiered table it was.
+        _, argv = self.launch()
         self.assertEqual(self.value_after(argv, "--speculative-num-steps"), "7")
+        self.assertEqual(
+            self.value_after(argv, "--speculative-adaptive-config"),
+            str(HERE / "adaptive-next.json"),
+        )
 
     def _fake_device(self, capability):
         """A PYTHON whose torch reports one chosen device.
@@ -396,6 +450,17 @@ class TestEmittedArgv(unittest.TestCase):
         plain = self._namespace()
         mapped = self._namespace(token_map=token_map)
         self.assertNotEqual(plain, mapped)
+
+    def test_nixl_identity_separates_width_policy(self):
+        """One more width table is one more draft behaviour, not a cache reuse.
+
+        The chosen policy file's hash is an identity field, so an adaptive-policy
+        run cannot mount a disk tier another width policy published (which would
+        silently mix what each launch had published into the pending ring).
+        """
+        tiered = self._namespace()
+        self.assertNotEqual(tiered, self._namespace(mtp_policy="adaptive"))
+        self.assertNotEqual(tiered, self._namespace(mtp_policy="fixed-w4"))
 
     def test_nixl_identity_merges_automatic_and_explicit_fp8(self):
         """Eligible checkpoint on SM120: one resident representation, one namespace.
