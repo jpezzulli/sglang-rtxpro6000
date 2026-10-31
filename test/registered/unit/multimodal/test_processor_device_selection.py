@@ -6,10 +6,13 @@ each drive their own GPU, which no process-global value can express — the
 device has to come from what the worker was handed.
 """
 
+import asyncio
 import unittest
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+import torch
 
 from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
 from sglang.srt.runtime_context import publish, reset_context
@@ -186,6 +189,29 @@ class TestFastImageProcessorDevice(CustomTestCase):
     def test_constructor_rejects_explicit_cuda_with_rl_cpu_policy(self):
         with self.assertRaisesRegex(ValueError, "rl_on_policy_target"):
             self._construct(preprocess_device="cuda:0", rl_on_policy_target="fsdp")
+
+    def test_late_forced_slow_backend_rejects_cuda_selection(self):
+        """A subclass that forces the slow path after construction must not
+        silently drop the selected CUDA preprocessing."""
+        processor = self._construct(
+            preprocess_device="cuda:1", configured_backend="torchvision"
+        )
+        processor.disable_fast_image_processor = True
+        with self.assertRaisesRegex(ValueError, "PIL image processor backend"):
+            processor.process_mm_data("test")
+        with self.assertRaisesRegex(ValueError, "PIL image processor backend"):
+            asyncio.run(processor.fast_load_mm_data("test", Mock()))
+
+    def test_late_forced_slow_backend_is_the_default_cpu_path(self):
+        for device in (None, "cpu"):
+            with self.subTest(device=device):
+                processor = self._construct(
+                    preprocess_device=device, configured_backend="pil"
+                )
+                hf_processor = Mock(return_value={})
+                result = processor.process_mm_data("test", processor=hf_processor)
+                self.assertEqual(result, {})
+                self.assertNotIn("device", hf_processor.call_args.kwargs)
 
     def test_unset_auto_backend_preserves_baseline_for_known_backends(self):
         for actual_backend in ("pil", "torchvision"):
@@ -391,6 +417,130 @@ class TestFastImageProcessorMemoryPool(CustomTestCase):
             events,
             ["enter", ("call", "cuda:0"), ("copy", "cpu"), "exit"],
         )
+
+
+class TestGpuOomCpuRetryScope(CustomTestCase):
+    """CPU-retry policy must clean the device that actually failed."""
+
+    def setUp(self):
+        reset_context()
+        self.addCleanup(reset_context)
+
+    def _processor(self, events, current):
+        class DeviceCtx:
+            def __init__(self, device):
+                self.device = device
+
+            def __enter__(self):
+                current.append(self.device)
+                events.append(("enter", self.device))
+
+            def __exit__(self, *exc):
+                events.append(("exit", current.pop()))
+
+        class ImageProcessor:
+            pass
+
+        class Processor:
+            image_processor = ImageProcessor()
+            tokenizer = SimpleNamespace(bos_token=None)
+
+            def __init__(self, fail_times):
+                self.calls = 0
+                self.fail_times = fail_times
+
+            def __call__(self, **kwargs):
+                events.append(("call", kwargs.get("device")))
+                self.calls += 1
+                if self.calls <= self.fail_times:
+                    raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+                return {}
+
+        processor = _make(base_gpu_id=0)
+        processor.mm_preprocess_device = "cuda:1"
+        processor.mm_feature_transport = "cpu"
+        processor.precompute_hash_before_cpu_transfer = False
+        processor.retry_on_cpu_after_gpu_oom = True
+        processor._tokenizer = SimpleNamespace(bos_token=None)
+        processor._tokenizer_auto_adds_specials = False
+        processor.disable_fast_image_processor = False
+        processor.image_config = {}
+        processor.video_config = {}
+        processor.audio_config = {}
+        processor.FEATURE_NAMES = []
+
+        def empty_cache():
+            # Proves which device is current when the cleanup runs.
+            self.assertTrue(current, "empty_cache ran without a CUDA device scope")
+            events.append(("empty_cache", current[-1]))
+
+        return processor, Processor, ImageProcessor, DeviceCtx, empty_cache
+
+    def test_oom_retry_clears_the_failed_device_then_retries_on_cpu(self):
+        events, current = [], []
+        processor, Processor, ImageProcessor, DeviceCtx, empty_cache = (
+            self._processor(events, current)
+        )
+        processor._processor = Processor(fail_times=1)
+        with (
+            patch(f"{BASE}.BaseImageProcessor", ImageProcessor),
+            patch(f"{BASE}.torch.cuda.device", side_effect=DeviceCtx),
+            patch(f"{BASE}.torch.cuda.MemPool", return_value="pool"),
+            patch(f"{BASE}.torch.cuda.use_mem_pool", return_value=nullcontext()),
+            patch(f"{BASE}.torch.cuda.empty_cache", empty_cache),
+        ):
+            result = processor.process_mm_data("test", images=["image"])
+
+        self.assertEqual(result, {})
+        self.assertEqual(
+            events,
+            [
+                ("enter", "cuda:1"),
+                ("call", "cuda:1"),
+                ("exit", "cuda:1"),
+                ("enter", "cuda:1"),
+                ("empty_cache", "cuda:1"),
+                ("exit", "cuda:1"),
+                ("call", "cpu"),
+            ],
+        )
+
+    def test_failed_cpu_retry_propagates(self):
+        events, current = [], []
+        processor, Processor, ImageProcessor, DeviceCtx, empty_cache = (
+            self._processor(events, current)
+        )
+        processor._processor = Processor(fail_times=2)
+        with (
+            patch(f"{BASE}.BaseImageProcessor", ImageProcessor),
+            patch(f"{BASE}.torch.cuda.device", side_effect=DeviceCtx),
+            patch(f"{BASE}.torch.cuda.MemPool", return_value="pool"),
+            patch(f"{BASE}.torch.cuda.use_mem_pool", return_value=nullcontext()),
+            patch(f"{BASE}.torch.cuda.empty_cache", empty_cache),
+        ):
+            with self.assertRaises(torch.cuda.OutOfMemoryError):
+                processor.process_mm_data("test", images=["image"])
+        self.assertEqual(events[-1], ("call", "cpu"))
+        self.assertEqual(events.count(("empty_cache", "cuda:1")), 1)
+
+    def test_no_retry_policy_is_unchanged_without_a_cuda_device(self):
+        events, current = [], []
+        processor, Processor, ImageProcessor, DeviceCtx, empty_cache = (
+            self._processor(events, current)
+        )
+        # Unset selection + slow backend: device kwarg stays absent, so the
+        # existing no-retry guard must raise without any cleanup detour.
+        processor.mm_preprocess_device = None
+        processor.disable_fast_image_processor = True
+        processor._processor = Processor(fail_times=1)
+        with (
+            patch(f"{BASE}.BaseImageProcessor", ImageProcessor),
+            patch(f"{BASE}.torch.cuda.device", side_effect=DeviceCtx),
+            patch(f"{BASE}.torch.cuda.empty_cache", empty_cache),
+        ):
+            with self.assertRaises(torch.cuda.OutOfMemoryError):
+                processor.process_mm_data("test", images=["image"])
+        self.assertEqual(events, [("call", None)])
 
 
 if __name__ == "__main__":

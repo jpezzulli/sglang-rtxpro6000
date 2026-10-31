@@ -319,12 +319,7 @@ class BaseMultimodalProcessor(ABC):
                     "SGLANG_MM_PREPROCESS_DEVICE cannot select CUDA when "
                     "rl_on_policy_target requires CPU preprocessing."
                 )
-            if self.disable_fast_image_processor:
-                raise ValueError(
-                    "SGLANG_MM_PREPROCESS_DEVICE selects CUDA, but the PIL image "
-                    "processor backend is configured. Enable the supported fast "
-                    "torchvision image processor backend or select 'cpu'."
-                )
+            self._require_preprocess_backend_supports_selection()
             preprocess_device_index = torch.device(self.mm_preprocess_device).index
             if (
                 self.mm_feature_transport in ("cuda_ipc", "cuda_vmm")
@@ -942,6 +937,27 @@ class BaseMultimodalProcessor(ABC):
             with torch.cuda.use_mem_pool(pool, device=device):
                 yield
 
+    def _require_preprocess_backend_supports_selection(self) -> None:
+        """An explicit CUDA selection must not be downgraded after validation.
+
+        The constructor rejects ``SGLANG_MM_PREPROCESS_DEVICE=cuda:N`` with a
+        PIL (slow) image processor backend; a subclass that forces that flag
+        after ``super().__init__()`` must fail the same way at request time
+        instead of silently skipping device routing while image decode still
+        honors the selection.
+        """
+        preprocess_device = getattr(self, "mm_preprocess_device", None)
+        if (
+            preprocess_device is not None
+            and preprocess_device.startswith("cuda:")
+            and self.disable_fast_image_processor
+        ):
+            raise ValueError(
+                "SGLANG_MM_PREPROCESS_DEVICE selects CUDA, but the PIL image "
+                "processor backend is configured. Enable the supported fast "
+                "torchvision image processor backend or select 'cpu'."
+            )
+
     def process_mm_data(
         self,
         input_text,
@@ -955,6 +971,7 @@ class BaseMultimodalProcessor(ABC):
         """
         process multimodal data with transformers AutoProcessor
         """
+        self._require_preprocess_backend_supports_selection()
         processor, tokenizer = self._resolve_processor(processor)
 
         if images:
@@ -1022,7 +1039,14 @@ class BaseMultimodalProcessor(ABC):
                 "Multimodal preprocessing ran out of GPU memory on %s; retrying on CPU",
                 kwargs["device"],
             )
-            torch.cuda.empty_cache()
+            failed_device = kwargs["device"]
+            if torch.device(failed_device).type == "cuda":
+                # The allocator clears answer for the current device; clean the
+                # one preprocessing actually failed on, not the default.
+                with torch.cuda.device(failed_device):
+                    torch.cuda.empty_cache()
+            else:
+                torch.cuda.empty_cache()
             kwargs["device"] = "cpu"
             return self._call_processor(processor, input_text, "cpu", kwargs)
 
@@ -1451,6 +1475,8 @@ class BaseMultimodalProcessor(ABC):
           2. It returns the loaded images, videos, and audios in their original order.
           3. It returns the input prompt as a string.
         """
+        # Fail before GPU JPEG decode if the fast backend was forced away.
+        self._require_preprocess_backend_supports_selection()
 
         # Convert prompt into str
         if isinstance(prompt, list) and return_text:
