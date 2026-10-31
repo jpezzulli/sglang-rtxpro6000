@@ -105,7 +105,6 @@ class LiteralMarkupTestCase(CustomTestCase):
     def test_parameter_wrapper_markers_do_not_consume_following_prose(self):
         for value in (
             "literal " + START + " marker",
-            "literal " + END + " marker",
             "literal " + START + "example" + END + " marker",
             "literal " + OPEN + "example> marker",
         ):
@@ -126,6 +125,17 @@ class LiteralMarkupTestCase(CustomTestCase):
 
 
 class IncompleteCallTestCase(CustomTestCase):
+    def test_later_stray_parameter_close_does_not_extend_an_incomplete_call(self):
+        first = START + OPEN + "record>" + P_OPEN + "value>one" + CLOSE + END
+        between = "BETWEEN " + P_CLOSE + " "
+        source = first + between + call("record", "two") + "TAIL"
+        result = Qwen3CoderDetector().detect_and_parse(source, [tool()])
+        self.assertEqual(result.normal_text, between + "TAIL")
+        self.assertEqual(
+            [(c.name, json.loads(c.parameters)) for c in result.calls],
+            [("record", {"value": "one"}), ("record", {"value": "two"})],
+        )
+
     def test_missing_parameter_close_does_not_consume_a_later_call(self):
         first = START + OPEN + "record>" + P_OPEN + "value>one" + CLOSE + END
         source = "BEFORE" + first + "BETWEEN" + call("record", "two") + "TAIL"

@@ -363,13 +363,9 @@ class Qwen3CoderDetector(BaseFormatDetector):
             depth = 1
             end = body_end = len(text)
             parameter_body_end = 0
+            parameter_marker_depth = 0
             for match in tokens.finditer(text, start + len(start_token)):
-                if match.start() < parameter_body_end:
-                    continue
                 if match.group().startswith(parameter_prefix):
-                    # A complete parameter owns its wrapper/function markers.
-                    # Counting them as structure can consume following prose or
-                    # close the outer call before its value has finished.
                     while (
                         parameter_end is not None
                         and parameter_end.start() < match.end()
@@ -388,7 +384,20 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     # field used the legacy missing-close fallback.
                     # With no closing parameter, retain the existing incomplete
                     # structure fallback instead of inventing a delimiter.
+                    parameter_marker_depth = 0
                     continue
+                if match.start() < parameter_body_end:
+                    # Parameter text can quote balanced markers or an opener
+                    # without a closer. Those do not nest the enclosing call.
+                    # An unmatched closer still ends the real structure: a
+                    # missing parameter close must not hide that boundary while
+                    # searching for a stray close in later prose or calls.
+                    if match.group() == start_token:
+                        parameter_marker_depth += 1
+                        continue
+                    if parameter_marker_depth:
+                        parameter_marker_depth -= 1
+                        continue
                 depth += 1 if match.group() == start_token else -1
                 if depth == 0:
                     body_end, end = match.start(), match.end()
