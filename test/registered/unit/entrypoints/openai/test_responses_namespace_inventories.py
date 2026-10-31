@@ -220,7 +220,11 @@ class MuseRenderedNameTestCase(CustomTestCase):
         serving = serving_for("muse", MUSE_TEMPLATE)
         req = request([namespace("browser", "search")])
         prompt = self._prompt(serving, req)
-        self.assertIn("NS[browser] CALL(browser.search)", prompt)
+        # One namespace block, its member advertised under the dotted spelling
+        # the parser answers. The template's own whitespace controls decide how
+        # the two fragments are joined, which is not the contract.
+        self.assertIn("NS[browser]", prompt)
+        self.assertIn("CALL(browser.search)", prompt)
         (call,) = function_calls(
             serving._make_response_output_items(
                 req,
@@ -318,10 +322,17 @@ class AdditionalToolsInventoryTestCase(CustomTestCase):
                 {
                     "type": "additional_tools",
                     "tools": [
-                        namespace("N", function("A", description="old_schema"), function("B"))
+                        namespace(
+                            "N",
+                            function("A", description="old_schema"),
+                            function("B", description="sibling_schema"),
+                        )
                     ],
                 },
-                {"type": "additional_tools", "tools": [namespace("N", function("A", description="new_schema"))]},
+                {
+                    "type": "additional_tools",
+                    "tools": [namespace("N", function("A", description="new_schema"))],
+                },
             ]
         )
         serving = serving_for("qwen3_coder")
@@ -329,8 +340,13 @@ class AdditionalToolsInventoryTestCase(CustomTestCase):
             tool.function.name: tool for tool in serving._response_tools_to_chat_tools(req)
         }
         self.assertEqual(set(tools), {"N__A", "N__B"})
+        # The rebinding replaces its own leaf and nothing else: the sibling the
+        # latest declaration did not mention is still callable with the schema it
+        # was declared with, under the namespace metadata both groups share.
         self.assertIn("new_schema", tools["N__A"].function.description)
-        self.assertIn("old_schema", tools["N__B"].function.description)
+        self.assertNotIn("old_schema", tools["N__A"].function.description)
+        self.assertIn("sibling_schema", tools["N__B"].function.description)
+        self.assertIn("N tools", tools["N__B"].function.description)
         inventories = [
             message["content"]
             for message in serving._construct_input_messages(req)
@@ -338,7 +354,10 @@ class AdditionalToolsInventoryTestCase(CustomTestCase):
         ]
         self.assertEqual(len(inventories), 2)
         self.assertIn("old_schema", inventories[0])
+        self.assertIn("sibling_schema", inventories[0])
         self.assertIn("new_schema", inventories[1])
+        self.assertNotIn("old_schema", inventories[1])
+        self.assertNotIn("sibling_schema", inventories[1])
 
     def test_duplicate_identity_in_one_inventory_is_a_bad_request(self):
         for tools in (
