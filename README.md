@@ -1,7 +1,7 @@
 # GitHub traffic archive
 
 Repository: `jpezzulli/sglang-rtxpro6000`. Launch: **2026-08-24**.
-Collected: **2026-10-30T05:48:13Z**. Coverage through **2026-10-29** (UTC).
+Collected: **2026-10-31T05:39:57Z**. Coverage through **2026-10-29** (UTC).
 
 Counts are exact sums of GitHub-reported daily counts for the covered dates; the newest dates may be partial and GitHub can revise the overlapping window.
 
@@ -15,13 +15,13 @@ Counts are exact sums of GitHub-reported daily counts for the covered dates; the
 | Current rolling-window clones | 16,111 |
 | Current rolling-window unique cloners | 1,003 |
 | clones: `sum_of_daily_uniques` | 4,759 |
-| Current stars | 184 |
+| Current stars | 185 |
 | Current forks | 26 |
 
 **No exact lifetime unique-person count is available.** Daily unique values and rolling-window unique values are GitHub metrics. Summing daily uniques does not deduplicate people across days or windows.
 
 Missing dates through latest exposed date: none.
-Not yet exposed: 2026-10-30.
+Not yet exposed: 2026-10-30, 2026-10-31.
 
 ## Daily history
 
@@ -125,7 +125,7 @@ Not yet exposed: 2026-10-30.
 | /jpezzulli/sglang-rtxpro6000/blob/pennyroyal-main-sm120-final/COMMUNITY-RESULTS.md | 38 | 35 |
 | /jpezzulli/sglang-rtxpro6000/blob/pennyroyal-main-sm120-final/RESULTS.md | 38 | 24 |
 
-[Latest full snapshot](snapshots/2026-10-30/2026-10-30T054813Z-41010435483-1.json) · [Daily JSON](daily.json) · [Repository stars and forks](repository-metrics.json) · [GHCR package downloads](PACKAGE-DOWNLOADS.md) · [Hugging Face model downloads](HUGGINGFACE-DOWNLOADS.md) · [Immutable first-run raw responses](raw/first-run/)
+[Latest full snapshot](snapshots/2026-10-31/2026-10-31T053957Z-41173489326-1.json) · [Daily JSON](daily.json) · [Repository stars and forks](repository-metrics.json) · [GHCR package downloads](PACKAGE-DOWNLOADS.md) · [Hugging Face model downloads](HUGGINGFACE-DOWNLOADS.md) · [Immutable first-run raw responses](raw/first-run/)
 
 Snapshots retain the aggregate totals, daily arrays, referrers and popular paths as reported together in each collection. They overlap and must not be added together.
 
