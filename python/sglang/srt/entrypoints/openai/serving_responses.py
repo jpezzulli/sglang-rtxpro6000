@@ -255,6 +255,23 @@ class OpenAIServingResponses(OpenAIServingChat):
     def _has_response_tool(request: ResponsesRequest, *tool_types: str) -> bool:
         return any(tool.type in tool_types for tool in (request.tools or []))
 
+    @staticmethod
+    def _has_inline_tool_additions(history: Any) -> bool:
+        """Whether one history payload -- this request's items or a stored chain --
+        declares tools inline."""
+        return isinstance(history, list) and any(
+            isinstance(item, dict) and item.get("type") == "additional_tools"
+            for item in history
+        )
+
+    def _reject_beam_inline_tools(self, param: str) -> ORJSONResponse:
+        return self.create_error_response(
+            "additional_tools is not supported with the tool-translating Beam "
+            "backend: an inline declaration would render as history without joining "
+            "tool selection or call output.",
+            param=param,
+        )
+
     def _has_forceable_tool(self, request: ResponsesRequest) -> bool:
         """Whether ``tool_choice="required"`` has anything the parser can force.
 
@@ -356,6 +373,15 @@ class OpenAIServingResponses(OpenAIServingChat):
         if not self.tokenizer_manager:
             return self.create_error_response("Model not loaded")
         tool_adapter = None
+        # ``additional_tools`` is a Responses extension the pinned upstream Beam
+        # adapter never offered: it flattens the tool list it is handed and maps
+        # calls back through that one map, so an inline declaration would render as
+        # history while staying invisible to selection and to output identity. The
+        # combination is refused at admission instead of being half-supported.
+        # Beam tools, shell and built-ins are untouched, and inline inventories stay
+        # supported for every other parser.
+        if self._translates_tools and self._has_inline_tool_additions(request.input):
+            return self._reject_beam_inline_tools("input")
         if self._translates_tools:
             try:
                 request, tool_adapter = BeamToolAdapter.from_request(
@@ -397,6 +423,15 @@ class OpenAIServingResponses(OpenAIServingChat):
         else:
             prev_response = None
 
+        # The same extension cannot arrive through a stored continuation either, and
+        # the chain is only safe to read now that its id resolved.
+        if (
+            self._translates_tools
+            and prev_response_id is not None
+            and self._has_inline_tool_additions(self.msg_store[prev_response_id])
+        ):
+            return self._reject_beam_inline_tools("previous_response_id")
+
         # FIXME: If the engine is dead, raise an error
         # This is required for the streaming case
 
@@ -414,13 +449,25 @@ class OpenAIServingResponses(OpenAIServingChat):
                 )
 
         tool_choice = request.effective_tool_choice()
-        if isinstance(tool_choice, dict) and not self._tool_identities(
-            request
-        ).declares(tool_choice["name"], tool_choice.get("namespace")):
-            return self.create_error_response(
-                f"Tool {tool_choice['name']!r} is not declared in tools",
-                param="tool_choice",
-            )
+        if isinstance(tool_choice, dict):
+            # Two declarations of one identity in one inventory are ambiguous rather
+            # than a rebind, and that ambiguity is a 400 at admission -- the same
+            # boundary the required check uses -- not an exception escaping
+            # validation.
+            try:
+                declared = self._tool_identities(
+                    request,
+                    self._replayed_tool_identities(request, prev_response),
+                ).declares(
+                    tool_choice["name"], tool_choice.get("namespace")
+                )
+            except ValueError as exc:
+                return self.create_error_response(str(exc), param="tools")
+            if not declared:
+                return self.create_error_response(
+                    f"Tool {tool_choice['name']!r} is not declared in tools",
+                    param="tool_choice",
+                )
 
         # harmony emits raw tokens; per-token logprobs aren't wired there.
         if self.use_harmony and request.is_include_output_logprobs():
@@ -776,25 +823,36 @@ class OpenAIServingResponses(OpenAIServingChat):
         *,
         tool_adapter=None,
     ):
+        # One table for the whole request: the initial tool block, every inline
+        # history position, the parser inventory, the choice and the response items
+        # all take their spellings from it.
+        identities = self._tool_identities(
+            request, self._replayed_tool_identities(request, prev_response)
+        )
         messages = self._construct_input_messages(
-            request, prev_response, tool_adapter=tool_adapter
+            request, prev_response, tool_adapter=tool_adapter, identities=identities
         )
 
-        chat_tools = self._response_tools_to_chat_tools(request, prev_response)
+        # The initial tool block carries only what the request itself declared. An
+        # inline ``additional_tools`` inventory is history: it keeps its own position
+        # and its own schema instead of migrating into the prompt prefix, where a
+        # later rebind would rewrite the schema the model was first shown. The whole
+        # callable inventory still publishes the bindings and the custom shims that
+        # the constraint, the parser and the output mapping read.
+        callable_tools = self._response_tools_to_chat_tools(
+            request, prev_response, identities
+        )
+        chat_tools = self._chat_tools_from_declarations(
+            request.tools or [], identities
+        )
         chat_request = ChatCompletionRequest(
             model=request.model,
             messages=messages,
             stream=request.stream,
             tools=chat_tools or None,
             tool_choice=(
-                self._chat_tool_choice(
-                    request.effective_tool_choice(),
-                    self._tool_identities(
-                        request,
-                        self._replayed_tool_identities(request, prev_response),
-                    ),
-                )
-                if chat_tools
+                self._chat_tool_choice(request.effective_tool_choice(), identities)
+                if callable_tools
                 else "none"
             ),
             parallel_tool_calls=(
@@ -1626,11 +1684,12 @@ class OpenAIServingResponses(OpenAIServingChat):
         self,
         request: ResponsesRequest,
         prev_response: Optional[ResponsesResponse] = None,
+        identities: Optional[ToolIdentities] = None,
     ) -> list[Tool]:
         # ``function`` and ``custom`` tools -- including the members of a
         # namespace -- flow to chat; built-ins go through harmony. A custom tool
         # is shimmed into a single-string function tool.
-        identities = self._tool_identities(
+        identities = identities or self._tool_identities(
             request, self._replayed_tool_identities(request, prev_response)
         )
         # ``names`` is the callable half of the bindings, in the shape every
@@ -1706,10 +1765,17 @@ class OpenAIServingResponses(OpenAIServingChat):
         self,
         request: ResponsesRequest,
         prev_response: Optional[ResponsesResponse] = None,
+        identities: Optional[ToolIdentities] = None,
     ) -> Optional[list[dict]]:
         """Tools for Muse's chat template when the request has namespace tools:
         namespaces stay nested, so the template can render namespace metadata and
-        namespace-level ``defer_loading``. None keeps the flattened tool list."""
+        namespace-level ``defer_loading``. None keeps the flattened tool list.
+
+        The template renders the prompt's initial block, so only the declarations the
+        request itself carries appear here -- an inline ``additional_tools`` inventory
+        stays in the message history at its own position -- while the spellings come
+        from the one request-wide table, contested members included.
+        """
         if self.tool_call_parser != "muse" or not any(
             tool.type == "namespace" for tool in request.tools
         ):
@@ -1718,11 +1784,11 @@ class OpenAIServingResponses(OpenAIServingChat):
         # usable while the bound spelling is exactly that composition. A
         # contested member goes through the flattened list instead, which renders
         # the name the parser and the response items will report.
-        identities = self._tool_identities(
+        identities = identities or self._tool_identities(
             request, self._replayed_tool_identities(request, prev_response)
         )
         template_tools: list[dict] = []
-        for tool in self._effective_response_tools(request):
+        for tool in request.tools or []:
             if tool.type == "namespace" and tool.name:
                 members = []
                 for member_type, definition in namespace_members(tool):
@@ -2086,9 +2152,10 @@ class OpenAIServingResponses(OpenAIServingChat):
         prev_response: Optional[ResponsesResponse] = None,
         *,
         tool_adapter=None,
+        identities: Optional[ToolIdentities] = None,
     ) -> list[ChatCompletionMessageParam]:
         messages: list[ChatCompletionMessageParam] = []
-        identities = self._tool_identities(
+        identities = identities or self._tool_identities(
             request, self._replayed_tool_identities(request, prev_response)
         )
         if request.instructions:

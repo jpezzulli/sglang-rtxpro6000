@@ -896,6 +896,72 @@ class RequiredToolChoiceAdmissionTestCase(CustomTestCase):
         )
         self.assertIn("Response store is disabled", error["message"])
 
+    def test_an_ambiguous_inventory_is_rejected_under_a_named_choice(self):
+        declaration = {"type": "function", "name": "A", "parameters": {}}
+        error = self._refusal(
+            self._serving(),
+            self._request(
+                tools=[declaration, dict(declaration)],
+                tool_choice={"type": "function", "name": "A"},
+            ),
+        )
+        # Two declarations of one identity are ambiguous rather than a rebind, and
+        # that is a 400 at admission, not an exception escaping validation.
+        self.assertEqual(error["param"], "tools")
+        self.assertIn("unique", error["message"])
+
+    def test_beam_refuses_inline_declarations_and_only_those(self):
+        inline = {
+            "type": "additional_tools",
+            "tools": [{"type": "function", "name": "later", "parameters": {}}],
+        }
+        for label, request in {
+            "inline item": self._request(
+                input=[{"role": "user", "content": "go"}, inline],
+                tool_choice="required",
+            ),
+            # A named inline choice has to reach the same boundary, instead of the
+            # adapter rejecting it for not being in the tool list it was handed.
+            "named inline choice": self._request(
+                input=[{"role": "user", "content": "go"}, inline],
+                tool_choice={"type": "function", "name": "later"},
+            ),
+        }.items():
+            with self.subTest(case=label):
+                serving = self._serving()
+                serving._translates_tools = True
+                error = self._refusal(serving, request)
+                self.assertEqual(error["param"], "input")
+                self.assertIn("additional_tools", error["message"])
+
+        serving = self._serving(store_enabled=True)
+        serving._translates_tools = True
+        serving.response_store["resp_prior"] = Mock(id="resp_prior")
+        serving.msg_store["resp_prior"] = [inline]
+        with self.subTest(case="stored inline declaration"):
+            error = self._refusal(
+                serving,
+                self._request(
+                    input="again", tool_choice="required", previous_response_id="resp_prior"
+                ),
+            )
+            self.assertEqual(error["param"], "previous_response_id")
+            self.assertIn("additional_tools", error["message"])
+
+        # Ordinary Beam declarations are untouched.
+        serving = self._serving(store_enabled=True)
+        serving._translates_tools = True
+        with self.subTest(case="plain beam tools"):
+            self.assertIsNone(
+                self._refusal(
+                    serving,
+                    self._request(
+                        tools=[{"type": "function", "name": "now", "parameters": {}}],
+                        tool_choice="required",
+                    ),
+                )
+            )
+
 
 class ResponseTemplateRequiredToolTestCase(CustomTestCase):
     # Every field is delimited, so the template gives no field to the JSON.

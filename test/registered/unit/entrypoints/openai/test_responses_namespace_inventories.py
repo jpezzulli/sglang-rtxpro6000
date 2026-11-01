@@ -11,6 +11,7 @@ import asyncio
 import json
 import sys
 import unittest
+from unittest.mock import Mock
 
 from jinja2 import Environment
 from utils import StreamFixture, engine_chunk, event_payloads, make_serving
@@ -271,6 +272,10 @@ class MuseRenderedNameTestCase(CustomTestCase):
         self.assertEqual(call["name"], "browser.search")
 
 
+class _ReachedPromptAssembly(Exception):
+    """Raised from the first step that consumes the assembled chat request."""
+
+
 class AdditionalToolsInventoryTestCase(CustomTestCase):
     def test_inventory_stays_at_its_history_position_including_empty(self):
         serving = serving_for("qwen3_coder")
@@ -450,6 +455,65 @@ class AdditionalToolsInventoryTestCase(CustomTestCase):
             [tool.function.name for tool in serving._response_tools_to_chat_tools(req)],
             ["browser.search", "browser%2Esearch"],
         )
+
+    def _chat_request(self, serving, req):
+        """The ChatCompletionRequest ``_make_request`` assembles, unprefixed."""
+
+        def capture(chat_request, *args, **kwargs):
+            captured["chat_request"] = chat_request
+            raise _ReachedPromptAssembly
+
+        captured: dict = {}
+        serving._process_messages = Mock(side_effect=capture)
+        with self.assertRaises(_ReachedPromptAssembly):
+            asyncio.run(serving._make_request(req, None, serving.tokenizer_manager.tokenizer))
+        return captured["chat_request"]
+
+    def test_inline_additions_do_not_join_the_initial_tool_block(self):
+        serving = serving_for("qwen3_coder")
+        req = request(
+            [function("initial")],
+            input=[
+                {"role": "user", "content": "before"},
+                {"type": "additional_tools", "tools": [namespace("later", function("search"))]},
+                {"role": "user", "content": "after"},
+            ],
+            tool_choice={"type": "function", "namespace": "later", "name": "search"},
+        )
+        chat = self._chat_request(serving, req)
+        # The prompt's initial block is the request's own declarations, in their own
+        # schemas. The inline inventory stays at its history position, and the
+        # parser inventory the constraint is built from still offers both.
+        self.assertEqual([tool.function.name for tool in chat.tools], ["initial"])
+        self.assertEqual(
+            [tool.function.name for tool in serving._effective_tools(chat)],
+            ["initial", "later__search"],
+        )
+        self.assertEqual(
+            (chat.tool_choice.type, chat.tool_choice.function.name),
+            ("function", "later__search"),
+        )
+
+    def test_a_rebinding_does_not_rewrite_the_initial_declaration_schema(self):
+        serving = serving_for("qwen3_coder")
+        req = request(
+            [namespace("N", function("A", description="initial_schema"))],
+            input=[
+                {"role": "user", "content": "before"},
+                {
+                    "type": "additional_tools",
+                    "tools": [namespace("N", function("A", description="replacement_schema"))],
+                },
+            ],
+        )
+        chat = self._chat_request(serving, req)
+        self.assertEqual(len(chat.tools), 1)
+        self.assertIn("initial_schema", chat.tools[0].function.description)
+        self.assertNotIn("replacement_schema", chat.tools[0].function.description)
+        # What the model may call now is the latest binding, at its history position.
+        offered = serving._effective_tools(chat)
+        self.assertEqual(len(offered), 1)
+        self.assertIn("replacement_schema", offered[0].function.description)
 
     def test_unsupported_inline_declaration_is_a_bad_request(self):
         for bad in (
