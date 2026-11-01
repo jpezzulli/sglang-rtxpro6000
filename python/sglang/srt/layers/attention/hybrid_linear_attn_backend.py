@@ -2237,6 +2237,16 @@ class HybridLinearAttnBackend(AttentionBackend):
         capture_boundary = get_exec().mamba.enable_mamba_extra_buffer
 
         self._ensure_recovery_stream()
+        # Producer -> consumer handoff, the same pair the serving path uses in
+        # _no_cache_mtp_recompute: the buffer zero-fills above, the stash and the
+        # state pool they were written into were all issued on the CALLER stream, and
+        # the first warmup launch below runs on the recovery stream. Without this
+        # join, the (cached, address-stable) kernel can read uninitialized index/step
+        # rows or write state the producer has not finished writing. The synchronize
+        # that FOLLOWS the launch is not protection -- by then the launch is already
+        # queued -- and the graph's own later sync is far too late.
+        self._recovery_join_event.record()
+        self._recovery_stream.wait_event(self._recovery_join_event)
 
         buckets = sorted({int(b) for b in capture_bs if 0 < int(b) <= pool.size})
         if not buckets:

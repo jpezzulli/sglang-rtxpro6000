@@ -26,6 +26,8 @@ ordered; they do not prove the joins are sufficient on real hardware (see
 here touches a device.
 """
 
+import sys
+import types
 import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -35,6 +37,7 @@ import torch
 
 from sglang.srt.layers.attention import hybrid_linear_attn_backend as hybrid_module
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
+from sglang.srt.layers.attention.linear.kernels import gdn_flashinfer as fi_module
 from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
     HybridLinearAttnBackend,
 )
@@ -134,6 +137,131 @@ def _operation():
         -1,
         None,
     )
+
+
+class _FakeStreamCtx:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeStashBuf:
+    """One of the four stable recovery index/step buffers, watching its fill."""
+
+    def __init__(self, log, name):
+        self.log, self.name = log, name
+
+    def fill_(self, value):
+        self.log.append(("fill", self.name, value))
+        return self
+
+
+class TestWarmupCaptureJoinsTheCallerStream(unittest.TestCase):
+    """capture_recovery_graphs hands off the way the serving path does.
+
+    The four stable index/step buffers are zero-filled on the CALLER stream, and the
+    per-layer stash and the state pool they read were written there by the verify
+    capture; the first warmup launch runs on the RECOVERY stream. Only the
+    producer->consumer join (record the join event on the producer, make the consumer
+    wait it) orders them: a synchronize AFTER the launch is not protection -- the
+    launch is already queued and can read uninitialized indices or commit state into
+    a row the producer has not finished writing -- and a graph's own later sync is far
+    too late. Same gap in the accepted source; it matters on this launch path.
+    """
+
+    def _capture(self):
+        log = []
+        fake = _FakeCuda(log)
+        backend, _, _ = _init_hybrid(
+            recover_ssm=True,
+            pool_event=_FakeEvent("pool", log),
+            log=log,
+            fake=fake,
+        )
+        del log[:]
+        for name, buf in (
+            ("state", "_rec_state_idx_buf"),
+            ("steps", "_rec_acc_steps_buf"),
+            ("track_idx", "_rec_track_idx_buf"),
+            ("track_steps", "_rec_track_steps_buf"),
+        ):
+            setattr(backend, buf, _FakeStashBuf(log, name))
+        temporal = torch.zeros(4, 2, 2, 2, dtype=torch.bfloat16)
+        sidecar = backend.linear_attn_backend
+        sidecar._no_cache_stash = {0: {"conv_dims": (1, 1, 1, 1, 1, 1, 1)}}
+        sidecar.state_pool = SimpleNamespace(size=4)
+        sidecar.state_layer_cache = lambda layer_id: SimpleNamespace(temporal=temporal)
+        backend._fi_recovery_launch = lambda n, *a, **k: log.append(("launch", n))
+        fi_kernel = object()
+        gdn_kernels = types.ModuleType("flashinfer.gdn_kernels")
+        leaf = types.ModuleType("flashinfer.gdn_kernels.gdn_decode_bf16_state")
+        leaf.gated_delta_rule_mtp = lambda **kwargs: None
+        with (
+            patch.object(hybrid_module, "get_exec") as published,
+            patch.object(fi_module, "fi_recovery_kernel", return_value=fi_kernel),
+            patch.object(torch.cuda, "Stream", fake.Stream),
+            patch.object(torch.cuda, "Event", fake.Event),
+            patch.object(torch.cuda, "stream", fake.stream),
+            patch.object(torch.cuda, "graph", fake.graph),
+            patch.object(torch.cuda, "CUDAGraph", fake.CUDAGraph),
+            patch.object(torch.cuda, "graph_pool_handle", fake.graph_pool_handle),
+            patch.dict(
+                sys.modules,
+                {
+                    "flashinfer": types.ModuleType("flashinfer"),
+                    "flashinfer.gdn_kernels": gdn_kernels,
+                    "flashinfer.gdn_kernels.gdn_decode_bf16_state": leaf,
+                },
+            ),
+        ):
+            published.return_value = SimpleNamespace(
+                mamba=SimpleNamespace(enable_mamba_extra_buffer=False)
+            )
+            backend.capture_recovery_graphs([4, 2])
+        return backend, log
+
+    def test_the_join_sits_between_the_fills_and_the_first_launch(self):
+        backend, log = self._capture()
+        kinds = [entry[0] for entry in log]
+        self.assertEqual(kinds.count("fill"), 4, "every stable buffer is initialized")
+        first_launch = kinds.index("launch")
+        joins = [
+            i
+            for i, entry in enumerate(log)
+            if entry[0] == "stream_wait" and entry[1] is backend._recovery_join_event
+        ]
+        self.assertEqual(len(joins), 1, "one handoff at the warmup boundary")
+        self.assertLess(joins[0], first_launch)
+        records = [i for i, k in enumerate(kinds) if k == "record"]
+        # The producer side of the pair: recorded on the caller stream (no explicit
+        # stream argument -> the current stream, same contract as the serving path),
+        # after every buffer fill and before the launch that reads them.
+        self.assertEqual(len(records), 1)
+        self.assertEqual(log[records[0]][2], None)
+        self.assertLess(kinds.index("record"), joins[0])
+        self.assertLess(max(i for i, k in enumerate(kinds) if k == "fill"), records[0])
+        # And the handoff is a wait, not a sync of the consumer after the fact.
+        self.assertNotIn("stream_sync", kinds[:first_launch])
+
+    def test_both_buckets_are_captured_after_that_one_join(self):
+        backend, log = self._capture()
+        self.assertEqual(
+            backend._rec_capture_bs,
+            [2, 4],
+            "capture must succeed (its own failure fallback clears the buckets and "
+            "downgrades to eager recovery, which would hide a broken fake)",
+        )
+        self.assertEqual(len(backend._rec_graphs), 2)
+        launches = [e[1] for e in log if e[0] == "launch"]
+        # Two launches per bucket: the warm-compile pass outside capture, then the
+        # launch inside it. Largest bucket first so the smaller graphs reuse the pool.
+        self.assertEqual(launches, [4, 4, 2, 2])
+        kinds = [entry[0] for entry in log]
+        self.assertEqual(
+            kinds[:6], ["fill", "fill", "fill", "fill", "record", "stream_wait"]
+        )
 
 
 class TestRecoveryFencesTheL2Legs(unittest.TestCase):
@@ -417,6 +545,9 @@ class _FakeStream:
     def wait_event(self, event):
         self.log.append(("stream_wait", event))
 
+    def synchronize(self):
+        self.log.append(("stream_sync",))
+
 
 class _FakeCuda:
     """Stand-ins for the three torch.cuda factories the recovery helpers use."""
@@ -439,7 +570,23 @@ class _FakeCuda:
 
     def stream(self, stream):
         self.log.append(("ctx", stream))
-        return f"ctx-of-{len(self.log)}"
+        # The capture loop ENTERS this, so it has to be a context manager, not a
+        # placeholder value -- a bare object here gets swallowed by the method's
+        # capture-failure fallback and the test would silently see no launches.
+        return _FakeStreamCtx()
+
+    def graph_pool_handle(self):
+        self.log.append(("pool-handle",))
+        return "graph-pool"
+
+    def CUDAGraph(self):
+        return SimpleNamespace(replay=lambda: self.log.append(("replay",)))
+
+    @contextmanager
+    def graph(self, *args, **kwargs):
+        self.log.append(("capture-begin",))
+        yield
+        self.log.append(("capture-end",))
 
 
 def _linear_sidecar(*, recover_ssm, pool_event):
@@ -456,10 +603,15 @@ def _linear_sidecar(*, recover_ssm, pool_event):
     return sidecar
 
 
-def _init_hybrid(*, recover_ssm, pool_event, cuda=True):
-    """Run the real HybridLinearAttnBackend.__init__ over fake CUDA primitives."""
-    log = []
-    fake = _FakeCuda(log)
+def _init_hybrid(*, recover_ssm, pool_event, cuda=True, log=None, fake=None):
+    """Run the real HybridLinearAttnBackend.__init__ over fake CUDA primitives.
+
+    `log`/`fake` can be supplied so a later step (a capture, a drain) records into the
+    same journal as the stream and event objects created here -- the objects hold the
+    log they were built with.
+    """
+    log = [] if log is None else log
+    fake = _FakeCuda(log) if fake is None else fake
     full = SimpleNamespace(
         token_to_kv_pool="kv",
         req_to_token_pool="reqs",

@@ -15,6 +15,7 @@ per-step states, so a real regression here changes decoded tokens, not just a te
 """
 
 import unittest
+from types import SimpleNamespace
 
 import torch
 
@@ -74,9 +75,14 @@ class TestRecoverSSMSM120(unittest.TestCase):
         }
 
     @classmethod
-    def _full(cls, case, state):
-        """Reference: state-writing verifier, h at every draft position."""
+    def _full(cls, case, state, slots=None):
+        """Reference: state-writing verifier, h at every draft position.
+
+        `slots` must be the mapping the run under test uses, or the reference is
+        computed from different initial states than the code under verification.
+        """
         batch_size, width = case["q"].shape[:2]
+        slots = case["slots"] if slots is None else slots
         intermediate = torch.empty(
             batch_size, width, HV, V, K, device=DEVICE, dtype=torch.bfloat16
         )
@@ -89,7 +95,7 @@ class TestRecoverSSMSM120(unittest.TestCase):
             v=case["v"],
             b=case["b"],
             initial_state_source=state,
-            initial_state_indices=case["slots"],
+            initial_state_indices=slots,
             intermediate_states_buffer=intermediate,
             disable_state_update=True,
             use_qk_l2norm_in_kernel=True,
@@ -179,28 +185,43 @@ class TestRecoverSSMSM120(unittest.TestCase):
     def test_padded_rows_do_not_touch_live_slots(self):
         """A short batch's padding rows carry slot -1 / step 0.
 
-        The recovery must leave every real slot alone for those rows and write only
-        the reserved discard row, or a padded launch corrupts a live request.
+        What the contract promises, and what is checked: every VALID row commits its
+        accepted state, and every slot outside the mapping keeps the bytes it had. The
+        padded row's own destination is the reserved discard row (slot 0 is never
+        handed to a request, since the allocator starts at 1), so its contents are not
+        asserted -- the reference's intermediate row for a masked index is likewise
+        not a defined value to compare against.
         """
         width = WIDTHS[0]
         case = self._case(3, 7, width)
         slots = torch.tensor([1, -1, 2], device=DEVICE, dtype=torch.int32)
-        _, intermediate = self._full(case, case["state"].clone())
+        steps = torch.tensor([width - 1, 0, 0], device=DEVICE, dtype=torch.int32)
+        # The reference runs the SAME mapping, so its valid rows start from the same
+        # committed states the recovery sees.
+        _, intermediate = self._full(case, case["state"].clone(), slots=slots)
         recovered = case["state"].clone()
         before = recovered.clone()
-        steps = torch.tensor([width - 1, 0, 0], device=DEVICE, dtype=torch.int32)
+        # A live slot that this batch does not touch at all.
+        bystander = int(slots.max()) + 2
+        self.assertLess(bystander, case["state"].shape[0])
+
         self._recover(case, recovered, steps, slots=slots)
-        # Row 1 (padded) resolved to h_0 -> discard row 0; rows 0 and 2 committed.
-        torch.testing.assert_close(
-            recovered[1], before[0], atol=0, rtol=0, msg="padded row wrote a live slot"
-        )
+
         for row, slot in ((0, 1), (2, 2)):
             torch.testing.assert_close(
                 recovered[slot],
                 intermediate[row, steps[row]],
                 atol=ATOL,
                 rtol=RTOL,
+                msg=f"valid row {row} did not commit its accepted state",
             )
+        untouched = [i for i in range(case["state"].shape[0]) if i not in (0, 1, 2)]
+        torch.testing.assert_close(
+            recovered[untouched], before[untouched], atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            recovered[bystander], before[bystander], atol=0, rtol=0
+        )
 
     # --- mamba-track boundary pass -----------------------------------------
     def test_boundary_prefixes_63_64_65(self):
@@ -249,16 +270,21 @@ class TestRecoverSSMSM120(unittest.TestCase):
         window; every lower residue must arrive masked (step -1) and must not write.
         """
         for width in WIDTHS:
-            case = self._case(width + 2, 313 + width, width)
+            # One row per reachable residue 64-width..63, plus one row for the
+            # residue just below the reachable band (masked). Batch, slots and every
+            # per-row vector below are derived from that same row count, and the
+            # working slots (1..rows) are disjoint from the track slots
+            # (rows+1..2*rows) -- the pool allocates 2*rows+8 rows, so both ranges fit.
+            residues = list(range(TRACK_INTERVAL - width, TRACK_INTERVAL))
+            residues = residues + [TRACK_INTERVAL - width - 1]
+            batch_size = len(residues)
+            case = self._case(batch_size, 313 + width, width)
             _, intermediate = self._full(case, case["state"].clone())
             recovered = case["state"].clone()
-            residues = list(range(TRACK_INTERVAL - width, TRACK_INTERVAL))
-            # One row per reachable residue, then rows for the residue below the
-            # reachable band, which must be masked out.
-            residues = residues + [TRACK_INTERVAL - width - 1]
-            rows = torch.arange(len(residues), device=DEVICE, dtype=torch.int32)
+            rows = torch.arange(batch_size, device=DEVICE, dtype=torch.int32)
             slots = (rows + 1).to(torch.int32)
-            track_slots = (rows + width + 1).to(torch.int32)
+            track_slots = (rows + batch_size + 1).to(torch.int32)
+            self.assertEqual(len(set(slots.tolist()) & set(track_slots.tolist())), 0)
             steps = torch.tensor(
                 [TRACK_INTERVAL - 1 - r for r in residues],
                 device=DEVICE,
@@ -307,6 +333,7 @@ class TestRecoverSSMSM120(unittest.TestCase):
         replay_outputs = []
 
         def step(cycle, reference, recovered, recording):
+            """One verify/commit cycle; returns the output the step was checked on."""
             case = self._case(batch_size, 301 + cycle, width)
             output_full, intermediate = self._full(case, reference)
             output_wy = self._wy(case, recovered)
@@ -324,6 +351,7 @@ class TestRecoverSSMSM120(unittest.TestCase):
             )
             if recording:
                 replay_outputs.append(output_wy.clone())
+            return output_wy
 
         for cycle in range(24):
             step(cycle, reference, recovered, recording=cycle >= 16)
@@ -333,11 +361,14 @@ class TestRecoverSSMSM120(unittest.TestCase):
 
         # Simulate radix prefix reuse / retraction: restore the saved checkpoint into
         # fresh working pools and replay the continuation.
+        # Same phase as the recording: the output a replayed step produced from the
+        # state it STARTED from, not a later read of the pool it just advanced (that
+        # would compare a pre-commit verify against a post-commit one).
         reference, recovered = prefix_reference, prefix_recovered
         for replay_index, cycle in enumerate(range(16, 24)):
-            step(cycle, reference, recovered, recording=False)
+            output_replay = step(cycle, reference, recovered, recording=False)
             torch.testing.assert_close(
-                self._wy(self._case(batch_size, 301 + cycle, width), recovered),
+                output_replay,
                 replay_outputs[replay_index],
                 atol=ATOL,
                 rtol=RTOL,
@@ -379,6 +410,114 @@ class TestRecoverSSMSM120(unittest.TestCase):
                         # Same graph, different accepted widths: the indices are read
                         # from the captured buffers, not baked in.
                         accepted.copy_((accepted + 1) % width)
+
+    # --- warmup capture ordering -------------------------------------------
+    def _warmup_backend(self, case, state):
+        """The real capture path, over `state` as the layer's SSM pool."""
+        from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
+            HybridLinearAttnBackend,
+        )
+
+        width = case["T"]
+        batch_size = case["q"].shape[0]
+        pool_size = state.shape[0]
+        q_dim = k_dim = H * K
+        v_dim = HV * V
+        conv_dim = q_dim + k_dim + v_dim
+        # Token-major persistent conv-out buffer: recovery reads k/v out of it as
+        # strided views, exactly as forward_extend leaves it after the verify conv.
+        persist = torch.zeros(
+            pool_size, width, conv_dim, device=DEVICE, dtype=case["k"].dtype
+        )
+        persist[:batch_size, :, q_dim : q_dim + k_dim] = case["k"]
+        persist[:batch_size, :, q_dim + k_dim : q_dim + k_dim + v_dim] = case["v"]
+
+        backend = HybridLinearAttnBackend.__new__(HybridLinearAttnBackend)
+        backend._recover_ssm = True
+        backend._recovery_stream = None
+        backend._recovery_event = None
+        backend._recovery_event_pending = False
+        backend._recovery_join_event = None
+        backend._recovery_stream_ctx = None
+        backend._rec_state_idx_buf = torch.zeros(
+            pool_size, dtype=torch.int32, device=DEVICE
+        )
+        backend._rec_acc_steps_buf = torch.zeros(
+            pool_size, dtype=torch.int32, device=DEVICE
+        )
+        backend._rec_track_idx_buf = torch.zeros(
+            pool_size, dtype=torch.int32, device=DEVICE
+        )
+        backend._rec_track_steps_buf = torch.zeros(
+            pool_size, dtype=torch.int32, device=DEVICE
+        )
+        backend._rec_graphs = {}
+        backend._rec_boundary_graphs = {}
+        backend._rec_capture_bs = None
+        sidecar = SimpleNamespace()
+        sidecar._no_cache_draft_token_num = width
+        sidecar._conv_out_persist = {0: persist}
+        sidecar._no_cache_stash = {
+            0: {
+                "a": case["a"],
+                "b": case["b"],
+                "A_log": case["A_log"],
+                "A_log_f32": case["A_log"],
+                "dt_bias": case["dt_bias"],
+                "conv_dims": (q_dim, k_dim, v_dim, H, K, HV, V),
+            }
+        }
+        sidecar.state_pool = SimpleNamespace(size=pool_size)
+        sidecar.state_layer_cache = lambda layer_id: SimpleNamespace(temporal=state)
+        backend.linear_attn_backend = sidecar
+        return backend
+
+    def test_warmup_capture_waits_the_delayed_caller_stream_producer(self):
+        """The capture's producer->consumer join, on hardware, with a slow producer.
+
+        The four stable index/step buffers are zero-filled on the caller stream and the
+        stash was written there; the first warmup launch runs on the recovery stream.
+        Poison the working-index buffer with a LIVE slot, keep the caller stream busy
+        behind that fill, and capture: the join must hold the launch until the fills
+        land, so the only row the warmup can touch is the reserved discard row. Without
+        the join the recovery stream is idle, its launch reads the poison, and it
+        commits state into the live request's row.
+
+        The CPU seam test (test_gdn_recovery_stream_order) pins the event order
+        symbolically; this one is the version that would catch a real reordering, and
+        it can only pass vacuously if no launch happened at all -- which the
+        `_rec_capture_bs` and poisoned-buffer assertions rule out.
+        """
+        from sglang.srt.runtime_context import get_context
+
+        width = WIDTHS[0]
+        case = self._case(2, 909, width)
+        state = case["state"].clone()
+        pool_size = state.shape[0]
+        live_slot = int(case["slots"][0])  # slot 1: a real request row
+        before = state.clone()
+        backend = self._warmup_backend(case, state)
+
+        # Producer work still in flight on the caller stream: a poison index, then a
+        # ~100ms delay before the zero-fill the capture itself issues.
+        backend._rec_state_idx_buf.fill_(live_slot)
+        torch.cuda._sleep(200_000_000)
+        with get_context().override_server_args(mamba_radix_cache_strategy="no_buffer"):
+            backend.capture_recovery_graphs([case["q"].shape[0]])
+        torch.cuda.synchronize()
+
+        self.assertEqual(backend._rec_capture_bs, [case["q"].shape[0]])
+        self.assertEqual(int(backend._rec_state_idx_buf[0]), 0)
+        self.assertGreater(len(backend._rec_graphs), 0)
+        untouched = [i for i in range(pool_size) if i != 0]
+        torch.testing.assert_close(
+            state[untouched],
+            before[untouched],
+            atol=0,
+            rtol=0,
+            msg="warmup recovery wrote a live slot: the capture did not join its "
+            "caller-stream producer before the first launch",
+        )
 
     def test_state_pool_publishes_the_recovery_fence(self):
         """The pool, not the backend, owns the event the HiCache write leg joins.
