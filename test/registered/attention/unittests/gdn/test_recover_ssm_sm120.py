@@ -613,15 +613,24 @@ class TestRecoverSSMSM120(unittest.TestCase):
                 )
 
     def test_metadata_replay_cannot_order_the_recovery_the_seam_does(self):
-        """Last-writer-wins proof that metadata prep is not the join's owner.
+        """Already-captured metadata replay orders nothing; only the seam does.
 
         A previous step's recovery is still running on the side stream (a delayed
-        sentinel write into a live row) while this step's metadata prep is served by
-        the captured glue graph. Ordering is established by the dispatch seam calling
-        drain_pending_recovery, so the step's own write to that row lands last. Skip
-        the seam and the side stream lands last and wins -- that is the second phase
-        below, and it is the reason the seam exists: on the graph-dispatch path
-        nothing else runs, because _forward_raw returns at the graph branch.
+        sentinel write into a live row) while this step's metadata prep is served by a
+        glue-graph REPLAY, which runs no Python prep and issues no wait. Two phases,
+        identical timing, one difference: the second calls drain_pending_recovery --
+        the call ModelRunner._forward_raw now makes at the dispatch seam, before the
+        cuda-graph branch returns -- before the step's own write to that row, and that
+        write wins; the first skips it, which is what the graph-dispatch path used to
+        do, and the delayed side stream lands last and wins. Same work, opposite
+        result, so neither phase can pass vacuously.
+
+        The key is captured BEFORE any producer is queued, deliberately:
+        torch.cuda.graph's context enter calls torch.cuda.synchronize() (then GC and
+        empty_cache) on a real capture, which drains every stream on the device. A
+        cold capture inside the race would erase the race, and the control would then
+        measure the capture rather than the replay -- and the replay is the only thing
+        serving ever executes for a key after its first step.
         """
         from sglang.srt.model_executor.runner.metadata_glue_graph import (
             MetadataGlueGraph,
@@ -636,9 +645,12 @@ class TestRecoverSSMSM120(unittest.TestCase):
         event = pool.state_recovery_event
         self.assertIsInstance(event, torch.cuda.Event)
         glue = MetadataGlueGraph(device=DEVICE)
-        glue.NUM_WARMUP = 0  # go straight to a real capture of the prep
+        glue.NUM_WARMUP = 0  # capture this key now, while nothing is in flight
+        key = "target-verify"
+        sentinel = lambda value: torch.full_like(temporal[row], value)  # noqa: E731
 
         def delayed_recovery(value):
+            """The previous step's recovery: busy ~100ms, then commits `value`."""
             backend._ensure_recovery_stream()
             with torch.cuda.stream(backend._recovery_stream):
                 torch.cuda._sleep(200_000_000)
@@ -647,30 +659,56 @@ class TestRecoverSSMSM120(unittest.TestCase):
             backend._recovery_event_pending = True
 
         with self._no_buffer():
-            # 1. The prep the glue records (and every replay that replaces it) must
-            # leave the join for the forward.
+            glue.run(backend, SimpleNamespace(), key)
+            self.assertTrue(glue.is_captured(key), "the key must be captured up front")
+            self.assertFalse(glue.disabled)
+            self.assertEqual(glue.eager, 0)
+            # The capture path replays once to do its own step's prep without counting
+            # it as a replay, so count from here rather than assuming a value.
+            replays_captured = glue.replays
+            self.assertFalse(
+                backend._recovery_event_pending,
+                "nothing may be in flight while the key is captured",
+            )
+
+            # Control: the replay consumes nothing and orders nothing, so with no seam
+            # drain the side stream's commit is the last writer to that row.
             delayed_recovery(1.0)
-            glue.run(backend, SimpleNamespace(), "key")
+            glue.run(backend, SimpleNamespace(), key)
             self.assertTrue(
                 backend._recovery_event_pending,
-                "captured/replayed metadata prep consumed a join it never establishes",
+                "metadata replay consumed a join it never establishes",
             )
-            # 2. Without the seam drain, the side stream's write lands last: this is
-            # the failure the review found, and the probe's sensitivity control.
-            temporal[row].fill_(0.5)
-            torch.cuda.synchronize()
-            self.assertGreater(temporal[row].float().mean().item(), 0.9)
+            self.assertEqual(glue.replays, replays_captured + 1)
+            temporal[row].fill_(0.5)  # this step's own write, unjoined
+            torch.cuda.synchronize()  # the only global sync in the phase
+            torch.testing.assert_close(
+                temporal[row],
+                sentinel(1.0),
+                atol=0,
+                rtol=0,
+                msg="control: the unjoined step won the row, so a missing join is "
+                "not observable here and this test cannot fail",
+            )
 
-            # 3. With it, this step's write is ordered after the recovery and wins.
+            # With the seam drain, the same write is ordered after the recovery.
             delayed_recovery(2.0)
-            glue.run(backend, SimpleNamespace(), "key")
+            glue.run(backend, SimpleNamespace(), key)
+            self.assertTrue(backend._recovery_event_pending)
             backend.drain_pending_recovery()
             self.assertFalse(backend._recovery_event_pending)
             temporal[row].fill_(3.0)
             torch.cuda.synchronize()
-            self.assertLess(temporal[row].float().mean().item(), 3.5)
-            self.assertAlmostEqual(temporal[row].float().mean().item(), 3.0, delta=0.5)
-            self.assertEqual(glue.replays, 1, "the second step replayed the graph")
+            torch.testing.assert_close(
+                temporal[row],
+                sentinel(3.0),
+                atol=0,
+                rtol=0,
+                msg="the step's write must land after the joined recovery, per element "
+                "(a row partially overwritten by both is corruption, not a tie)",
+            )
+            self.assertEqual(glue.replays, replays_captured + 2)
+            self.assertEqual(glue.eager, 0, "both phases must use the captured replay")
 
     def test_state_pool_publishes_the_recovery_fence(self):
         """The pool, not the backend, owns the event the HiCache write leg joins.
