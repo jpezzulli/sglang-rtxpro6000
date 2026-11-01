@@ -32,9 +32,16 @@ set -euo pipefail
 #   FR-Spec           TOKEN_MAP is an optional input (the qualified 64K map is
 #                     a baseline artifact, not shipped here). Unset means a
 #                     full-vocabulary draft baseline, not a matched FR-Spec run.
-#   --gdn-mtp-cache-mode none   not carried: this base has no such flag; its
-#                     GDN MTP verify keeps the intermediate h-state cache (the
-#                     v3.1.4 'full' behavior). Parity is a cache-work item.
+#   --gdn-mtp-cache-mode    carried, and stated: this base's global default is
+#                     'full' (the v3.1.4 intermediate h-state cache), while the
+#                     accepted Flash-Next shape is 'none' (RecoverSSM: no
+#                     intermediate_ssm buffer, the accepted h_K is rebuilt after
+#                     verify). The recipe passes the mode explicitly, defaults
+#                     it to the accepted 'none' for THIS recipe only, and adds
+#                     the resolved value to the NIXL identity, so a none-mode
+#                     run never mounts a full-mode disk tier. Whether the
+#                     recovery's extra compute is a net win here is a GPU
+#                     measurement this recipe does not claim.
 #   media processing  SGLANG_MM_PREPROCESS_DEVICE is carried: unset keeps the
 #                     model/platform-selected behavior, cpu parks image loading
 #                     and fast preprocessing on the CPU, and cuda:N parks it on
@@ -67,6 +74,7 @@ set -euo pipefail
 #   draft and only validated when speculative decode actually launches),
 #   PENNY_REASONING_EFFORT (medium default; OpenAI tiers),
 #   MTP_POLICY=tiered|fixed-w4|adaptive (full mode), FLASHINFER_GDN_FP16_ACCUM_MMA (1; see below),
+#   GDN_MTP_CACHE_MODE=none|full (the accepted shape is none; see below),
 #   SGLANG_SM120_ONLINE_MXFP8 (unset|true|false; NIXL identity uses effective
 #   resident precision, so equivalent automatic/explicit modes share a namespace).
 #
@@ -98,6 +106,13 @@ case "$IMAGE_PROCESSOR_BACKEND" in
       echo "SGLANG_MM_PREPROCESS_DEVICE=$MM_PREPROCESS_DEVICE preprocesses on a CUDA device and needs the fast image processor backend; set IMAGE_PROCESSOR_BACKEND=auto or torchvision, not pil" >&2; exit 1
     fi ;;
   *) echo "IMAGE_PROCESSOR_BACKEND must be auto, torchvision or pil; got '$IMAGE_PROCESSOR_BACKEND'" >&2; exit 1 ;;
+esac
+# GDN MTP intermediate h-state cache mode: the CLI default is 'full', this
+# recipe's accepted shape is 'none'. Explicit in both directions, no new knob.
+GDN_MTP_CACHE_MODE="${GDN_MTP_CACHE_MODE:-none}"
+case "$GDN_MTP_CACHE_MODE" in
+  full|none) ;;
+  *) echo "GDN_MTP_CACHE_MODE must be full or none; got '$GDN_MTP_CACHE_MODE'" >&2; exit 1 ;;
 esac
 export FLASHINFER_GDN_FP16_ACCUM_MMA="${FLASHINFER_GDN_FP16_ACCUM_MMA:-1}"
 GDN_FP16_ACCUM_MMA=off
@@ -326,6 +341,7 @@ if [[ "$BRINGUP" != 1 ]]; then
     --speculative-algorithm NEXTN --speculative-num-steps "$MTP_SPEC_STEPS"
     --speculative-eagle-topk 1 --speculative-num-draft-tokens "$MTP_DRAFT_TOKENS"
     --speculative-adaptive --speculative-adaptive-config "$ADAPTIVE_CONFIG"
+    --gdn-mtp-cache-mode "$GDN_MTP_CACHE_MODE"
     --speculative-draft-model-quantization unquant "${TOKEN_MAP_ARGS[@]}")
   if [[ "$NIXL" == on ]]; then
     echo "Deriving NIXL namespace; checkpoint identity hashing may take time..."
@@ -360,6 +376,7 @@ if [[ "$BRINGUP" != 1 ]]; then
       --field "speculative_adaptive_policy_sha256=$ADAPTIVE_SHA" \
       --field "speculative_draft_quantization=unquant" \
       --field "speculative_token_map_sha256=$TOKEN_MAP_SHA" \
+      --field "gdn_mtp_cache_mode=$GDN_MTP_CACHE_MODE" \
       --field "online_fp8_precision=$ONLINE_FP8_PRECISION" \
       --field "gdn_fp16_accum_mma=$GDN_FP16_ACCUM_MMA" \
       --field "hicache_io_backend=kernel" \
@@ -394,5 +411,8 @@ if [[ -n "$MM_PREPROCESS_DEVICE" ]]; then
   echo "Media preprocessing: parked on $MM_PREPROCESS_DEVICE (image processor backend: $IMAGE_PROCESSOR_BACKEND)"
 else
   echo "Media preprocessing: model/platform-selected (image processor backend: $IMAGE_PROCESSOR_BACKEND)"
+fi
+if [[ "$BRINGUP" != 1 ]]; then
+  echo "GDN MTP cache mode: $GDN_MTP_CACHE_MODE (explicit; the CLI default on this base is full)"
 fi
 exec "$SGLANG_EXE" "${launch_args[@]}"

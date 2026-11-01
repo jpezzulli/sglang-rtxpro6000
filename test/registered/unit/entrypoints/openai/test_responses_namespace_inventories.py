@@ -8,7 +8,6 @@ inline declaration rebinds the leaf instead of merging two schemas together.
 """
 
 import asyncio
-import json
 import sys
 import unittest
 from unittest.mock import Mock

@@ -96,13 +96,32 @@ class TestServeRecipeStatic(unittest.TestCase):
 
     def test_unsupported_features_stay_out_rather_than_silently_dropped(self):
         body = uncommented(SCRIPT)
-        self.assertNotIn("--gdn-mtp-cache-mode", body)
         self.assertNotIn("--tp ", body)
         self.assertIn("--tp-size", body)
         self.assertIn("--speculative-draft-model-quantization unquant", body)
         # The accepted v3.0.2 hold/backoff policy IS implemented on this base,
         # so the recipe must name its file rather than exclude it.
         self.assertIn("adaptive-next-v3.0.2.json", body)
+
+    def test_gdn_mtp_cache_mode_is_stated_not_inherited(self):
+        # This base's CLI default is full; the accepted Flash-Next shape is
+        # none, so the recipe must pass the flag with an explicit value and
+        # keep the global default untouched.
+        body = uncommented(SCRIPT)
+        self.assertIn('--gdn-mtp-cache-mode "$GDN_MTP_CACHE_MODE"', body)
+        self.assertIn('GDN_MTP_CACHE_MODE="${GDN_MTP_CACHE_MODE:-none}"', body)
+        self.assertIn('--field "gdn_mtp_cache_mode=$GDN_MTP_CACHE_MODE"', body)
+        execs = [
+            path
+            for path in (REPO_ROOT / "python/sglang/srt/arg_groups/fields").glob("*.py")
+            if "gdn_mtp_cache_mode: A[" in path.read_text()
+        ]
+        self.assertEqual(len(execs), 1)
+        declared = execs[0].read_text().split("gdn_mtp_cache_mode: A[")[1]
+        self.assertIn('choices=["full", "none"]', declared.split("] =")[0])
+        # The global server-args default stays full; only this recipe opts into
+        # the accepted none shape, so a shared launch keeps old behaviour.
+        self.assertTrue(declared.split("] =")[1].lstrip().startswith('"full"'))
 
     def test_qualified_launch_shape_is_preserved(self):
         body = uncommented(SCRIPT)
@@ -122,6 +141,7 @@ class TestServeRecipeStatic(unittest.TestCase):
             "--speculative-algorithm NEXTN",
             "--speculative-adaptive",
             "--speculative-adaptive-config",
+            "--gdn-mtp-cache-mode",
             "--speculative-token-map",
             "--hicache-storage-backend nixl",
         ):
@@ -293,6 +313,32 @@ class TestEmittedArgv(unittest.TestCase):
         _, argv = self.launch(token_map=token_map)
         self.assertEqual(self.value_after(argv, "--speculative-token-map"), str(token_map))
 
+    def test_gdn_mtp_cache_mode_selects_explicitly_and_refuses_anything_else(self):
+        # Accepted shape: none, chosen by the recipe rather than inherited.
+        result, argv = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.value_after(argv, "--gdn-mtp-cache-mode"), "none")
+        self.assertIn("GDN MTP cache mode: none", result.stdout)
+        # The reviewed parity shape stays reachable without a new knob.
+        result, argv = self.launch(gdn_mtp_cache_mode="full")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.value_after(argv, "--gdn-mtp-cache-mode"), "full")
+        for value in ("auto", "partial", "NONE", "full,none"):
+            result, _ = self.launch(gdn_mtp_cache_mode=value)
+            self.assertNotEqual(result.returncode, 0, value)
+            self.assertIn("GDN_MTP_CACHE_MODE must be full or none", result.stderr, value)
+        # An explicit empty value falls back to the accepted default.
+        result, argv = self.launch(gdn_mtp_cache_mode="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.value_after(argv, "--gdn-mtp-cache-mode"), "none")
+        # No speculative decode in a smoke boot, so no mode on its argv --
+        # and a bogus mode still refuses rather than being quietly accepted.
+        _, argv = self.launch(bringup=1)
+        self.assertNotIn("--gdn-mtp-cache-mode", argv)
+        result, _ = self.launch(bringup=1, gdn_mtp_cache_mode="sideways")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GDN_MTP_CACHE_MODE", result.stderr)
+
     def test_bringup_is_the_minimal_boot(self):
         result, argv = self.launch(bringup=1)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -450,6 +496,18 @@ class TestEmittedArgv(unittest.TestCase):
         plain = self._namespace()
         mapped = self._namespace(token_map=token_map)
         self.assertNotEqual(plain, mapped)
+
+    def test_nixl_identity_separates_gdn_mtp_cache_mode(self):
+        """RecoverSSM and the full h-state cache do not publish the same cache.
+
+        Both modes keep the same KV/SSM pool shapes, so the identity has to be
+        carried by the mode itself: a none-mode launch that mounted a full-mode
+        disk tier would reuse pages whose recovery behaviour differs, and the
+        accepted default (none) must not land in a namespace any older full-mode
+        recipe published.
+        """
+        none_mode = self._namespace()
+        self.assertNotEqual(none_mode, self._namespace(gdn_mtp_cache_mode="full"))
 
     def test_nixl_identity_separates_width_policy(self):
         """One more width table is one more draft behaviour, not a cache reuse.
