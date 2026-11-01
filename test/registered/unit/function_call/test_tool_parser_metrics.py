@@ -25,6 +25,7 @@ from typing import Dict, List, Optional
 import pytest
 
 from sglang.srt.entrypoints.openai.protocol import Function, Tool
+from sglang.srt.environ import envs
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.qwen3_coder_detector import Qwen3CoderDetector
 from sglang.srt.function_call.utils import (
@@ -420,6 +421,16 @@ def test_counter_exported_by_real_prometheus():
         r"^# HELP sglang:tool_parser_events_total \S", exposition, re.MULTILINE
     ), exposition
     assert "# TYPE sglang:tool_parser_events_total counter" in exposition, exposition
+    from prometheus_client.parser import text_string_to_metric_families
+
+    samples = [
+        sample
+        for family in text_string_to_metric_families(exposition)
+        for sample in family.samples
+        if sample.name == "sglang:tool_parser_events_total"
+    ]
+    assert len(samples) == len(TOOL_PARSER_EVENT_OUTCOMES)
+    by_outcome = {sample.labels["outcome"]: sample for sample in samples}
     for outcome in TOOL_PARSER_EVENT_OUTCOMES:
         match = re.search(
             r'^sglang:tool_parser_events_total\{[^}]*outcome="'
@@ -430,7 +441,255 @@ def test_counter_exported_by_real_prometheus():
         )
         assert match is not None, (outcome, exposition)
         assert float(match.group(1)) == 1.0, (outcome, exposition)
-        rendered = match.group(0)
-        assert rendered.count(",") == len(LABELS) + 1, rendered
+        assert by_outcome[outcome].labels == {**LABELS, "outcome": outcome}
     for leak in ("get_weather", "search", "Paris", "model_prompt"):
         assert leak not in exposition, exposition
+
+
+def test_single_call_streamed_in_fragments_counts_once(events):
+    text = wrap(call(WEATHER, location="Paris", days="3"))
+    normal, calls = parse_stream(text, width=1)
+
+    assert counts(events) == {TOOL_PARSER_ACCEPTED: 1}
+    assert len(calls) > 1  # name plus argument fragments, i.e. SSE chunks
+    assert json.loads("".join(c.parameters for c in calls if c.parameters)) == {
+        "location": "Paris",
+        "days": 3,
+    }
+    assert normal == ""
+
+
+def test_multiple_calls_count_once_each_streamed_and_not(events):
+    text = wrap(call(SEARCH, query="rain"), call(WEATHER, location="Oslo", days="2"))
+
+    normal_stream, calls_stream = parse_stream(text, width=3)
+    assert counts(events) == {TOOL_PARSER_ACCEPTED: 2}
+    assert [c.name for c in calls_stream if c.name] == [SEARCH, WEATHER]
+
+    events.clear()
+    normal_plain, calls_plain = parse_text(text)
+    assert counts(events) == {TOOL_PARSER_ACCEPTED: 2}
+    assert [(c.name, json.loads(c.parameters)) for c in calls_plain] == [
+        (SEARCH, {"query": "rain"}),
+        (WEATHER, {"location": "Oslo", "days": 2}),
+    ]
+    assert normal_plain == normal_stream
+
+
+def test_quoted_markup_in_prose_is_not_an_attempt(events):
+    fenced = "\n".join(
+        [
+            "Example:",
+            "```text",
+            wrap(call(WEATHER, location="Berlin", days="1")),
+            "```",
+            "That is all.",
+        ]
+    )
+    normal, calls = parse_text(fenced)
+
+    assert counts(events) == {}
+    assert calls == []
+    assert TOOL_OPEN in normal and FUNC_OPEN in normal
+
+    events.clear()
+    normal_stream, calls_stream = parse_stream(fenced, width=2)
+    assert counts(events) == {}
+    assert calls_stream == []
+    assert normal_stream == normal
+
+
+@pytest.mark.parametrize("prefix", ["", "Some answer. "])
+def test_wrapper_without_function_is_prose_not_an_attempt(events, prefix):
+    """A wrapper alone (its closing markup present or absent) is never a call."""
+    for text in (
+        f"{prefix}{TOOL_OPEN}\n{TOOL_CLOSE}",
+        f"{prefix}{TOOL_OPEN}\n",
+        f"{prefix}{TOOL_OPEN}",
+    ):
+        events.clear()
+        normal, calls = parse_text(text)
+        assert counts(events) == {}, text
+        assert calls == [], text
+        assert normal == text, text
+
+        events.clear()
+        normal_stream, calls_stream = parse_stream(text, width=2)
+        assert counts(events) == {}, text
+        assert calls_stream == [], text
+        assert normal_stream == text, text
+
+
+def test_function_without_its_closing_markup_counts_incomplete_alike(events):
+    """The same unterminated call shape counts once in both parsing modes."""
+    cases = (
+        # Function closed by the wrapper instead of its own markup.
+        f"{TOOL_OPEN}{FUNC_OPEN}{WEATHER}>{PARAM_OPEN}location>Rome{PARAM_CLOSE}{TOOL_CLOSE}",
+        # Response ended inside the function body.
+        f"{TOOL_OPEN}{FUNC_OPEN}{WEATHER}>{PARAM_OPEN}location>Rome",
+    )
+    for text in cases:
+        events.clear()
+        _, calls = parse_text(text)
+        nonstream = counts(events)
+        assert [c.name for c in calls] == [WEATHER], text
+        assert nonstream == {
+            TOOL_PARSER_ACCEPTED: 1,
+            TOOL_PARSER_INCOMPLETE: 1,
+        }, text
+
+        events.clear()
+        _, calls_stream = parse_stream(text, width=3)
+        assert counts(events) == nonstream, text
+        assert [c.name for c in calls_stream if c.name] == [WEATHER], text
+
+
+def test_incomplete_is_counted_only_at_termination(events):
+    truncated = (
+        f"{TOOL_OPEN}\n{FUNC_OPEN}{WEATHER}>{PARAM_OPEN}location>Paris{PARAM_CLOSE}"
+    )
+
+    parser = FunctionCallParser(TOOLS, "qwen3_coder")
+    for start in range(0, len(truncated), 4):
+        parser.parse_stream_chunk(truncated[start : start + 4])
+    # The name may already have been accepted mid-stream; nothing may be
+    # classified incomplete until the response actually terminates.
+    assert TOOL_PARSER_INCOMPLETE not in counts(events)
+
+    parser.parse_stream_end()
+    assert counts(events)[TOOL_PARSER_INCOMPLETE] == 1
+    parser.parse_stream_end()
+    assert counts(events)[TOOL_PARSER_INCOMPLETE] == 1
+
+
+def test_complete_call_records_no_incomplete(events):
+    text = wrap(call(WEATHER, location="Perth", days="1"))
+    parse_stream(text, width=2)
+    assert counts(events) == {TOOL_PARSER_ACCEPTED: 1}
+
+
+def test_truncated_call_after_complete_call_is_still_counted(events):
+    complete = wrap(call(SEARCH, query="rain"))
+    unfinished = f"{TOOL_OPEN}{FUNC_OPEN}{WEATHER}>{PARAM_OPEN}location>Rome"
+
+    normal, calls = parse_text(complete + unfinished)
+    assert normal == unfinished
+    assert [c.name for c in calls] == [SEARCH]
+    assert counts(events) == {
+        TOOL_PARSER_ACCEPTED: 1,
+        TOOL_PARSER_INCOMPLETE: 1,
+    }
+
+    events.clear()
+    parse_stream(complete + unfinished, width=3)
+    assert counts(events)[TOOL_PARSER_INCOMPLETE] == 1
+
+
+@pytest.mark.parametrize("forward_unknown", [False, True])
+def test_unknown_trailing_attempt_is_counted(events, forward_unknown):
+    text = wrap(call(SEARCH, query="rain")) + f"{TOOL_OPEN}{FUNC_OPEN}unknown>"
+    with envs.SGLANG_FORWARD_UNKNOWN_TOOLS.override(forward_unknown):
+        for parse in (parse_text, lambda value: parse_stream(value, width=3)):
+            events.clear()
+            parse(text)
+            assert counts(events)[TOOL_PARSER_UNKNOWN_TOOL] == 1
+            # Current Qwen parsing emits unknown names regardless of this flag;
+            # observe its unfinished attempt without restoring the older filter.
+            assert counts(events).get(TOOL_PARSER_INCOMPLETE, 0) == 1
+
+
+@pytest.mark.parametrize("next_function", [SEARCH, "unknown"])
+def test_later_call_does_not_hide_an_earlier_incomplete_call(events, next_function):
+    text = f"{TOOL_OPEN}{FUNC_OPEN}{WEATHER}>{TOOL_CLOSE}" + wrap(
+        call(next_function, query="rain")
+    )
+    with envs.SGLANG_FORWARD_UNKNOWN_TOOLS.override(False):
+        parser = FunctionCallParser(TOOLS, "qwen3_coder")
+        for character in text:
+            parser.parse_stream_chunk(character)
+        assert TOOL_PARSER_INCOMPLETE not in counts(events)
+        parser.parse_stream_end()
+        assert counts(events)[TOOL_PARSER_INCOMPLETE] == 1
+        parser.parse_stream_end()
+        assert counts(events)[TOOL_PARSER_INCOMPLETE] == 1
+
+
+def test_unknown_tool_accounting_preserves_existing_passthrough(events):
+    text = wrap(call("not_a_tool", location="Rome"))
+    # The pinned parser accepts this name with either flag. Instrumentation
+    # must observe that behavior, not restore the donor's older rejection path.
+    for forward_unknown in (False, True):
+        with envs.SGLANG_FORWARD_UNKNOWN_TOOLS.override(forward_unknown):
+            for parse in (parse_text, lambda value: parse_stream(value, width=3)):
+                events.clear()
+                normal, calls = parse(text)
+                assert counts(events) == {
+                    TOOL_PARSER_UNKNOWN_TOOL: 1,
+                    TOOL_PARSER_ACCEPTED: 1,
+                }
+                assert normal == ""
+                assert [c.name for c in calls if c.name] == ["not_a_tool"]
+
+
+def test_conversion_fallback_counts_once_per_parameter(events):
+    text = wrap(call(WEATHER, location="Lima", days="three", flags="not-a-json-object"))
+
+    _, calls = parse_text(text)
+    assert counts(events) == {
+        TOOL_PARSER_ACCEPTED: 1,
+        TOOL_PARSER_ARGUMENT_CONVERSION_FAILED: 2,
+    }
+    assert json.loads(calls[0].parameters) == {
+        "location": "Lima",
+        "days": "three",
+        "flags": "not-a-json-object",
+    }
+
+    events.clear()
+    _, calls_stream = parse_stream(text, width=5)
+    assert counts(events) == {
+        TOOL_PARSER_ACCEPTED: 1,
+        TOOL_PARSER_ARGUMENT_CONVERSION_FAILED: 2,
+    }
+    assert json.loads("".join(c.parameters for c in calls_stream if c.parameters)) == {
+        "location": "Lima",
+        "days": "three",
+        "flags": "not-a-json-object",
+    }
+
+
+def test_parse_error_recorded_once_and_output_unchanged(events, monkeypatch):
+    text = wrap(call(WEATHER, location="Cairo", days="4"))
+
+    def boom(self, func_name, tools):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(Qwen3CoderDetector, "_iter_unquoted_tool_spans", boom)
+    normal, calls = parse_text(text)
+    assert counts(events) == {TOOL_PARSER_PARSE_ERROR: 1}
+    assert calls == []
+    assert normal == text
+
+
+def test_streaming_parse_error_recorded_once_and_still_raises(events):
+    """A set literal in a declared object parameter breaks JSON serialization.
+
+    The streaming path must keep raising as before, but count the event.
+    """
+    text = wrap(call(WEATHER, location="Cairo", flags="{1}"))
+
+    parser = FunctionCallParser(TOOLS, "qwen3_coder")
+    with pytest.raises(TypeError):
+        for start in range(0, len(text), 2):
+            parser.parse_stream_chunk(text[start : start + 2])
+
+    assert counts(events)[TOOL_PARSER_PARSE_ERROR] == 1
+
+    events.clear()
+    normal, calls = parse_text(text)
+    assert counts(events) == {
+        TOOL_PARSER_ARGUMENT_CONVERSION_FAILED: 1,
+        TOOL_PARSER_PARSE_ERROR: 1,
+    }
+    assert calls == []
+    assert normal == text

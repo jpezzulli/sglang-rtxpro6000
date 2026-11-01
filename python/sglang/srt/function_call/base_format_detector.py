@@ -21,9 +21,13 @@ from sglang.srt.function_call.core_types import (
     _GetInfoFunc,
 )
 from sglang.srt.function_call.utils import (
+    TOOL_PARSER_ACCEPTED,
+    TOOL_PARSER_PARSE_ERROR,
+    TOOL_PARSER_UNKNOWN_TOOL,
     _find_common_prefix,
     _is_complete_json,
     _partial_json_loads,
+    record_tool_parser_event,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,6 +88,9 @@ class BaseFormatDetector(ABC):
             name = act.get("name")
             if not (name and name in tool_indices):
                 logger.warning(f"Model attempted to call undefined function: {name}")
+                # Counted before the forwarding decision: an unknown name is an
+                # unknown-tool event whether or not it is passed through.
+                record_tool_parser_event(TOOL_PARSER_UNKNOWN_TOOL)
                 if not envs.SGLANG_FORWARD_UNKNOWN_TOOLS.get():
                     continue  # Skip unknown tools (default legacy behavior)
 
@@ -97,6 +104,8 @@ class BaseFormatDetector(ABC):
                     ),
                 )
             )
+            # One logical call per entry; streamed argument text is not an event.
+            record_tool_parser_event(TOOL_PARSER_ACCEPTED)
 
         return results
 
@@ -267,6 +276,9 @@ class BaseFormatDetector(ABC):
                         ],
                     )
                     self.current_tool_name_sent = True
+                    # Name emission happens once per logical call; the argument
+                    # deltas that follow are SSE fragments, not calls.
+                    record_tool_parser_event(TOOL_PARSER_ACCEPTED)
                 else:
                     res = StreamingParseResult()
 
@@ -341,6 +353,7 @@ class BaseFormatDetector(ABC):
 
         except Exception as e:
             logger.error(f"Error in parse_streaming_increment: {e}")
+            record_tool_parser_event(TOOL_PARSER_PARSE_ERROR)
             return StreamingParseResult()
 
     @abstractmethod
@@ -355,6 +368,10 @@ class BaseFormatDetector(ABC):
 
         Detectors that hold text back while waiting for a marker that can no
         longer arrive (the stream is over) override this to release it.
+
+        Detectors that can distinguish an unterminated tool call from held text
+        also record TOOL_PARSER_INCOMPLETE here, at response termination only;
+        the base implementation tracks no such state and records nothing.
         """
         return StreamingParseResult()
 
