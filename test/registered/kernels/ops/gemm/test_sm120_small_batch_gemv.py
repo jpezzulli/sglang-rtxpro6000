@@ -12,6 +12,18 @@ is the hardware the donor tiles were measured and accepted for.
 References are computed from the SAME resident FP8 bytes the kernel reads
 (dequantized on the fly), so a wrong scale -- as opposed to a wrong rounding --
 cannot hide inside the tolerance.
+
+The dense projections are judged by the oracle of the path that actually ran.
+The W8A16 GEMV takes the BF16 activation unchanged, so a BF16-A / dequantized-W
+reference is its right oracle.  The reviewed fallback behind it is
+``activation_scheme="dynamic"`` W8A8: ``apply_fp8_linear`` per-token-quantizes
+the activation before the channelwise GEMM, and comparing THAT to a BF16-A
+reference folds ~2.7% activation-quantization loss into a GEMM check (the donor
+snapshot measured .0267 at M17 on SM120).  So the fallback's matrix math is
+verified in FP64 from the bytes the unchanged platform encoder actually handed
+it -- observed through a delegating spy, never recomputed by the oracle -- and
+its residual against the BF16-A reference is reported under a separate loose
+cap.  Neither gate is a model-quality result.
 """
 
 from __future__ import annotations
@@ -35,6 +47,7 @@ from sglang.kernels.ops.gemm.sm120_online_fp8 import (
     w8a16_gemv_supported,
 )
 from sglang.srt.environ import envs
+from sglang.srt.layers.quantization import fp8_utils as fp8_utils_module
 from sglang.srt.layers.quantization import w8a16_gemv as w8a16_module
 from sglang.test.ci.ci_register import register_cuda_ci
 
@@ -106,6 +119,26 @@ def gemv_calls():
 
     with mock.patch.object(w8a16_module, "_launch", spy):
         yield calls
+
+
+@pytest.fixture
+def a8w8_encoder():
+    """Observe the per-token activation encoder the W8A8 fallback calls.
+
+    Delegating, so the operation still runs: the oracle below consumes the exact
+    codes and scales the GEMM under test was handed, rather than a test-side
+    clone of a platform kernel that could drift together with it.
+    """
+    observed: list = []
+    real = fp8_utils_module.sglang_per_token_quant_fp8
+
+    def spy(input_2d):
+        qinput, x_scale = real(input_2d)
+        observed.append((qinput, x_scale))
+        return qinput, x_scale
+
+    with mock.patch.object(fp8_utils_module, "sglang_per_token_quant_fp8", spy):
+        yield observed
 
 
 def _randn(shape, *, seed: int, scale: float) -> torch.Tensor:
@@ -261,34 +294,85 @@ def dense_layers():
 
 
 def _dense_reference(layer, x):
-    """fp32 GEMM over the resident FP8 codes and their FP32 row scales."""
+    """BF16-A / dequantized-W oracle: fp32 GEMM over the SAME resident FP8 codes
+    and FP32 channel scales, rounded to BF16 once at the end.
+
+    The right reference for the W8A16 path, which consumes the activation as it
+    is; for the A8W8 fallback it only bounds activation-quantization loss.
+    """
+    weight = layer.weight.t().float()  # [N, K]
     scale = layer.weight_scale.float().reshape(-1)
-    weight = (layer.weight.float().t() * scale[:, None]).to(torch.bfloat16)
-    return x.bfloat16() @ weight.t()
+    assert weight.shape[0] == scale.numel()
+    return (x.float() @ (weight * scale[:, None]).t()).to(torch.bfloat16)
+
+
+def _fp64_gemm_reference(quantized_a, a_scale, layer):
+    """FP64 matrix math over the OBSERVED quantized A and the resident W bytes.
+
+    The activation encoder is the unchanged platform operation that the
+    ``a8w8_encoder`` spy observed, not a test-side clone of it; this recomputes
+    only the accumulation -- (q_a * a_scale) @ (q_w * w_scale)^T in FP64, then the
+    single final BF16 round -- so a wrong scale, a transposed operand or a dropped
+    row scale cannot pass, and no reimplementation can drift with the kernel.
+    """
+    a = quantized_a.double() * a_scale.double()
+    w = layer.weight.t().double() * layer.weight_scale.double().reshape(-1)[:, None]
+    return (a @ w.t()).to(torch.bfloat16)
 
 
 @pytest.mark.parametrize("rows", GEMV_ROWS + FALLBACK_ROWS)
 @pytest.mark.parametrize("opt_in", [False, True])
 def test_dense_projection_uses_the_gemv_only_within_its_budget(
-    dense_layers, rows, opt_in, gemv_calls
+    dense_layers, rows, opt_in, gemv_calls, a8w8_encoder
 ):
     with envs.SGLANG_FP8_W8A16_GEMV.override(opt_in):
         layer = dense_layers.self_attn.o_proj
         x = _randn((rows, HIDDEN), seed=500 + rows, scale=0.25)
+        bf16_a_reference = _dense_reference(layer, x)
         actual = layer.quant_method.apply(layer, x)
-        _assert_normalized_error(
-            actual, _dense_reference(layer, x), max_nrmse=0.025, min_cosine=0.999
-        )
         expect_gemv = opt_in and 1 <= rows <= DONOR_MAX_M
         assert len(gemv_calls) == (1 if expect_gemv else 0), (rows, opt_in, gemv_calls)
+        # Both paths consume the resident FP8 bytes, never a BF16 copy.
+        assert layer.weight.dtype is torch.float8_e4m3fn
         if expect_gemv:
+            # W8A16: the BF16 activation reaches the kernel unchanged, so the
+            # BF16-A oracle is the correct reference and nothing was quantized.
+            _assert_normalized_error(
+                actual, bf16_a_reference, max_nrmse=0.025, min_cosine=0.999
+            )
+            assert a8w8_encoder == []
             # [K, N] storage handed over as an [N, K] operand with K contiguous,
             # the one layout the donor tile table was measured on.
             assert (gemv_calls[0]["n"], gemv_calls[0]["k"]) == (HIDDEN, HIDDEN)
             assert gemv_calls[0]["w_stride"][1] == 1
-        else:
-            # The fallback consumes the resident FP8 bytes, never a BF16 copy.
-            assert layer.weight.dtype is torch.float8_e4m3fn
+            return
+
+        # The reviewed fallback is dynamic W8A8: the online conversion leaves
+        # layer.input_scale as None, so apply_fp8_linear runs the platform
+        # per-token encoder once and hands its output to the channelwise GEMM.
+        # Judge the GEMM from the bytes that actually went in -- 25x tighter than
+        # any BF16-A bound can be, because the residual there belongs to
+        # activation FP8 and not to the matrix multiply.
+        assert len(a8w8_encoder) == 1, (
+            "the rowwise-FP8 conversion declares activation_scheme='dynamic', so "
+            "the fallback must per-token-quantize the activation exactly once"
+        )
+        qinput, x_scale = a8w8_encoder[0]
+        assert qinput.dtype is torch.float8_e4m3fn
+        assert tuple(qinput.shape) == (rows, HIDDEN)
+        assert tuple(x_scale.shape) == (rows, 1), "one activation scale per row"
+        assert x_scale.dtype is torch.float32
+        _assert_normalized_error(
+            actual,
+            _fp64_gemm_reference(qinput, x_scale, layer),
+            max_nrmse=1e-3,
+            min_cosine=0.99999,
+        )
+        # Reported-only budget, loose on purpose: activation-FP8 loss against the
+        # BF16-A reference, not a GEMM verdict and not a model-quality result.
+        _assert_normalized_error(
+            actual, bf16_a_reference, max_nrmse=0.05, min_cosine=0.998
+        )
 
 
 def test_bias_and_prequantized_activations_do_not_reach_the_gemv(

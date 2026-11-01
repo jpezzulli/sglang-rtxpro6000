@@ -986,6 +986,78 @@ def test_draft_moe_wiring_is_gated_by_the_bundle(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# The A8W8 fallback's oracle, checkable without a GPU
+# --------------------------------------------------------------------------- #
+
+
+def _load_gpu_coverage_module():
+    """The SM120 kernel file, for the reference helpers its GPU cases use.
+
+    Imported by path because the test tree is not a package.  A missing file is
+    the missing port; a missing third-party dependency is a worker that cannot
+    run GPU coverage at all.
+    """
+    path = (
+        Path(__file__)
+        .resolve()
+        .parents[5]
+        .joinpath("test/registered/kernels/ops/gemm/test_sm120_small_batch_gemv.py")
+    )
+    if not path.exists():
+        pytest.fail(
+            f"{path.name} is missing: the accepted fast-path port is not present"
+        )
+    try:
+        spec = importlib.util.spec_from_file_location("sm120_gemv_tests", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except ModuleNotFoundError as err:
+        pytest.skip(f"GPU coverage needs an optional dependency ({err.name})")
+    return module
+
+
+def test_the_w8a8_fallback_oracle_reads_both_scale_axes_independently():
+    """The GPU fallback compares against test code, so that code needs a check.
+
+    A reference that transposed an operand or broadcast the wrong scale axis
+    would silently misjudge production on hardware and no selection test here
+    would notice.  The two scale vectors are deliberately different, N != K, and
+    the resident view is [K, N], so a swapped axis, a swapped transpose or a
+    dropped channel scale cannot reproduce these hand-computed numbers.
+    """
+    tests = _load_gpu_coverage_module()
+
+    class _Layer:
+        pass
+
+    layer = _Layer()
+    # 2 output channels x 4 inputs, stored the way the conversion stores it.
+    codes_nk = torch.tensor(
+        [[1, 2, 4, 8], [16, 32, 64, 112]], dtype=torch.float8_e4m3fn
+    )
+    layer.weight = nn.Parameter(codes_nk.t().contiguous(), requires_grad=False)
+    layer.weight_scale = torch.tensor([0.5, 4.0], dtype=torch.float32)
+    q_a = torch.ones(2, 4, dtype=torch.float8_e4m3fn)
+    a_scale = torch.tensor([[0.5], [2.0]], dtype=torch.float32)
+
+    # Dequantized A rows are [0.5]*4 and [2]*4; dequantized W rows are
+    # [0.5, 1, 2, 4] and [64, 128, 256, 448], so the dots are 0.5*7.5, 0.5*896,
+    # 2*7.5 and 2*896 -- all exactly representable in BF16.  The two scale
+    # vectors share no value, so applying one in the other's axis fails too.
+    expected = torch.tensor([[3.75, 448.0], [15.0, 1792.0]], dtype=torch.bfloat16)
+    assert torch.equal(tests._fp64_gemm_reference(q_a, a_scale, layer), expected)
+
+    # And the BF16-A oracle that judges the W8A16 path agrees on the same resident
+    # bytes and channel scales, for an activation that needs no quantizing.
+    assert torch.equal(
+        tests._dense_reference(
+            layer, torch.tensor([[0.5, 0.5, 0.5, 0.5]], dtype=torch.bfloat16)
+        ),
+        expected[:1],
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Donor tile table / scratch limits the kernels were measured with
 # --------------------------------------------------------------------------- #
 
