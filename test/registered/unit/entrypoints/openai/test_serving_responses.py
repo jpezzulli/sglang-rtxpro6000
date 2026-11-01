@@ -789,6 +789,114 @@ class SkipSpecialTokensForwardingTestCase(CustomTestCase):
         self.assertFalse(params["spaces_between_special_tokens"])
 
 
+class RequiredToolChoiceAdmissionTestCase(CustomTestCase):
+    """``tool_choice="required"`` is judged against the callable inventory.
+
+    A tool the parser can be forced to emit may be a namespace member, or arrive
+    inline in the history -- inline in this request, or inline in the stored
+    continuation the request picks up. Built-ins cannot be forced and an empty
+    group offers nothing, so both keep refusing, and a request naming a previous
+    response that does not exist is rejected by the response-id validation rather
+    than by a store lookup while the inventory is being counted.
+    """
+
+    class ReachedPromptBuilding(Exception):
+        pass
+
+    def _serving(self, *, store_enabled=False):
+        serving = make_serving()
+        serving.reasoning_parser = None
+        serving.tool_call_parser = None
+        serving.use_harmony = False
+        serving.enable_response_store = store_enabled
+        # Prompt building is the first step past validation, so reaching it proves
+        # the request was admitted without pretending to run the engine.
+        serving._make_request = Mock(side_effect=self.ReachedPromptBuilding)
+        return serving
+
+    def _refusal(self, serving, request, status=400):
+        try:
+            result = asyncio.run(serving.create_responses(request))
+        except self.ReachedPromptBuilding:
+            return None
+        self.assertIsInstance(result, ORJSONResponse)
+        self.assertEqual(result.status_code, status)
+        return orjson.loads(result.body)["error"]
+
+    def _request(self, **kwargs):
+        payload = {"model": "x", "input": "go", "tools": [], "store": False}
+        payload.update(kwargs)
+        return ResponsesRequest(**payload)
+
+    def test_a_callable_declaration_anywhere_in_the_request_satisfies_required(self):
+        member = {"type": "function", "name": "m", "parameters": {}}
+        inline = {
+            "type": "additional_tools",
+            "tools": [{"type": "function", "name": "later", "parameters": {}}],
+        }
+        cases = {
+            "namespace member": self._request(
+                tools=[{"type": "namespace", "name": "n", "tools": [member]}],
+                tool_choice="required",
+            ),
+            "inline declaration": self._request(
+                input=[{"role": "user", "content": "go"}, inline],
+                tool_choice="required",
+            ),
+        }
+        for label, request in cases.items():
+            with self.subTest(case=label):
+                self.assertIsNone(self._refusal(self._serving(), request))
+
+    def test_a_callable_declaration_in_the_stored_continuation_counts(self):
+        serving = self._serving(store_enabled=True)
+        serving.response_store["resp_prior"] = Mock(id="resp_prior")
+        serving.msg_store["resp_prior"] = [
+            {"role": "user", "content": "before"},
+            {
+                "type": "additional_tools",
+                "tools": [{"type": "custom", "name": "later", "format": {"type": "text"}}],
+            },
+        ]
+        request = self._request(
+            input="again",
+            tool_choice="required",
+            previous_response_id="resp_prior",
+        )
+        self.assertIsNone(self._refusal(serving, request))
+
+    def test_builtin_tools_and_an_empty_group_still_refuse(self):
+        for tools in (
+            [{"type": "web_search"}],
+            [{"type": "namespace", "name": "n", "tools": []}],
+            [],
+        ):
+            with self.subTest(tools=tools):
+                error = self._refusal(
+                    self._serving(), self._request(tools=tools, tool_choice="required")
+                )
+                self.assertIn("cannot be forced", error["message"])
+
+    def test_an_unknown_continuation_is_rejected_by_its_own_validation(self):
+        for previous_id, status in (("bad", 400), ("resp_missing", 404)):
+            with self.subTest(previous_id=previous_id):
+                error = self._refusal(
+                    self._serving(store_enabled=True),
+                    self._request(
+                        tool_choice="required", previous_response_id=previous_id
+                    ),
+                    status=status,
+                )
+                self.assertEqual(error["param"], "response_id")
+
+    def test_a_continuation_without_the_store_still_refuses_to_be_counted(self):
+        error = self._refusal(
+            self._serving(),
+            self._request(tool_choice="required", previous_response_id="resp_prior"),
+        )
+        self.assertIn("Response store is disabled", error["message"])
+
+
 class ResponseTemplateRequiredToolTestCase(CustomTestCase):
     # Every field is delimited, so the template gives no field to the JSON.
     TEMPLATE = {

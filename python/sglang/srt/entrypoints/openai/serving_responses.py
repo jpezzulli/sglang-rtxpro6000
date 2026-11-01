@@ -255,6 +255,27 @@ class OpenAIServingResponses(OpenAIServingChat):
     def _has_response_tool(request: ResponsesRequest, *tool_types: str) -> bool:
         return any(tool.type in tool_types for tool in (request.tools or []))
 
+    def _has_forceable_tool(self, request: ResponsesRequest) -> bool:
+        """Whether ``tool_choice="required"`` has anything the parser can force.
+
+        The inventory the request can actually call, not the top-level array alone:
+        a namespace contributes its members, a ``custom`` tool counts, and an inline
+        ``additional_tools`` declaration counts wherever it sits in the history the
+        renderer will emit -- this request's own items or the inline declarations of
+        a stored continuation. A built-in cannot be forced and an empty group offers
+        nothing, so both keep refusing. Callers must resolve ``previous_response_id``
+        first: an unknown continuation is rejected by its own id validation, while a
+        valid one has to be counted, because the parser inventory is read from the
+        same history.
+        """
+        return any(
+            tool.name
+            and tool.type in ("function", "custom")
+            or tool.type == "namespace"
+            and next(namespace_members(tool), None) is not None
+            for tool in self._effective_response_tools(request)
+        )
+
     # error helpers dedicated for v1/responses
     def create_error_response(
         self,
@@ -362,18 +383,35 @@ class OpenAIServingResponses(OpenAIServingChat):
         if model_error is not None:
             return model_error
 
+        # Handle the previous response ID before any inventory reads the stored
+        # continuation, so an unknown one fails as an id error and never as a
+        # missing store entry.
+        prev_response_id = request.previous_response_id
+        if prev_response_id is not None:
+            if not prev_response_id.startswith("resp_"):
+                return self._make_invalid_id_error(prev_response_id)
+            async with self.response_store_lock:
+                prev_response = self.response_store.get(prev_response_id)
+            if prev_response is None:
+                return self._make_not_found_error(prev_response_id)
+        else:
+            prev_response = None
+
         # FIXME: If the engine is dead, raise an error
         # This is required for the streaming case
 
         # ``tool_choice="required"`` needs a tool the parser can actually force.
-        if request.tool_choice == "required" and not any(
-            tool.type in ("function", "custom") for tool in (request.tools or [])
-        ):
-            return self.create_error_response(
-                'tool_choice="required" requires at least one tool with '
-                'type="function" or type="custom"; other built-in tool types '
-                "cannot be forced."
-            )
+        if request.tool_choice == "required":
+            try:
+                forceable = self._has_forceable_tool(request)
+            except ValueError as exc:
+                return self.create_error_response(str(exc), param="tools")
+            if not forceable:
+                return self.create_error_response(
+                    'tool_choice="required" requires at least one tool with '
+                    'type="function" or type="custom"; other built-in tool types '
+                    "cannot be forced."
+                )
 
         tool_choice = request.effective_tool_choice()
         if isinstance(tool_choice, dict) and not self._tool_identities(
@@ -426,18 +464,6 @@ class OpenAIServingResponses(OpenAIServingChat):
                 "with prefill-decode disaggregation",
                 param="tools",
             )
-
-        # Handle the previous response ID
-        prev_response_id = request.previous_response_id
-        if prev_response_id is not None:
-            if not prev_response_id.startswith("resp_"):
-                return self._make_invalid_id_error(prev_response_id)
-            async with self.response_store_lock:
-                prev_response = self.response_store.get(prev_response_id)
-            if prev_response is None:
-                return self._make_not_found_error(prev_response_id)
-        else:
-            prev_response = None
 
         try:
             model_name = request.model
@@ -1567,11 +1593,17 @@ class OpenAIServingResponses(OpenAIServingChat):
 
         History can name a tool the request no longer declares; binding those
         keeps a retired tool from landing on the spelling of something callable.
+        The whole history the renderer will emit participates, stored continuation
+        included, so a replayed call is not advertised under one name in the prompt
+        and bound to another name here.
         """
-        entries: list = []
-        if not isinstance(request.input, str):
-            entries.extend(request.input or [])
-        if prev_response is not None:
+        entries: list = list(self._response_input_history(request))
+        if prev_response is not None and request.previous_response_id is None:
+            # Without a stored chain the continuation's own items are the only
+            # history, so the previous response is bound explicitly. With one, its
+            # output items are already inside the stored history under the names it
+            # was stored with; binding them again would double-book one call as both
+            # its public and its flat spelling.
             entries.extend(prev_response.output or [])
         replayed = []
         for item in entries:
@@ -1807,6 +1839,30 @@ class OpenAIServingResponses(OpenAIServingChat):
         }
 
     @classmethod
+    def _replayed_tool_name(
+        cls, message: dict, identities: Optional[ToolIdentities]
+    ) -> Any:
+        """The name one replayed call item has to come back under.
+
+        History names an identity, not a string to concatenate. A namespaced item
+        takes the spelling its identity was bound to. A flat item is only moved when
+        the request's current declarations took that spelling: replaying it unchanged
+        would present a retired call as the callable tool that now owns the name, so
+        it comes back under the escaped spelling the table reserved for it. A flat
+        name no callable declaration holds is already the spelling its own identity
+        carries -- including the flat form an adapter just derived from it -- and a
+        caller that supplied no table gets the item's own name.
+        """
+        name = message.get("name")
+        if not isinstance(name, str):
+            return name
+        table = identities or ToolIdentities(separator=".")
+        namespace = message.get("namespace")
+        if isinstance(namespace, str) and namespace:
+            return table.model_name(name, namespace)
+        return name if table.wire_identity(name) is None else table.model_name(name)
+
+    @classmethod
     def _normalize_response_message_for_chat(
         cls,
         message: Any,
@@ -1847,30 +1903,18 @@ class OpenAIServingResponses(OpenAIServingChat):
                 raw = orjson.dumps(raw).decode("utf-8")
             else:
                 raw = "{}"
-            name = message.get("name")
-            if message.get("namespace"):
-                # History names an identity, not a string to concatenate: a
-                # retired or renamed declaration cannot take the spelling a
-                # callable tool already holds.
-                name = (identities or ToolIdentities(separator=".")).model_name(
-                    name, message["namespace"]
-                )
+            name = cls._replayed_tool_name(message, identities)
             return cls._chat_tool_call_message(message, name, raw)
         if msg_type == "custom_tool_call":
             if not isinstance(message.get("input"), str):
                 raise ValueError("custom_tool_call must include a string input.")
             # Replay through the same single-string shim the tool was offered as,
-            # under the name it was offered under: a namespaced member has to
-            # come back as the escaped spelling the prompt advertised, exactly as
-            # a namespaced function_call does, and the payload stays encoded.
-            name = message.get("name")
-            if message.get("namespace"):
-                name = (identities or ToolIdentities(separator=".")).model_name(
-                    name, message["namespace"]
-                )
+            # under the name it was offered under: a namespaced member, and a flat
+            # name the current declarations displaced, both come back as the
+            # spelling the prompt advertised, and the payload stays encoded.
             return cls._chat_tool_call_message(
                 message,
-                name,
+                cls._replayed_tool_name(message, identities),
                 encode_custom_tool_input(message["input"]),
             )
         if msg_type == "agent_message":

@@ -17,7 +17,9 @@ from utils import make_serving
 from sglang.srt.entrypoints.openai.protocol import ResponsesRequest, ResponseTool
 from sglang.srt.entrypoints.openai.responses_adapters import (
     decode_custom_tool_input_prefix,
+    encode_custom_tool_input,
 )
+from sglang.srt.entrypoints.openai.serving_responses import OpenAIServingResponses
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
@@ -245,6 +247,151 @@ class NamespaceServingTestCase(CustomTestCase):
         # tool that happens to spell the same.
         self.assertNotEqual(replayed[0], "browser.search")
         self.assertIn(replayed[0], offered_names(muse_serving(), req))
+
+
+class ReplayIdentityTestCase(CustomTestCase):
+    """Replayed call items under the table the current request binds.
+
+    A name in history is an identity, not a string to concatenate. When the
+    request's current declarations already hold that flat spelling, the retired
+    tool has to come back under the escaped name reserved for it -- otherwise the
+    transcript advertises the callable tool for a call that was aimed at another
+    one, in both the function and the custom shapes, and whether the history was
+    sent inline or is a stored continuation.
+    """
+
+    def _serving(self, parser):
+        serving = make_serving()
+        serving.tool_call_parser = parser
+        serving.reasoning_parser = None
+        return serving
+
+    def _replayed_names(self, serving, req):
+        return [
+            call["function"]["name"]
+            for message in serving._construct_input_messages(req)
+            for call in message.get("tool_calls") or []
+        ]
+
+    def test_a_retired_flat_call_is_not_rendered_as_the_current_member(self):
+        for parser, retired, escaped in (
+            ("qwen3_coder", "browser__search", "browser%5F%5Fsearch"),
+            ("muse", "browser.search", "browser%2Esearch"),
+        ):
+            with self.subTest(parser=parser):
+                serving = self._serving(parser)
+                req = request(
+                    [namespace("browser", "search")],
+                    input=[
+                        {"role": "user", "content": "before"},
+                        {
+                            "type": "function_call",
+                            "call_id": "call_1",
+                            "name": retired,
+                            "arguments": '{"query": "old"}',
+                        },
+                    ],
+                )
+                self.assertEqual(self._replayed_names(serving, req), [escaped])
+                identities = serving._tool_identities(
+                    req, serving._replayed_tool_identities(req)
+                )
+                # The retired tool keeps a spelling and stays uncallable, and the
+                # current member is the only thing offered under the flat name.
+                self.assertIsNone(identities.wire_identity(escaped))
+                self.assertEqual(offered_names(serving, req), [retired])
+
+    def test_a_retired_flat_custom_call_keeps_its_payload_and_spelling(self):
+        serving = self._serving("qwen3_coder")
+        req = request(
+            [namespace("browser", "search")],
+            input=[
+                {"role": "user", "content": "before"},
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_1",
+                    "name": "browser__search",
+                    "input": "echo \"a\tb",
+                },
+            ],
+        )
+        (name,) = self._replayed_names(serving, req)
+        self.assertEqual(name, "browser%5F%5Fsearch")
+        message = OpenAIServingResponses._normalize_response_message_for_chat(
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_1",
+                "name": "browser__search",
+                "input": "echo \"a\tb",
+            },
+            identities=serving._tool_identities(
+                req, serving._replayed_tool_identities(req)
+            ),
+        )
+        (call,) = message["tool_calls"]
+        self.assertEqual(
+            call["function"]["arguments"], encode_custom_tool_input('echo "a\tb')
+        )
+
+    def test_a_replayed_call_for_a_declared_flat_tool_keeps_its_name(self):
+        serving = self._serving("qwen3_coder")
+        req = request(
+            [function("lookup")],
+            input=[
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": "{}",
+                }
+            ],
+        )
+        self.assertEqual(self._replayed_names(serving, req), ["lookup"])
+
+    def test_a_stored_continuation_binds_the_names_it_rendered(self):
+        serving = self._serving("muse")
+        serving.msg_store["resp_prior"] = [
+            {"role": "user", "content": "first"},
+            {
+                "type": "function_call",
+                "call_id": "a",
+                "name": "browser.search",
+                "arguments": "{}",
+            },
+            {
+                "type": "custom_tool_call",
+                "call_id": "b",
+                "namespace": "browser",
+                "name": "search",
+                "input": "pwd",
+            },
+        ]
+        req = request([], input="again", previous_response_id="resp_prior")
+        # Nothing is callable now, so neither retired name may take the other's
+        # spelling: the two items the store rendered stay distinct.
+        self.assertEqual(offered_names(serving, req), [])
+        self.assertEqual(
+            self._replayed_names(serving, req),
+            ["browser.search", "browser%2Esearch"],
+        )
+
+    def test_a_stored_retired_name_does_not_steal_the_current_member_spelling(self):
+        serving = self._serving("muse")
+        serving.msg_store["resp_prior"] = [
+            {
+                "type": "function_call",
+                "call_id": "a",
+                "name": "browser.search",
+                "arguments": "{}",
+            }
+        ]
+        req = request(
+            [namespace("browser", "search")],
+            input="again",
+            previous_response_id="resp_prior",
+        )
+        self.assertEqual(offered_names(serving, req), ["browser.search"])
+        self.assertEqual(self._replayed_names(serving, req), ["browser%2Esearch"])
 
 
 class CustomToolPayloadTestCase(unittest.TestCase):
