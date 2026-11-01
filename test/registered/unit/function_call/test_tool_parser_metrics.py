@@ -1,16 +1,10 @@
-"""Aggregate tool-call parser counters: one event per logical parse event.
+"""Aggregate observations for the qwen3_coder parser used by Penny profiles.
 
-This suite covers the observation-only half of the feature: the fixed outcome
-vocabulary, the process-wide sink lifecycle, and the serving-side Prometheus
-counter that consumes it. Counters are aggregate only (the fixed outcome label
-plus the collector's own labels), never tool names, arguments, prompts or
-request ids, and they are not a tool execution success rate: one call can be
-counted as accepted and also as argument_conversion_failed.
-
-The detector-side event sites for the shared ``qwen3_coder`` parser are a
-separate step; the corpus and stream helpers below are what those sites are
-measured against, and the output-equivalence checks here are what keeps the
-instrumentation honest when they land.
+Covers streaming/non-streaming logical-event accounting, sink lifecycle,
+observer failure isolation and real Prometheus export. Existing shared-base
+hooks remain available to other parsers, but this suite does not claim complete
+accounting for every parser (including qwen25). Counters use fixed outcomes and
+existing collector labels, not caller data or tool-execution success rates.
 """
 
 import json
