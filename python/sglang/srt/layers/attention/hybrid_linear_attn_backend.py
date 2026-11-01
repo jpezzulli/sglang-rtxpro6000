@@ -1239,11 +1239,6 @@ class HybridLinearAttnBackend(AttentionBackend):
         # sidecar, so the verify-commit dispatch below stays GDN-only by
         # construction rather than by inspecting pool buffers.
         self._recover_ssm = getattr(linear_attn_backend, "_recover_ssm", False)
-        if self._recover_ssm and is_cuda():
-            # Create the side stream and its event up front rather than lazily: the
-            # HiCache write fence registers THIS event object once, at startup, and
-            # joins its latest record on every submit (see state_producer_events).
-            self._ensure_recovery_stream()
         # gdn_mtp_cache_mode=none recovery overlap: run the (eager) SSM-state
         # recovery on a dedicated side stream so its GPU work overlaps the next
         # step's draft-phase compute, then join before anything else reads or
@@ -1284,6 +1279,14 @@ class HybridLinearAttnBackend(AttentionBackend):
         # None until capture_recovery_graphs() succeeds; while None, recovery runs
         # eagerly on the side stream (the known-good overlap path).
         self._rec_capture_bs: Optional[list[int]] = None
+        # Every field above must exist before the helper runs: it assigns the stream,
+        # the shared event and the cached join helpers, so calling it earlier would
+        # either read an attribute that does not exist yet or have its work erased by
+        # the initializations below. It is created here, not lazily, because the
+        # HiCache write fence registers THIS event object once, at startup, and joins
+        # its latest record on every submit (see state_producer_events).
+        if self._recover_ssm and is_cuda():
+            self._ensure_recovery_stream()
 
     def _ensure_recovery_stream(self):
         """Lazily create the recovery side stream and its per-step helpers.
@@ -1298,7 +1301,9 @@ class HybridLinearAttnBackend(AttentionBackend):
         """
         if self._recovery_stream is not None:
             return
-        pool_event = getattr(self.linear_attn_backend.state_pool, "state_recovery_event", None)
+        pool_event = getattr(
+            self.linear_attn_backend.state_pool, "state_recovery_event", None
+        )
         self._recovery_stream = torch.cuda.Stream()
         self._recovery_event = pool_event or torch.cuda.Event()
         self._recovery_join_event = torch.cuda.Event()
@@ -2204,13 +2209,21 @@ class HybridLinearAttnBackend(AttentionBackend):
             next(iter(stash_per_layer))
         ).temporal.device
         if self._rec_state_idx_buf is None:
-            self._rec_state_idx_buf = torch.empty(pool.size, dtype=torch.int32, device=dev)
-            self._rec_acc_steps_buf = torch.empty(pool.size, dtype=torch.int32, device=dev)
+            self._rec_state_idx_buf = torch.empty(
+                pool.size, dtype=torch.int32, device=dev
+            )
+            self._rec_acc_steps_buf = torch.empty(
+                pool.size, dtype=torch.int32, device=dev
+            )
             # Boundary (interval-checkpoint) pass buffers: ping-pong track output
             # slots and the per-request boundary step. Allocated here so the eager
             # boundary launch reuses address-stable buffers.
-            self._rec_track_idx_buf = torch.empty(pool.size, dtype=torch.int32, device=dev)
-            self._rec_track_steps_buf = torch.empty(pool.size, dtype=torch.int32, device=dev)
+            self._rec_track_idx_buf = torch.empty(
+                pool.size, dtype=torch.int32, device=dev
+            )
+            self._rec_track_steps_buf = torch.empty(
+                pool.size, dtype=torch.int32, device=dev
+            )
         # Dummy indices -> reserved slot 0 during capture (records only; the real
         # per-step indices are copied in before each replay).
         self._rec_state_idx_buf.fill_(0)

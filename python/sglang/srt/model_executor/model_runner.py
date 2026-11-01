@@ -1240,9 +1240,25 @@ class ModelRunner:
         )
         self.graph_memory_usage = capture.memory_usage
         self.graph_time_usage = capture.time_usage
+
+        if is_scale_joiner:
+            if self._elastic_cuda_graph_enabled():
+                if defer_decode_capture:
+                    self._recapture_elastic_cuda_graphs()
+                    finalize_cuda_graph_capture(self)
+            # Scheduler startup calls this path even when CUDA graphs are disabled.
+            target_size = get_parallel().ep_join_rank_offset + get_parallel().tp_size
+            self._finalize_elastic_ep_joiner(target_size)
+
+        prebuild_deepep_v2_buffer(model=self.model)
+
         # gdn_mtp_cache_mode=none: capture the per-bucket SSM-state recovery graphs
-        # now that target_verify capture above allocated the recovery stash at its
-        # final addresses. Self-guards (no-op in full mode / non-recovery paths).
+        # last, once this step's decode/target_verify capture has allocated the
+        # per-layer recovery stash at its final addresses -- and, on the
+        # elastic-deferred path, once the recapture above has produced the decode
+        # runner whose buckets the graphs are built for. Self-guards: no-op in full
+        # mode, on a draft worker, off CUDA, and wherever the linear sidecar has no
+        # recovery path (so this cannot change any existing launch's flow).
         self.maybe_capture_gdn_recovery_graphs()
 
     def maybe_capture_gdn_recovery_graphs(self, attn_backend=None, capture_bs=None):
@@ -1277,21 +1293,17 @@ class ModelRunner:
         if not isinstance(backend, HybridLinearAttnBackend):
             return
         if capture_bs is None:
-            capture_bs = self.decode_cuda_graph_capture_bs
+            # The live runner first: on the elastic-deferred path the buckets only
+            # exist after the recapture in init_cuda_graphs, and the snapshot taken
+            # before it is empty.
+            capture_bs = list(
+                getattr(self.decode_cuda_graph_runner, "capture_bs", None)
+                or self.decode_cuda_graph_capture_bs
+                or []
+            )
             if not capture_bs:
                 return
         backend.capture_recovery_graphs(capture_bs)
-
-        if is_scale_joiner:
-            if self._elastic_cuda_graph_enabled():
-                if defer_decode_capture:
-                    self._recapture_elastic_cuda_graphs()
-                    finalize_cuda_graph_capture(self)
-            # Scheduler startup calls this path even when CUDA graphs are disabled.
-            target_size = get_parallel().ep_join_rank_offset + get_parallel().tp_size
-            self._finalize_elastic_ep_joiner(target_size)
-
-        prebuild_deepep_v2_buffer(model=self.model)
 
     def init_routed_experts_capturer(self):
         if self.is_draft_worker:

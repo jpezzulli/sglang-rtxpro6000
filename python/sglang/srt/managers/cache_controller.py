@@ -308,7 +308,6 @@ class PrefetchOperation(StorageOperation):
 
 
 class HiCacheController:
-
     # Side-stream state writers to join at submit, beside the fence streams below.
     # Defaults to empty at class level so a controller built without __init__ (a
     # subclass, or a test seam) still has the join to iterate; the scheduler assigns

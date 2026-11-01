@@ -193,8 +193,8 @@ class _Solver:
                 num_hidden_layers=max(self.pp_layers or self.params.layers) + 1,
             ),
         )
-        fake._calculate_mamba_ratio = lambda: KVCacheConfigurator._calculate_mamba_ratio(
-            fake
+        fake._calculate_mamba_ratio = lambda: (
+            KVCacheConfigurator._calculate_mamba_ratio(fake)
         )
         fields = dict(
             disable_radix_cache=disable_radix,
@@ -409,7 +409,9 @@ class TestAutoFitSpecReserve(unittest.TestCase):
 
     def test_no_spec_allocates_no_scratch(self):
         rest, slots, ratio = self.solver.solve(spec=None)
-        want_slots, want_rest = _autofit(BUDGET_GB, self.resident, 0, ratio, MAX_RUNNING)
+        want_slots, want_rest = _autofit(
+            BUDGET_GB, self.resident, 0, ratio, MAX_RUNNING
+        )
         self.assertEqual(slots, want_slots)
         self.assertAlmostEqual(rest, want_rest, delta=1e-9)
         # the cache mode is irrelevant once nothing allocates a draft window
@@ -420,7 +422,9 @@ class TestAutoFitSpecReserve(unittest.TestCase):
     def test_prefill_only_server_allocates_no_scratch(self):
         """A PD prefill server builds its pool with no draft window at all."""
         rest, slots, ratio = self.solver.solve(spec=DRAFT, disagg="prefill")
-        want_slots, want_rest = _autofit(BUDGET_GB, self.resident, 0, ratio, MAX_RUNNING)
+        want_slots, want_rest = _autofit(
+            BUDGET_GB, self.resident, 0, ratio, MAX_RUNNING
+        )
         self.assertEqual(slots, want_slots)
         self.assertAlmostEqual(rest, want_rest, delta=1e-9)
 
@@ -576,9 +580,7 @@ class TestPPStageScratch(unittest.TestCase):
     def _solve(self, pp_rank, mode):
         params = _params(layers=self.ALL_MAMBA_LAYERS)
         solver = _Solver(params, pp_size=2, pp_layers=list(range(self.TOTAL_LAYERS)))
-        rest, slots, ratio = solver.solve(
-            spec=DRAFT, mode=mode, max_running_requests=4
-        )
+        rest, slots, ratio = solver.solve(spec=DRAFT, mode=mode, max_running_requests=4)
         stage = sum(
             1
             for i in self.ALL_MAMBA_LAYERS

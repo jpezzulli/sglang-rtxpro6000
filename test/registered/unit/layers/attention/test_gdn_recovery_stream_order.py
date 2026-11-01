@@ -27,16 +27,20 @@ here touches a device.
 """
 
 import unittest
+from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
+from sglang.srt.layers.attention import hybrid_linear_attn_backend as hybrid_module
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
     HybridLinearAttnBackend,
 )
 from sglang.srt.managers.cache_controller import HiCacheController
 from sglang.srt.mem_cache.memory_pool import MambaPool
+from sglang.srt.model_executor import model_runner as model_runner_module
 from sglang.srt.speculative.spec_utils import _recover_ssm_track_unreachable
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -107,8 +111,11 @@ def _controller(*, producer_events):
     ctrl.ack_write_queue = []
     ctrl.ack_load_queue = []
     ctrl.layer_done_counter = SimpleNamespace(
-        events=[SimpleNamespace(start_event=SimpleNamespace(record=lambda: None),
-                               complete=lambda: None)],
+        events=[
+            SimpleNamespace(
+                start_event=SimpleNamespace(record=lambda: None), complete=lambda: None
+            )
+        ],
         update_producer=lambda: 0,
     )
     ctrl.transfer_layer_id_max = 1
@@ -284,6 +291,7 @@ class TestStateProducerPublication(unittest.TestCase):
             Mamba2StateDType,
             Mamba2StateShape,
         )
+
         shape = Mamba2StateShape.create(
             tp_world_size=1,
             intermediate_size=64,
@@ -400,6 +408,273 @@ class TestBoundaryPlanElision(unittest.TestCase):
         # A verify with no draft width has no boundary sweep to skip, and dropping
         # the plan on the strength of a None bound would be a guess.
         self.assertFalse(self._unreachable([8], mode="none", draft_tokens=None))
+
+
+class _FakeStream:
+    def __init__(self, log):
+        self.log = log
+
+    def wait_event(self, event):
+        self.log.append(("stream_wait", event))
+
+
+class _FakeCuda:
+    """Stand-ins for the three torch.cuda factories the recovery helpers use."""
+
+    def __init__(self, log):
+        self.log = log
+        self.streams = 0
+        self.events = 0
+        self.created_streams = []
+
+    def Stream(self):
+        self.streams += 1
+        stream = _FakeStream(self.log)
+        self.created_streams.append(stream)
+        return stream
+
+    def Event(self):
+        self.events += 1
+        return _FakeEvent(f"event{self.events}", self.log)
+
+    def stream(self, stream):
+        self.log.append(("ctx", stream))
+        return f"ctx-of-{len(self.log)}"
+
+
+def _linear_sidecar(*, recover_ssm, pool_event):
+    sidecar = SimpleNamespace(
+        needs_cpu_seq_lens=False,
+        supports_prefill_graph_extend=lambda: False,
+        prefill_graph_max_seqs=8,
+        state_pool=SimpleNamespace(),
+    )
+    if recover_ssm:
+        sidecar._recover_ssm = True
+    if pool_event is not None:
+        sidecar.state_pool.state_recovery_event = pool_event
+    return sidecar
+
+
+def _init_hybrid(*, recover_ssm, pool_event, cuda=True):
+    """Run the real HybridLinearAttnBackend.__init__ over fake CUDA primitives."""
+    log = []
+    fake = _FakeCuda(log)
+    full = SimpleNamespace(
+        token_to_kv_pool="kv",
+        req_to_token_pool="reqs",
+        runner_ids="runner-ids",
+        needs_cpu_seq_lens=False,
+        use_captured_forward_metadata_for_breakable_cuda_graph=False,
+    )
+    sidecar = _linear_sidecar(recover_ssm=recover_ssm, pool_event=pool_event)
+    with (
+        patch.object(hybrid_module, "is_cuda", return_value=cuda),
+        patch.object(hybrid_module, "check_cuda_graph_backend", lambda *a, **k: False),
+        patch.object(torch.cuda, "Stream", fake.Stream),
+        patch.object(torch.cuda, "Event", fake.Event),
+        patch.object(torch.cuda, "stream", fake.stream),
+    ):
+        backend = HybridLinearAttnBackend(full, sidecar, full_attn_layers=[0])
+    return backend, fake, log
+
+
+class TestRecoveryStreamIsInitializedLast(unittest.TestCase):
+    """__init__ must finish the field block before creating the side stream.
+
+    The helper assigns every recovery attribute, so a call placed inside the block
+    either reads an attribute that does not exist yet (AttributeError at startup,
+    for every CUDA none-mode launch) or has its result overwritten by the
+    initialization below it -- which would silently restore the lazy-create path and
+    hand the HiCache fence an event that changes identity.
+    """
+
+    def test_recovery_mode_creates_the_shared_event_after_the_fields_exist(self):
+        log = []
+        pool_event = _FakeEvent("pool", log)
+        backend, fake, _ = _init_hybrid(recover_ssm=True, pool_event=pool_event)
+        self.assertEqual(fake.streams, 1, "the side stream is created once, at init")
+        self.assertEqual(fake.created_streams, [backend._recovery_stream])
+        self.assertIs(backend._recovery_event, pool_event)
+        self.assertIsInstance(backend._recovery_join_event, _FakeEvent)
+        self.assertIsNotNone(backend._recovery_stream_ctx)
+        # One event only: the pool owns the completion event, so the backend must
+        # not allocate (and later publish) a private one.
+        self.assertEqual(fake.events, 1)
+        self.assertEqual(backend.state_producer_events(), [pool_event])
+        self.assertFalse(backend._recovery_event_pending)
+
+    def test_the_published_event_survives_a_second_backend_on_the_same_pool(self):
+        log = []
+        pool_event = _FakeEvent("pool", log)
+        first, _, _ = _init_hybrid(recover_ssm=True, pool_event=pool_event)
+        second, _, _ = _init_hybrid(recover_ssm=True, pool_event=pool_event)
+        self.assertEqual(first.state_producer_events(), second.state_producer_events())
+        self.assertIs(
+            first.state_producer_events()[0], second.state_producer_events()[0]
+        )
+
+    def test_a_wrapper_that_does_not_recover_creates_no_stream(self):
+        # Publication follows the POOL, not the wrapper: if that pool can be written
+        # by a none-mode recovery (some other state's backend, or this launch's own
+        # later switch), the fence must already be joined -- an extra join is
+        # harmless, a missing one is the torn-backup bug. What a non-recovering
+        # wrapper must not do is allocate a side stream it never uses.
+        pool_event = _FakeEvent("pool", [])
+        backend, fake, _ = _init_hybrid(recover_ssm=False, pool_event=pool_event)
+        self.assertEqual(fake.streams, 0)
+        self.assertEqual(fake.events, 0)
+        self.assertIsNone(backend._recovery_stream)
+        self.assertEqual(backend.state_producer_events(), [pool_event])
+
+    def test_off_cuda_creates_nothing_and_publishes_nothing(self):
+        # A pool with no CUDA state has no event to publish (MambaPool gates the
+        # allocation on the device), so the whole mechanism stays inert.
+        backend, fake, _ = _init_hybrid(recover_ssm=True, pool_event=None, cuda=False)
+        self.assertEqual(fake.streams, 0)
+        self.assertIsNone(backend._recovery_stream)
+        self.assertEqual(backend.state_producer_events(), [])
+
+
+class _FakeCapture:
+    def __init__(self, capture_bs):
+        self.eager_runner = "eager"
+        self.prefill = SimpleNamespace(runner="prefill-graph")
+        self.decode = SimpleNamespace(
+            runner=SimpleNamespace(capture_bs=list(capture_bs))
+        )
+        self.memory_usage = {}
+        self.time_usage = {}
+
+
+@contextmanager
+def _graph_capture_env(*, mode, scale_joiner, capture_bs):
+    """Run the real ModelRunner.init_cuda_graphs with the capture layer faked."""
+    calls = []
+    published = SimpleNamespace(
+        moe=SimpleNamespace(is_ep_scale_joiner=scale_joiner),
+        mamba=SimpleNamespace(gdn_mtp_cache_mode=mode),
+    )
+
+    def capture_cuda_graphs(**kwargs):
+        calls.append(("capture", kwargs))
+        return _FakeCapture(capture_bs)
+
+    with (
+        patch.object(model_runner_module, "get_exec", return_value=published),
+        patch.object(
+            model_runner_module,
+            "get_parallel",
+            return_value=SimpleNamespace(ep_join_rank_offset=0, tp_size=1),
+        ),
+        patch.object(model_runner_module, "capture_cuda_graphs", capture_cuda_graphs),
+        patch.object(
+            model_runner_module,
+            "prebuild_deepep_v2_buffer",
+            side_effect=lambda model: calls.append(("prebuild", model)),
+        ),
+        patch.object(
+            model_runner_module,
+            "finalize_cuda_graph_capture",
+            side_effect=lambda runner: calls.append(("finalize",)),
+        ),
+    ):
+        yield calls
+
+
+def _runner(*, mode, device="cuda", draft=False, backend=None, elastic=False):
+    from sglang.srt.model_executor.model_runner import ModelRunner
+
+    runner = ModelRunner.__new__(ModelRunner)
+    runner.device = device
+    runner.is_draft_worker = draft
+    runner.model = "model"
+    runner.attn_backend = backend
+    runner.decode_cuda_graph_capture_bs = []
+    runner.decode_cuda_graph_runner = None
+    runner._elastic_enabled = elastic
+    runner._elastic_cuda_graph_enabled = lambda: elastic
+    runner._validate_elastic_cuda_graph_recapture = lambda: None
+    runner._finalize_elastic_ep_joiner = lambda size: runner.calls.append(
+        ("joiner", size)
+    )
+    runner._recapture_elastic_cuda_graphs = lambda: (
+        runner.calls.append(("recapture",))
+        or setattr(runner, "decode_cuda_graph_runner", SimpleNamespace(capture_bs=[3]))
+    )
+    return runner
+
+
+def _hybrid_backend_recorder():
+    backend = HybridLinearAttnBackend.__new__(HybridLinearAttnBackend)
+    backend.captured = []
+    backend.capture_recovery_graphs = lambda bs: backend.captured.append(list(bs))
+    return backend
+
+
+class TestInitCudaGraphsKeepsTheExistingTail(unittest.TestCase):
+    """The recovery capture is an addition to init_cuda_graphs, not a new home.
+
+    The elastic-joiner finalization and the deepep buffer prebuild that end that
+    method read its locals and run on every launch; moving them into the
+    self-guarded helper means they are skipped for full mode and every draft worker
+    (and NameError on the joiner path). Both are asserted here, with the recovery
+    capture checked at the same time.
+    """
+
+    def _run(
+        self, *, mode, scale_joiner=False, backend=None, device="cuda", draft=False
+    ):
+        runner = _runner(
+            mode=mode, device=device, draft=draft, backend=backend, elastic=scale_joiner
+        )
+        with _graph_capture_env(
+            mode=mode, scale_joiner=scale_joiner, capture_bs=[1, 2, 4]
+        ) as calls:
+            runner.calls = calls
+            ModelRunner_init = type(runner).init_cuda_graphs
+            ModelRunner_init(runner)
+        return runner, calls
+
+    def test_full_mode_still_prebuilds_and_captures_no_recovery_graphs(self):
+        backend = _hybrid_backend_recorder()
+        runner, calls = self._run(mode="full", backend=backend)
+        self.assertIn(("prebuild", "model"), calls)
+        self.assertEqual(backend.captured, [])
+
+    def test_a_draft_worker_still_prebuilds(self):
+        runner, calls = self._run(mode="none", draft=True)
+        self.assertIn(("prebuild", "model"), calls)
+
+    def test_none_mode_captures_against_the_live_decode_buckets(self):
+        backend = _hybrid_backend_recorder()
+        runner, calls = self._run(mode="none", backend=backend)
+        self.assertIn(("prebuild", "model"), calls)
+        self.assertEqual(backend.captured, [[1, 2, 4]])
+
+    def test_elastic_deferred_flow_finalizes_then_captures_the_recaptured_buckets(self):
+        backend = _hybrid_backend_recorder()
+        runner, calls = self._run(mode="none", scale_joiner=True, backend=backend)
+        kinds = [call[0] for call in calls]
+        self.assertEqual(
+            kinds,
+            ["capture", "recapture", "finalize", "joiner", "prebuild"],
+            "the joiner path must keep its existing order, with the recovery "
+            "capture added last",
+        )
+        # The buckets come from the runner produced by the recapture, not from the
+        # empty snapshot taken before it.
+        self.assertEqual(backend.captured, [[3]])
+
+    def test_a_non_hybrid_backend_captures_nothing_and_breaks_nothing(self):
+        runner, calls = self._run(mode="none", backend=SimpleNamespace())
+        self.assertIn(("prebuild", "model"), calls)
+
+    def test_off_cuda_captures_nothing(self):
+        backend = _hybrid_backend_recorder()
+        runner, calls = self._run(mode="none", backend=backend, device="cpu")
+        self.assertEqual(backend.captured, [])
+        self.assertIn(("prebuild", "model"), calls)
 
 
 if __name__ == "__main__":

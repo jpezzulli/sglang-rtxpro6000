@@ -281,6 +281,7 @@ class GDNKernelDispatcher:
         decode_backend: LinearAttnKernelBackend,
         prefill_backend: LinearAttnKernelBackend,
         verify_backend: Optional[LinearAttnKernelBackend] = None,
+        gdn_mtp_cache_mode: str = "full",
     ):
         triton_kernel = TritonGDNKernel()
         self.tree_verify_kernel = triton_kernel
@@ -374,12 +375,15 @@ class GDNKernelDispatcher:
         # supports MTP verify) only applies when no explicit choice was made.
         # SM90 FlashInfer verify requires a fp32 SSM state, so e.g.
         # --mamba-ssm-dtype bfloat16 setups must be able to force Triton here.
+        # The mode is consulted through can_target_verify so SM120 can be admitted
+        # to the none-mode WY output-only path WITHOUT also getting it (and so
+        # losing its established Triton verifier) in full mode.
         if verify_backend is not None and verify_backend.is_triton():
             self.verify_kernel = triton_kernel
             self.verify_kernel_is_flashinfer = False
         elif (
             decode_backend.is_flashinfer() or prefill_backend.is_flashinfer()
-        ) and flashinfer_kernel.supports_target_verify:
+        ) and flashinfer_kernel.can_target_verify(gdn_mtp_cache_mode):
             self.verify_kernel = flashinfer_kernel
             self.verify_kernel_is_flashinfer = True
         else:
@@ -390,10 +394,16 @@ class GDNKernelDispatcher:
             self.decode_kernel, "supports_packed_decode", False
         )
 
+        verify_suffix = (
+            " (none-mode WY output-only)"
+            if self.verify_kernel_is_flashinfer
+            and not self.verify_kernel.supports_target_verify
+            else ""
+        )
         rank0_log(
             f"GDN kernel dispatcher: decode={self.decode_kernel.__class__.__name__}, "
             f"extend={self.extend_kernel.__class__.__name__}, "
-            f"verify={self.verify_kernel.__class__.__name__} "
+            f"verify={self.verify_kernel.__class__.__name__}{verify_suffix} "
             f"packed_decode={self.supports_packed_decode}"
         )
 

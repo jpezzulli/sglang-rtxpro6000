@@ -447,9 +447,7 @@ class TestExtraMambaCacheSizing(unittest.TestCase):
                     # window and stays a separate term from the per-request state.
                     is_kda=False,
                     shape=SimpleNamespace(disable_conv_window_dedup=True),
-                    intermediate_ssm_bytes_per_slot=lambda draft: (
-                        (4 << 20) * draft
-                    ),
+                    intermediate_ssm_bytes_per_slot=lambda draft: (4 << 20) * draft,
                     intermediate_conv_window_bytes_per_slot=lambda draft, *, dedup: 0,
                 )
             ),

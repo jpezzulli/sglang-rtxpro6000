@@ -155,7 +155,9 @@ class TestRecoverSSMSM120(unittest.TestCase):
 
                     # accept counts 0..width-1, then a mixed per-row pattern.
                     patterns = [
-                        torch.full((batch_size,), step, device=DEVICE, dtype=torch.int32)
+                        torch.full(
+                            (batch_size,), step, device=DEVICE, dtype=torch.int32
+                        )
                         for step in range(width)
                     ]
                     if batch_size > 1:
@@ -250,7 +252,6 @@ class TestRecoverSSMSM120(unittest.TestCase):
             case = self._case(width + 2, 313 + width, width)
             _, intermediate = self._full(case, case["state"].clone())
             recovered = case["state"].clone()
-            before = recovered.clone()
             residues = list(range(TRACK_INTERVAL - width, TRACK_INTERVAL))
             # One row per reachable residue, then rows for the residue below the
             # reachable band, which must be masked out.

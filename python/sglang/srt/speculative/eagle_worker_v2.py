@@ -2131,7 +2131,11 @@ class EAGLEWorkerV2(BaseSpecWorker):
             # draft side can legitimately hold None or a platform stub) and the join
             # is an optional capability -- AttentionBackend defines the no-op.
             drain = getattr(outgoing, "drain_pending_recovery", None)
-            if outgoing is not None and drain is not None and id(outgoing) not in drained:
+            if (
+                outgoing is not None
+                and drain is not None
+                and id(outgoing) not in drained
+            ):
                 drain()
                 drained.add(id(outgoing))
         dw.speculative_num_steps = state.speculative_num_steps

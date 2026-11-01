@@ -3159,10 +3159,7 @@ class KVCacheConfigurator:
                     cache_params.is_kda,
                 ),
             )
-            if (
-                not replayssm_active
-                and get_exec().mamba.gdn_mtp_cache_mode != "none"
-            ):
+            if not replayssm_active and get_exec().mamba.gdn_mtp_cache_mode != "none":
                 intermediate_bytes += cache_params.intermediate_ssm_bytes_per_slot(
                     draft_tokens
                 )

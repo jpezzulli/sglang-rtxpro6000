@@ -85,7 +85,7 @@ from sglang.srt.mem_cache.utils import (
     set_mla_kv_scale_buffer_triton,
 )
 from sglang.srt.platforms import current_platform
-from sglang.srt.runtime_context import get_exec, get_parallel, get_platform
+from sglang.srt.runtime_context import get_parallel, get_platform
 from sglang.srt.utils import (
     ceil_align,
     cpu_has_amx_support,

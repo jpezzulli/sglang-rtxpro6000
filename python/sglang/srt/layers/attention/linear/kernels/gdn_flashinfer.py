@@ -20,7 +20,6 @@ from sglang.srt.layers.attention.linear.kernels.kernel_backend import (
     LinearAttnKernelBase,
 )
 from sglang.srt.runtime_context import (
-    get_exec,
     mamba_cache_chunk_size,
 )
 from sglang.srt.utils import is_cuda
@@ -825,7 +824,9 @@ class FlashInferGDNKernel(LinearAttnKernelBase):
             use_qk_l2norm=True,
         )
 
-        if stable_rows and intermediate_states_buffer is not None:            # Persist positional output under PP-stable request rows.
+        if (
+            stable_rows and intermediate_states_buffer is not None
+        ):  # Persist positional output under PP-stable request rows.
             copy_verify_intermediate_rows(
                 intermediate_states_buffer,
                 intermediate_states_buffer_mtp,
