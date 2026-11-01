@@ -1,15 +1,18 @@
 import ast
+import logging
 import threading
 import warnings
 from json import JSONDecodeError, JSONDecoder
 from json.decoder import WHITESPACE
-from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Tuple, Union
 
 import orjson
 import partial_json_parser
 from partial_json_parser.core.options import Allow
 
 from sglang.srt.entrypoints.openai.protocol import Tool, ToolChoice
+
+logger = logging.getLogger(__name__)
 
 _STANDARD_JSON_SCHEMA_TYPES = {
     "null",
@@ -513,3 +516,54 @@ def strip_structural_tag_excludes(structural_tag: Any, tokens: Iterable[str]) ->
                 visit(getattr(node, key))
 
     visit(structural_tag)
+
+
+# ---------------------------------------------------------------------------
+# Aggregate tool-call parser instrumentation (narrow, label-free sink)
+# ---------------------------------------------------------------------------
+# Detectors report logical parser events through this sink; the serving-side
+# Prometheus collector (TokenizerMetricsCollector) registers it. Counters are
+# aggregate only: never tool names, arguments, prompts, request ids or other
+# caller data. They are not a tool execution success rate: a call can be
+# counted as accepted and also as argument_conversion_failed.
+TOOL_PARSER_ACCEPTED = "accepted"
+TOOL_PARSER_INCOMPLETE = "incomplete"
+TOOL_PARSER_UNKNOWN_TOOL = "unknown_tool"
+TOOL_PARSER_ARGUMENT_CONVERSION_FAILED = "argument_conversion_failed"
+TOOL_PARSER_PARSE_ERROR = "parse_error"
+TOOL_PARSER_EVENT_OUTCOMES = (
+    TOOL_PARSER_ACCEPTED,
+    TOOL_PARSER_INCOMPLETE,
+    TOOL_PARSER_UNKNOWN_TOOL,
+    TOOL_PARSER_ARGUMENT_CONVERSION_FAILED,
+    TOOL_PARSER_PARSE_ERROR,
+)
+
+# Set only when metrics are enabled; a None sink makes recording a no-op, so
+# disabled servers keep the original low-overhead behaviour.
+_tool_parser_event_sink: Optional[Callable[[str], None]] = None
+
+
+def set_tool_parser_event_sink(sink: Optional[Callable[[str], None]]) -> None:
+    """Install the aggregate event sink (usually the metrics collector)."""
+    global _tool_parser_event_sink
+    _tool_parser_event_sink = sink
+
+
+def get_tool_parser_event_sink() -> Optional[Callable[[str], None]]:
+    return _tool_parser_event_sink
+
+
+def record_tool_parser_event(outcome: str) -> None:
+    """Record one logical parser event. Callers must pass a fixed outcome.
+
+    The sink is an observer: a failure there is logged and dropped, so a broken
+    metrics path can never change what the parser returns or raises.
+    """
+    sink = _tool_parser_event_sink
+    if sink is None:
+        return
+    try:
+        sink(outcome)
+    except Exception:
+        logger.debug("tool-call parser event sink failed", exc_info=True)
