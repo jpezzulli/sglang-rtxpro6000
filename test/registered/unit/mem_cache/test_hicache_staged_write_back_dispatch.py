@@ -240,6 +240,10 @@ class TestHiCacheStagedWriteBackDispatch(CustomTestCase):
         controller._transfer_num_bytes.return_value = 0
         controller.l2_transfer_engine = mock.Mock()
         controller.load_fence_stream = None
+        # Side-stream state producers the load leg joins before submitting (empty
+        # unless a gdn_mtp_cache_mode=none backend published its recovery event).
+        controller.load_fence_events = []
+        controller.write_fence_events = []
         completion = SimpleNamespace(
             start_event=object(), finish_event=object(), timing_enabled=False
         )

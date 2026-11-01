@@ -1240,6 +1240,47 @@ class ModelRunner:
         )
         self.graph_memory_usage = capture.memory_usage
         self.graph_time_usage = capture.time_usage
+        # gdn_mtp_cache_mode=none: capture the per-bucket SSM-state recovery graphs
+        # now that target_verify capture above allocated the recovery stash at its
+        # final addresses. Self-guards (no-op in full mode / non-recovery paths).
+        self.maybe_capture_gdn_recovery_graphs()
+
+    def maybe_capture_gdn_recovery_graphs(self, attn_backend=None, capture_bs=None):
+        """Capture per-bucket FlashInfer SSM-state recovery cuda graphs at warmup.
+
+        Called from init_cuda_graphs after the decode/target_verify graphs are
+        captured, so the per-layer recovery stash is already allocated at its final
+        addresses. HybridLinearAttnBackend pads the serving batch up to a captured
+        bucket and replays on the side stream, and owns the capture-failure fallback
+        to eager recovery -- so nothing is wrapped here.
+
+        *attn_backend* / *capture_bs* override the runner's live backend and bucket
+        list: a runner that rebuilds its target backend and decode buckets (an
+        adaptive speculative width switch, a PD role switch) must capture its OWN
+        recovery graphs against its own state -- the graphs bake the backend's
+        address-stable recovery index buffers and its plan, and the startup call
+        above only ever sees the launch state's pair. Left to the default, an
+        activated state silently recovers eagerly on the side stream (the graphs
+        self-guard), which is the known-good path but not the one the run was
+        qualified on.
+        """
+        if self.device != "cuda" or self.is_draft_worker:
+            return
+        if get_exec().mamba.gdn_mtp_cache_mode == "full":
+            return
+
+        from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
+            HybridLinearAttnBackend,
+        )
+
+        backend = self.attn_backend if attn_backend is None else attn_backend
+        if not isinstance(backend, HybridLinearAttnBackend):
+            return
+        if capture_bs is None:
+            capture_bs = self.decode_cuda_graph_capture_bs
+            if not capture_bs:
+                return
+        backend.capture_recovery_graphs(capture_bs)
 
         if is_scale_joiner:
             if self._elastic_cuda_graph_enabled():
@@ -2059,6 +2100,14 @@ class ModelRunner:
             # and the collectives depend on.
             self._prepare_eager_forward_batch(forward_batch)
 
+            # gdn_mtp_cache_mode=none: a side-stream accepted-state recovery is a
+            # second writer of the state pool, and this forward's deferred CoW/clear
+            # can zero or copy a slot that recovery is still committing (a request
+            # that finished last step has its accepted state written by the recovery,
+            # and its slot can already be handed to this batch). Join before the pool
+            # is touched; the init_forward_metadata joins cover the graph paths, run
+            # later than here on the eager one.
+            self.attn_backend.drain_pending_recovery()
             # Deferred mamba COW/clear on the forward stream, before the extend
             # dispatch below reads the pool.
             self._maybe_execute_deferred_mamba_cow_and_clear(forward_batch)

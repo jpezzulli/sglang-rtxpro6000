@@ -74,6 +74,8 @@ class TestShardedDSAHiCache(CustomTestCase):
             _move_op_indices=prepare,
             _l2_load_transfers=describe,
             load_fence_stream=None,
+            # No side-stream state producer registered on this stub controller.
+            load_fence_events=(),
             l2_transfer_engine=SimpleNamespace(submit_host_to_device=submit),
             transfer_layer_id_max=3,
             mem_pool_device_allocator=Mock(),

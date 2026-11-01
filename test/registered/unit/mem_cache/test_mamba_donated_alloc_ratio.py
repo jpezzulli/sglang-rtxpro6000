@@ -437,7 +437,20 @@ class TestExtraMambaCacheSizing(unittest.TestCase):
         fake = SimpleNamespace(
             mambaish_config=SimpleNamespace(
                 mamba2_cache_params=SimpleNamespace(
-                    layers=[0, 1, 2, 3], mamba_cache_per_req=4 << 20
+                    layers=[0, 1, 2, 3],
+                    mamba_cache_per_req=4 << 20,
+                    # The scratch this fake pool allocates is the per-draft SSM
+                    # snapshots alone, priced at the whole committed state (its conv
+                    # rollback windows are folded into that per-req figure and its
+                    # shape opts out of the dedup layout), so the charge matches what
+                    # this test was already asserting: the reserve tracks the draft
+                    # window and stays a separate term from the per-request state.
+                    is_kda=False,
+                    shape=SimpleNamespace(disable_conv_window_dedup=True),
+                    intermediate_ssm_bytes_per_slot=lambda draft: (
+                        (4 << 20) * draft
+                    ),
+                    intermediate_conv_window_bytes_per_slot=lambda draft, *, dedup: 0,
                 )
             ),
             extra_mamba_cache_bytes_per_req=extra_bytes,

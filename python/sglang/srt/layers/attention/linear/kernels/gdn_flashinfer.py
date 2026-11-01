@@ -20,6 +20,7 @@ from sglang.srt.layers.attention.linear.kernels.kernel_backend import (
     LinearAttnKernelBase,
 )
 from sglang.srt.runtime_context import (
+    get_exec,
     mamba_cache_chunk_size,
 )
 from sglang.srt.utils import is_cuda
@@ -75,6 +76,37 @@ _flashinfer_chunk_gated_delta_rule = None
 _flashinfer_gated_delta_rule_mtp = None
 _flashinfer_gated_delta_rule_decode = None
 _flashinfer_gated_delta_rule_mtp_bf16 = None
+_flashinfer_gdn_wy_output_only: Optional[bool] = None
+
+# The BF16-state WY output-only verifier (flashinfer PR#3720) is tiled for the
+# GDN head geometry it was qualified on, and its T x T inverse is bounded by the
+# draft window it was compiled for. An unsupported selection must fail loudly
+# instead of verifying against a state the recovery will not rebuild.
+_WY_MAX_DRAFT_TOKENS = 16
+
+
+def is_flashinfer_gdn_wy_output_only_available() -> bool:
+    """Return whether FlashInfer exposes the BF16-state WY verify kernel.
+
+    This is intentionally separate from ordinary MTP verify support: SM120 uses
+    the WY kernel only for ``gdn_mtp_cache_mode=none``, and its existing
+    full-mode state-writing verification remains on Triton.
+    """
+    global _flashinfer_gdn_wy_output_only
+    if _flashinfer_gdn_wy_output_only is None:
+        _flashinfer_gdn_wy_output_only = False
+        if is_cuda():
+            try:
+                from flashinfer.gdn_kernels import (
+                    gated_delta_rule_mtp_wy_output_only,
+                )
+
+                _flashinfer_gdn_wy_output_only = callable(
+                    gated_delta_rule_mtp_wy_output_only
+                )
+            except (ImportError, RuntimeError):
+                pass
+    return _flashinfer_gdn_wy_output_only
 
 
 def maybe_build_flashinfer_checkpoint_plan(
@@ -209,6 +241,15 @@ class FlashInferGDNKernel(LinearAttnKernelBase):
         # states; SM100 accepts the state-pool dtype directly.
         self._prefill_needs_fp32_state = sm_major >= 12
         self.supports_target_verify = sm_major in (9, 10)
+        # SM120 is admitted to target-verify ONLY through the output-only WY path
+        # that gdn_mtp_cache_mode=none needs (the accepted state comes from the
+        # recovery pass, not from the verifier), so full mode keeps its
+        # established Triton verifier on that hardware.
+        self.supports_none_mode_target_verify = (
+            sm_major == 12
+            and self.use_state_pool
+            and is_flashinfer_gdn_wy_output_only_available()
+        )
         self._aligned_input_buffers: dict[tuple, torch.Tensor] = {}
         self._aligned_parameter_cache: dict[
             tuple, tuple[torch.Tensor, torch.Tensor]
@@ -263,6 +304,17 @@ class FlashInferGDNKernel(LinearAttnKernelBase):
             self._mtp_fn = _mtp_bf16_adapted
 
         logger.info("Using FlashInfer GDN kernels")
+
+    def can_target_verify(self, cache_mode: str) -> bool:
+        """Whether this instance may drive target verification in ``cache_mode``.
+
+        Single source of truth for the dispatcher's verify-kernel choice, so the
+        hardware admitted to the none-mode WY path can never select it for full
+        mode by accident.
+        """
+        return self.supports_target_verify or (
+            cache_mode == "none" and self.supports_none_mode_target_verify
+        )
 
     def _prepare_dynamic_input(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
         # Reuse per-stream aligned scratch for uncommon read-only views; stable
@@ -698,6 +750,64 @@ class FlashInferGDNKernel(LinearAttnKernelBase):
             "verify_cache_indices", cache_indices
         )
 
+        # gdn_mtp_cache_mode=none verify is output-only (the accepted state is
+        # recovered separately). On the bf16 state pool, route it to the
+        # FlashInfer WY output-only kernel (flashinfer PR#3720) -- one launch over
+        # all T draft tokens (T x T GEMM + Neumann inverse on tensor cores),
+        # faster than the per-token state kernel. Recovery is unaffected: it reads
+        # the persistent conv-out views on the state-pool path, or the flat k/v
+        # stash on the Triton path.
+        #
+        # Keyed on the ABSENT snapshot buffer rather than on the ambient mode:
+        # none-mode is what leaves intermediate_ssm unallocated (see
+        # memory_pool.MambaPool), full mode always has it, and ReplaySSM's own None
+        # case never reaches this kernel (its verify branches run first, or the
+        # backend asserts). So the route costs no config read on the verify critical
+        # path and a full-mode launch cannot take it by accident.
+        if self.use_state_pool and intermediate_states_buffer is None:
+            if head_k_dim != 128 or head_v_dim != 128:
+                raise RuntimeError(
+                    f"--gdn-mtp-cache-mode=none needs the FlashInfer BF16-state WY "
+                    f"verifier, qualified on K == V == 128; this layer is "
+                    f"K={head_k_dim} V={head_v_dim}."
+                )
+            if draft_token_num > _WY_MAX_DRAFT_TOKENS:
+                raise RuntimeError(
+                    f"--gdn-mtp-cache-mode=none supports draft windows up to "
+                    f"{_WY_MAX_DRAFT_TOKENS} tokens; got {draft_token_num}."
+                )
+            try:
+                from flashinfer.gdn_kernels import (
+                    gated_delta_rule_mtp_wy_output_only,
+                )
+            except (ImportError, AttributeError) as e:
+                raise RuntimeError(
+                    "--gdn-mtp-cache-mode=none needs "
+                    "flashinfer.gdn_kernels.gated_delta_rule_mtp_wy_output_only "
+                    "(the BF16-state WY output-only verifier); this FlashInfer "
+                    "build does not expose it."
+                ) from e
+            output_wy = gated_delta_rule_mtp_wy_output_only(
+                A_log=self._prepare_parameter("A_log", A_log, dtype=torch.float32),
+                a=a_mtp,
+                dt_bias=dt_bias_fi,
+                q=query_mtp,
+                k=key_mtp,
+                v=value_mtp,
+                b=b_mtp,
+                initial_state_source=ssm_states,
+                initial_state_indices=cache_indices_fi[:batch_size],
+                output_state_indices=None,
+                intermediate_states_buffer=None,
+                disable_state_update=True,
+                use_qk_l2norm_in_kernel=True,
+                scale=None,
+                output=None,
+            )
+            # The WY output-only kernel returns a non-contiguous layout that
+            # .view() rejects; reshape is a safe superset.
+            return output_wy.reshape(1, seq_len, num_v_heads, head_v_dim)
+
         output_fi, _ = self._mtp_fn(
             q=query_mtp,
             k=key_mtp,
@@ -715,8 +825,7 @@ class FlashInferGDNKernel(LinearAttnKernelBase):
             use_qk_l2norm=True,
         )
 
-        if stable_rows and intermediate_states_buffer is not None:
-            # Persist positional output under PP-stable request rows.
+        if stable_rows and intermediate_states_buffer is not None:            # Persist positional output under PP-stable request rows.
             copy_verify_intermediate_rows(
                 intermediate_states_buffer,
                 intermediate_states_buffer_mtp,
@@ -728,3 +837,20 @@ class FlashInferGDNKernel(LinearAttnKernelBase):
             )
 
         return output_fi.view(1, seq_len, num_v_heads, head_v_dim)
+
+
+def fi_recovery_kernel(linear_backend):
+    """Return the FlashInfer GDN decode kernel iff it drives none-mode
+    accepted-state recovery (state-pool recovery), else None.
+
+    Single source of truth for the ``use_fi_recovery`` decision, checked at verify
+    (GDNAttnBackend.forward_extend), at accepted-state recovery
+    (HybridLinearAttnBackend._no_cache_mtp_recompute) and at recovery-graph capture
+    (HybridLinearAttnBackend.capture_recovery_graphs). Callers that only need the
+    boolean use ``fi_recovery_kernel(...) is not None``.
+    """
+    dispatcher = getattr(linear_backend, "kernel_dispatcher", None)
+    decode_kernel = getattr(dispatcher, "decode_kernel", None)
+    if isinstance(decode_kernel, FlashInferGDNKernel) and decode_kernel.use_state_pool:
+        return decode_kernel
+    return None

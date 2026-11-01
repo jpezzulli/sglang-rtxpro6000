@@ -85,7 +85,7 @@ from sglang.srt.mem_cache.utils import (
     set_mla_kv_scale_buffer_triton,
 )
 from sglang.srt.platforms import current_platform
-from sglang.srt.runtime_context import get_parallel, get_platform
+from sglang.srt.runtime_context import get_exec, get_parallel, get_platform
 from sglang.srt.utils import (
     ceil_align,
     cpu_has_amx_support,
@@ -524,6 +524,35 @@ class MambaPool:
     # class-level default for subclasses that skip MambaPool.__init__.
     _slot_siblings: Tuple = ()
 
+    # Sentinel for a fence event that has not been resolved yet; see
+    # state_recovery_event.
+    _RECOVERY_EVENT_UNRESOLVED = object()
+
+    @property
+    def state_recovery_event(self):
+        """The event a gdn_mtp_cache_mode=none accepted-state recovery records when
+        it is done writing this pool's state rows, or None when there is nothing to
+        fence (full mode, or a pool with no CUDA side stream to fence against).
+
+        The HiCache L2 legs join it (cache_controller.write_fence_events), because
+        they read these rows on their own streams and the forward-stream fence only
+        picks the recovery up at the NEXT forward's metadata plan.
+
+        It lives on the POOL rather than on the backend that records it, so the fence
+        holds ONE registration for the life of the process even when the serving
+        backend -- an adaptive width state, a PD role switch -- is replaced underneath
+        it. Resolved lazily and once from the pool's own mode, so nothing about pool
+        construction depends on the runtime context.
+        """
+        if self._state_recovery_event is MambaPool._RECOVERY_EVENT_UNRESOLVED:
+            self._state_recovery_event = (
+                torch.cuda.Event()
+                if str(self.device).startswith("cuda")
+                and self.gdn_mtp_cache_mode == "none"
+                else None
+            )
+        return self._state_recovery_event
+
     def register_slot_state(self, state) -> None:
         """Attach a state that rides along on clear / copy / host round-trip,
         so a slot never changes owner with a stale sibling row attached."""
@@ -572,9 +601,9 @@ class MambaPool:
 
     @dataclass(frozen=True, kw_only=True)
     class SpeculativeState(State):
-        # None under --enable-linear-replayssm-spec: the spec ring owns rollback
-        # (verify writes ring records, commit moves cursors), so the per-draft
-        # full-state snapshots are never produced or consumed.
+        # None under BOTH --enable-linear-replayssm-spec (spec ring owns rollback
+        # via cursors) and gdn_mtp_cache_mode=none (recovery reconstructs h_K
+        # after verify); the two are mutually exclusive (server_args).
         intermediate_ssm: Optional[torch.Tensor]
         intermediate_conv_window: List[torch.Tensor]
 
@@ -661,6 +690,7 @@ class MambaPool:
         linear_replayssm_cache_len: int = 16,
         envelope_layout: bool = False,
         enable_linear_replayssm_spec: bool = False,
+        gdn_mtp_cache_mode: str = "full",
     ):
         conv_state_shape = cache_params.shape.conv
         temporal_state_shape = cache_params.shape.temporal
@@ -674,6 +704,12 @@ class MambaPool:
 
         self.size = size
         self.device = device
+        # The h-cache mode is a constructor fact, like the ReplaySSM flags beside it:
+        # the caller (KVCacheConfigurator) decides it and the pool acts on it, so a
+        # pool built without a published runtime context -- a draft clone, a test
+        # seam -- still exists.
+        self.gdn_mtp_cache_mode = gdn_mtp_cache_mode
+        self._state_recovery_event = MambaPool._RECOVERY_EVENT_UNRESOLVED
         self.debug_memory_pool = envs.SGLANG_DEBUG_MEMORY_POOL.get()
         self.enable_linear_replayssm = enable_linear_replayssm
         self.linear_replayssm_cache_len = linear_replayssm_cache_len
@@ -876,19 +912,19 @@ class MambaPool:
                 # Cache intermediate SSM states per draft token during target verify
                 # Shape: [num_layers, size + 1, speculative_num_draft_tokens, HV, V, K]
                 #
-                # ReplaySSM spec-verify owns rollback via the ring + cursors (the
-                # verify kernel never writes per-draft snapshots; the commit never
-                # reads them), so this buffer -- the dominant spec scratch, ~46x
-                # the conv state -- is dead weight there and is skipped. The conv
-                # intermediate windows below STAY (conv rollback consumes them).
-                # The recurrent-verify fallback cannot be reached under the flag
-                # (GDN + linear chain + triton enforced in server_args; the
-                # backend asserts loudly if it ever is).
-                # ReplaySSM skips this dominant scratch (~9GB @ K3 dspark γ=7): the
-                # KDA verify kernel takes intermediate_states_buffer=None (skips the
-                # per-step write, CACHE_INTERMEDIATE_STATES=False) and the commit
-                # replays the ring into the checkpoint instead. This is the memory win.
-                if enable_linear_replayssm_spec:
+                # Skipped (dead weight, ~46x the conv state) when EITHER:
+                #  * ReplaySSM (--enable-linear-replayssm-spec): ring + cursors own
+                #    rollback; the verify kernel never writes per-draft snapshots and
+                #    the commit never reads them.
+                #  * gdn_mtp_cache_mode=none: recovery reconstructs h_K from the
+                #    committed h_0 after verify.
+                # (The two are mutually exclusive.) The conv intermediate windows
+                # below STAY in both cases (conv rollback consumes them).
+                # The recurrent-verify fallback cannot be reached under either flag
+                # (GDN + linear chain enforced in server_args; the backend asserts
+                # loudly if it ever is).
+                cache_mode = gdn_mtp_cache_mode
+                if enable_linear_replayssm_spec or cache_mode == "none":
                     intermediate_ssm_state_cache = None
                 else:
                     intermediate_ssm_state_cache = torch.zeros(
@@ -993,7 +1029,7 @@ class MambaPool:
                     else 0.0
                 )
                 logger.info(
-                    f"Mamba Cache is allocated. "
+                    f"Mamba Cache is allocated (gdn_mtp_cache_mode={cache_mode}). "
                     f"max_mamba_cache_size: {size}, "
                     f"conv_state size: {get_tensor_size_bytes(conv_state) / GB:.2f}GB, "
                     f"ssm_state size: {get_tensor_size_bytes(temporal_state) / GB:.2f}GB "
@@ -1398,6 +1434,7 @@ class HybridReqToTokenPool(ReqToTokenPool):
         short_conv_state_shape: Optional[Tuple[int, int]] = None,
         ngram_context_len: int = 0,
         ngram_eos_token_id: int = 0,
+        gdn_mtp_cache_mode: str = "full",
     ):
         super().__init__(
             size=size,
@@ -1432,6 +1469,7 @@ class HybridReqToTokenPool(ReqToTokenPool):
             linear_replayssm_cache_len=linear_replayssm_cache_len,
             mamba_envelope_layout=mamba_envelope_layout,
             enable_linear_replayssm_spec=enable_linear_replayssm_spec,
+            gdn_mtp_cache_mode=gdn_mtp_cache_mode,
             short_conv_layer_ids=short_conv_layer_ids,
             short_conv_state_shape=short_conv_state_shape,
             ngram_context_len=ngram_context_len,
@@ -1452,6 +1490,7 @@ class HybridReqToTokenPool(ReqToTokenPool):
         linear_replayssm_cache_len: int = 16,
         mamba_envelope_layout: bool = False,
         enable_linear_replayssm_spec: bool = False,
+        gdn_mtp_cache_mode: str = "full",
         short_conv_layer_ids: Optional[List[int]] = None,
         short_conv_state_shape: Optional[Tuple[int, int]] = None,
         ngram_context_len: int = 0,
@@ -1471,6 +1510,7 @@ class HybridReqToTokenPool(ReqToTokenPool):
             linear_replayssm_cache_len=linear_replayssm_cache_len,
             envelope_layout=mamba_envelope_layout,
             enable_linear_replayssm_spec=enable_linear_replayssm_spec,
+            gdn_mtp_cache_mode=gdn_mtp_cache_mode,
         )
         self.mamba_allocator = MambaSlotAllocator(
             size=mamba_size,
@@ -1572,6 +1612,9 @@ class HybridReqToTokenPool(ReqToTokenPool):
             enable_mamba_extra_buffer=enable_mamba_extra_buffer,
             speculative_num_draft_tokens=speculative_num_draft_tokens,
             speculative_eagle_topk=speculative_eagle_topk,
+            # Same mode as the target pool: the snapshots this clone skips are the
+            # target's contract, not the draft head's.
+            gdn_mtp_cache_mode=self.mamba_pool.gdn_mtp_cache_mode,
         )
         clone.req_index_to_mamba_index_mapping = self.req_index_to_mamba_index_mapping
         if enable_mamba_extra_buffer:

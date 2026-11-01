@@ -634,6 +634,15 @@ class Scheduler(
                 cache_controller.write_fence_stream = (
                     self.tp_worker.model_runner.forward_stream
                 )
+                # A state writer that runs off the forward stream (GDN
+                # RecoverSSM accepted-state recovery) must fence the transfer legs
+                # too: the fence stream only picks the recovery up at the NEXT
+                # forward's metadata join, which can be later than this submit.
+                producer_events = list(
+                    self.tp_worker.model_runner.attn_backend.state_producer_events()
+                )
+                cache_controller.load_fence_events = producer_events
+                cache_controller.write_fence_events = producer_events
                 # Keep device rows stable until host transfers are acknowledged.
                 # Queue reads and relocation both run on the scheduler thread.
                 storage = kv_storage_of(

@@ -359,6 +359,18 @@ class AttentionBackend(ABC):
         """The mask the draft stage fills in place, if this backend has one."""
         return None
 
+    def drain_pending_recovery(self) -> None:
+        """Join pool writes this backend issued on a side stream, if any are still
+        running. Only the GDN RecoverSSM path defers state writes off the forward
+        stream; every other backend has nothing to join."""
+        pass
+
+    def state_producer_events(self) -> list:
+        """Events marking this backend as a still-running writer of the state pool,
+        for consumers that run on neither the forward stream nor a metadata plan
+        (the HiCache L2 write leg). Empty for every backend but GDN RecoverSSM."""
+        return []
+
     def update_verify_buffers_to_fill_after_draft(
         self, spec_info: SpecInput, cuda_graph_bs: Optional[int]
     ):

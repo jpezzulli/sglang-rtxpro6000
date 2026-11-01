@@ -2071,6 +2071,12 @@ Combining `--enable-response-store` with `--disaggregation-mode=prefill` or `dec
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Type: int</td>
     </tr>
       <tr>
+      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}>`--gdn-mtp-cache-mode`</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Intermediate h-state cache mode for GDN MTP verify. <code>full</code> (default) caches h at every draft-token position. <code>none</code> skips intermediate caching and reconstructs h_K after verify by re-running the GDN recurrence from the committed h_0 over the accepted draft prefix (RecoverSSM), trading extra post-verify recovery compute for freeing the <code>intermediate_ssm</code> buffer. Requires a linear draft chain (<code>--speculative-eagle-topk</code> in <code>{None, 1}</code>) and is mutually exclusive with both ReplaySSM flags; supported with mamba radix tracking, where the interval-crossing checkpoint is rebuilt by a second boundary recovery pass.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>`full`</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}><code>full</code>, <code>none</code></td>
+    </tr>
+    <tr>
       <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}>`--enable-int8-mamba-checkpoint`</td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Store radix-cached linear-attn (mamba) states in int8 (separate checkpoint pool) for ~2x cached-prefix capacity at fixed memory.</td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>`False`</td>

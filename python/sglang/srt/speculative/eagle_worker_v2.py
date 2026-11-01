@@ -2058,6 +2058,21 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     + target_graph_time
                 )
 
+            # gdn_mtp_cache_mode=none: every candidate width builds its OWN target
+            # backend and decode buckets, and a recovery graph bakes that backend's
+            # address-stable index buffers and its plan. Capture per state here -- the
+            # startup call only ever sees the launch state's pair, and left to the
+            # default an activated width silently recovers eagerly on the side stream
+            # (the graphs self-guard), which is known-good but not what the width was
+            # qualified on.
+            if target_graph_runner is not None:
+                target_model_runner.maybe_capture_gdn_recovery_graphs(
+                    attn_backend=target_attn_backend,
+                    capture_bs=list(
+                        getattr(target_graph_runner, "capture_bs", []) or []
+                    ),
+                )
+
             state = SpecRuntimeState(
                 speculative_num_steps=speculative_num_steps,
                 speculative_num_draft_tokens=speculative_num_draft_tokens,
@@ -2098,6 +2113,27 @@ class EAGLEWorkerV2(BaseSpecWorker):
 
         # Draft side
         dw = self._draft_worker
+        # gdn_mtp_cache_mode=none: the state being retired can still have a
+        # side-stream accepted-state recovery in flight, and the incoming state's
+        # first target forward has no reason to look at the OUTGOING backend's
+        # pending flag -- while that recovery reads the SSM pool (one allocation,
+        # shared by every state's backends) exactly where the new state's forward
+        # writes. Drain the outgoing set before anything is repointed: the SSM/KV
+        # pools stay shared, only the join is ordered.
+        drained: set = set()
+        for outgoing in (
+            self._target_worker.model_runner.attn_backend,
+            dw.draft_attn_backend,
+            dw.draft_extend_attn_backend,
+            getattr(dw.draft_runner, "attn_backend", None),
+        ):
+            # getattr, not a direct call: these four slots are heterogeneous (the
+            # draft side can legitimately hold None or a platform stub) and the join
+            # is an optional capability -- AttentionBackend defines the no-op.
+            drain = getattr(outgoing, "drain_pending_recovery", None)
+            if outgoing is not None and drain is not None and id(outgoing) not in drained:
+                drain()
+                drained.add(id(outgoing))
         dw.speculative_num_steps = state.speculative_num_steps
         dw.speculative_num_draft_tokens = state.speculative_num_draft_tokens
         dw.draft_attn_backend = state.draft_attn_backend

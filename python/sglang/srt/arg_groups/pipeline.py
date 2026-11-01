@@ -246,6 +246,7 @@ def run_resolution_pipeline(server_args: Any) -> None:
     # default (auto-selected for DeepseekV3ForCausalLM on sm100) is visible.
     run_hook(disable_prefill_cuda_graph_for_deepseek_trtllm_mla, server_args)
     from sglang.srt.arg_groups.mamba_hook import (
+        handle_gdn_mtp_cache_mode,
         handle_int8_mamba_checkpoint,
         handle_mamba_backend,
     )
@@ -308,6 +309,9 @@ def run_resolution_pipeline(server_args: Any) -> None:
 
     run_hook(handle_speculative_decoding, server_args)
     run_post_process_pass(server_args, resolve_ascend_ops_speculative_draft)
+    # Needs the draft-token count and topk resolved just above: none-mode is
+    # linear-chain only and mutually exclusive with both ReplaySSM flags.
+    run_hook(handle_gdn_mtp_cache_mode, server_args)
 
     from sglang.srt.arg_groups.boundary_reduction import resolve_boundary_reduction
 

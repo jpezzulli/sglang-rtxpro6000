@@ -19,7 +19,16 @@ import threading
 import time
 from dataclasses import dataclass
 from queue import Empty, Queue
-from typing import TYPE_CHECKING, Any, Callable, List, NamedTuple, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    ClassVar,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+)
 
 import torch
 
@@ -299,6 +308,14 @@ class PrefetchOperation(StorageOperation):
 
 
 class HiCacheController:
+
+    # Side-stream state writers to join at submit, beside the fence streams below.
+    # Defaults to empty at class level so a controller built without __init__ (a
+    # subclass, or a test seam) still has the join to iterate; the scheduler assigns
+    # a list per instance. See write_fence_stream / load_fence_stream.
+    load_fence_events: ClassVar[Sequence] = ()
+    write_fence_events: ClassVar[Sequence] = ()
+
     def __init__(
         self,
         token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
@@ -380,6 +397,17 @@ class HiCacheController:
         # write D2H behind in-flight forwards (see start_loading, start_writing).
         self.load_fence_stream = None
         self.write_fence_stream = None
+        # Extra producer EVENTS joined at submit, next to the fence streams. A state
+        # writer that runs on its own side stream (gdn_mtp_cache_mode=none accepted-
+        # state recovery) is not ordered into forward_stream until the NEXT target
+        # forward plans its metadata, which can be later than the first write submit
+        # that reads the very rows that recovery is committing -- and a D2H copy that
+        # races its own producer publishes the torn rows under a valid key. The
+        # events are long-lived and REUSED per backend, so they are registered once
+        # at startup: cuStreamWaitEvent joins whichever record is the latest at
+        # enqueue time, and a never-recorded event is inert.
+        self.load_fence_events: List[torch.cuda.Event] = []
+        self.write_fence_events: List[torch.cuda.Event] = []
         self.ack_write_queue: List[HiCacheAck] = []
 
         self.l2_transfer_engine = L2TransferEngine(io_backend)
@@ -994,6 +1022,8 @@ class HiCacheController:
             self.l2_transfer_engine.device_to_host_stream.wait_stream(
                 self.write_fence_stream
             )
+        for state_event in self.write_fence_events:
+            self.l2_transfer_engine.device_to_host_stream.wait_event(state_event)
 
         completion = self.l2_transfer_engine.submit_device_to_host(
             self._l2_transfers(host_indices, device_indices, pool_transfers)
@@ -1139,6 +1169,10 @@ class HiCacheController:
             self.l2_transfer_engine.host_to_device_stream.wait_stream(
                 self.load_fence_stream
             )
+        # Same for the side-stream state writer: a load-back that overwrites a row a
+        # pending recovery will write (or has just written) must not interleave it.
+        for state_event in self.load_fence_events:
+            self.l2_transfer_engine.host_to_device_stream.wait_event(state_event)
 
         completion = self.l2_transfer_engine.submit_host_to_device(
             self._l2_load_transfers(host_indices, device_indices, pool_transfers),

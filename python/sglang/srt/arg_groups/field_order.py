@@ -558,5 +558,6 @@ POSITIONAL_FIELD_ORDER = (
     "engram_config",
     "moe_ascend_ops_config",
     "cp_kv_layout",
+    "gdn_mtp_cache_mode",
 )
 # fmt: on
