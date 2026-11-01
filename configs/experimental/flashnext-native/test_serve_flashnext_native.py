@@ -326,7 +326,9 @@ class TestEmittedArgv(unittest.TestCase):
         for value in ("auto", "partial", "NONE", "full,none"):
             result, _ = self.launch(gdn_mtp_cache_mode=value)
             self.assertNotEqual(result.returncode, 0, value)
-            self.assertIn("GDN_MTP_CACHE_MODE must be full or none", result.stderr, value)
+            self.assertIn(
+                "GDN_MTP_CACHE_MODE must be full or none", result.stderr, value
+            )
         # An explicit empty value falls back to the accepted default.
         result, argv = self.launch(gdn_mtp_cache_mode="")
         self.assertEqual(result.returncode, 0, result.stderr)
