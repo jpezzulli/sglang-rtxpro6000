@@ -32,6 +32,40 @@ ATOL = 4e-2
 RTOL = 4e-2
 
 
+def _make_pool(size: int, width: int, mode: str):
+    """A real MambaPool on the real device, the way none mode allocates one."""
+    from sglang.srt.configs.mamba_utils import (
+        Mamba2CacheParams,
+        Mamba2StateDType,
+        Mamba2StateShape,
+    )
+    from sglang.srt.mem_cache.memory_pool import MambaPool
+
+    shape = Mamba2StateShape.create(
+        tp_world_size=1,
+        intermediate_size=2 * HV,
+        n_groups=1,
+        num_heads=HV,
+        head_dim=K,
+        state_size=V,
+        conv_kernel=4,
+    )
+    params = Mamba2CacheParams(
+        shape=shape,
+        dtype=Mamba2StateDType(conv=torch.bfloat16, temporal=torch.bfloat16),
+        layers=[0],
+    )
+    return MambaPool(
+        size=size,
+        spec_state_size=size,
+        cache_params=params,
+        mamba_layer_ids=[0],
+        device=DEVICE,
+        speculative_num_draft_tokens=width,
+        gdn_mtp_cache_mode=mode,
+    )
+
+
 def _sm_major() -> int:
     return torch.cuda.get_device_capability()[0] if torch.cuda.is_available() else 0
 
@@ -412,25 +446,52 @@ class TestRecoverSSMSM120(unittest.TestCase):
                         accepted.copy_((accepted + 1) % width)
 
     # --- warmup capture ordering -------------------------------------------
-    def _warmup_backend(self, case, state):
-        """The real capture path, over `state` as the layer's SSM pool."""
+    def _warmup_backend(self, case, pool):
+        """Wire the real FlashInfer recovery path over a real none-mode pool.
+
+        Every eligibility input is the production one, so nothing can exit early and
+        pass vacuously: ``kernel_dispatcher.decode_kernel`` is a genuine
+        ``FlashInferGDNKernel`` (SM120 -> ``use_state_pool`` True), so
+        ``fi_recovery_kernel`` selects the WY recovery route; ``state_pool`` is a real
+        ``MambaPool``, which is where the recovery event the HiCache write leg joins
+        lives, and whose ``mamba2_layer_cache`` supplies the state rows; the stash and
+        persistent conv-out buffer carry the layout ``_persist_kv`` reads.
+        """
         from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
             HybridLinearAttnBackend,
+        )
+        from sglang.srt.layers.attention.linear.kernels.gdn_flashinfer import (
+            FlashInferGDNKernel,
         )
 
         width = case["T"]
         batch_size = case["q"].shape[0]
-        pool_size = state.shape[0]
         q_dim = k_dim = H * K
         v_dim = HV * V
         conv_dim = q_dim + k_dim + v_dim
-        # Token-major persistent conv-out buffer: recovery reads k/v out of it as
-        # strided views, exactly as forward_extend leaves it after the verify conv.
+        # Token-major persistent conv-out buffer: [rows, cache_steps, conv_dim] with k
+        # at [q_dim : q_dim+k_dim] and v after it -- the slices _persist_kv takes as
+        # strided views. case["k"]/["v"] are [B, T, H, D], so the head axes have to be
+        # flattened into the column axis before they can land in the buffer.
         persist = torch.zeros(
-            pool_size, width, conv_dim, device=DEVICE, dtype=case["k"].dtype
+            pool.size + 1, width, conv_dim, device=DEVICE, dtype=case["k"].dtype
         )
-        persist[:batch_size, :, q_dim : q_dim + k_dim] = case["k"]
-        persist[:batch_size, :, q_dim + k_dim : q_dim + k_dim + v_dim] = case["v"]
+        persist[:batch_size, :, q_dim : q_dim + k_dim] = case["k"].reshape(
+            batch_size, width, k_dim
+        )
+        persist[:batch_size, :, q_dim + k_dim : q_dim + k_dim + v_dim] = case[
+            "v"
+        ].reshape(batch_size, width, v_dim)
+
+        temporal = pool.mamba2_layer_cache(0).temporal
+        # Row 0 is the pool's reserved padding slot (rows are size+1), which is exactly
+        # the discard row the warmup is allowed to write.
+        self.assertEqual(
+            tuple(temporal.shape),
+            tuple(case["state"].shape),
+            "the case must be built against this pool's geometry",
+        )
+        temporal.copy_(case["state"])
 
         backend = HybridLinearAttnBackend.__new__(HybridLinearAttnBackend)
         backend._recover_ssm = True
@@ -439,22 +500,21 @@ class TestRecoverSSMSM120(unittest.TestCase):
         backend._recovery_event_pending = False
         backend._recovery_join_event = None
         backend._recovery_stream_ctx = None
-        backend._rec_state_idx_buf = torch.zeros(
-            pool_size, dtype=torch.int32, device=DEVICE
+        zeros = lambda: torch.zeros(  # noqa: E731 - four stable buffers, same shape
+            pool.size + 1, dtype=torch.int32, device=DEVICE
         )
-        backend._rec_acc_steps_buf = torch.zeros(
-            pool_size, dtype=torch.int32, device=DEVICE
-        )
-        backend._rec_track_idx_buf = torch.zeros(
-            pool_size, dtype=torch.int32, device=DEVICE
-        )
-        backend._rec_track_steps_buf = torch.zeros(
-            pool_size, dtype=torch.int32, device=DEVICE
-        )
+        backend._rec_state_idx_buf = zeros()
+        backend._rec_acc_steps_buf = zeros()
+        backend._rec_track_idx_buf = zeros()
+        backend._rec_track_steps_buf = zeros()
         backend._rec_graphs = {}
         backend._rec_boundary_graphs = {}
         backend._rec_capture_bs = None
+        # What the glue graph snapshots and reinstalls around the prep it records.
+        backend.forward_metadata = SimpleNamespace(layer_id=0)
+        backend.attn_backend_list = []
         sidecar = SimpleNamespace()
+        sidecar.kernel_dispatcher = SimpleNamespace(decode_kernel=FlashInferGDNKernel())
         sidecar._no_cache_draft_token_num = width
         sidecar._conv_out_persist = {0: persist}
         sidecar._no_cache_stash = {
@@ -467,57 +527,150 @@ class TestRecoverSSMSM120(unittest.TestCase):
                 "conv_dims": (q_dim, k_dim, v_dim, H, K, HV, V),
             }
         }
-        sidecar.state_pool = SimpleNamespace(size=pool_size)
-        sidecar.state_layer_cache = lambda layer_id: SimpleNamespace(temporal=state)
+        sidecar.state_pool = pool
+        sidecar.state_layer_cache = lambda layer_id: pool.mamba2_layer_cache(layer_id)
         backend.linear_attn_backend = sidecar
-        return backend
+        return backend, temporal
+
+    def _no_buffer(self):
+        from sglang.srt.runtime_context import get_context
+
+        return get_context().override_server_args(
+            mamba_radix_cache_strategy="no_buffer"
+        )
 
     def test_warmup_capture_waits_the_delayed_caller_stream_producer(self):
         """The capture's producer->consumer join, on hardware, with a slow producer.
 
-        The four stable index/step buffers are zero-filled on the caller stream and the
-        stash was written there; the first warmup launch runs on the recovery stream.
-        Poison the working-index buffer with a LIVE slot, keep the caller stream busy
-        behind that fill, and capture: the join must hold the launch until the fills
-        land, so the only row the warmup can touch is the reserved discard row. Without
-        the join the recovery stream is idle, its launch reads the poison, and it
-        commits state into the live request's row.
+        The four stable index/step buffers are zero-filled on the caller stream and
+        the stash was written there; the first warmup launch runs on the recovery
+        stream. Poison the working-index buffer with a LIVE slot and a non-zero
+        accepted step, keep the caller stream busy behind that fill, and capture. The
+        join must hold the launch until the fills land, so the only row the warmup can
+        touch is the reserved discard row. Without it the recovery stream is idle, the
+        launch reads the poison, and it commits an accepted prefix into the live
+        request's row. The kernel is warm from a first capture pass, so a cold JIT
+        cannot mask the missing dependency; the replay at the end proves the captured
+        graph is a real recovery rather than a no-op.
 
         The CPU seam test (test_gdn_recovery_stream_order) pins the event order
-        symbolically; this one is the version that would catch a real reordering, and
-        it can only pass vacuously if no launch happened at all -- which the
-        `_rec_capture_bs` and poisoned-buffer assertions rule out.
+        symbolically; this is the version that can fail on a real reordering.
         """
-        from sglang.srt.runtime_context import get_context
-
         width = WIDTHS[0]
         case = self._case(2, 909, width)
-        state = case["state"].clone()
-        pool_size = state.shape[0]
+        pool = _make_pool(case["state"].shape[0] - 1, width, "none")
+        backend, temporal = self._warmup_backend(case, pool)
+        batch_size = case["q"].shape[0]
         live_slot = int(case["slots"][0])  # slot 1: a real request row
-        before = state.clone()
-        backend = self._warmup_backend(case, state)
+        before = temporal.clone()
+        _, intermediate = self._full(case, case["state"].clone())
 
-        # Producer work still in flight on the caller stream: a poison index, then a
-        # ~100ms delay before the zero-fill the capture itself issues.
-        backend._rec_state_idx_buf.fill_(live_slot)
-        torch.cuda._sleep(200_000_000)
-        with get_context().override_server_args(mamba_radix_cache_strategy="no_buffer"):
-            backend.capture_recovery_graphs([case["q"].shape[0]])
-        torch.cuda.synchronize()
+        with self._no_buffer():
+            # Prewarm: JIT/arg-default population for this exact geometry.
+            backend.capture_recovery_graphs([batch_size])
+            self.assertEqual(backend._rec_capture_bs, [batch_size])
+            backend._rec_graphs.clear()
+            temporal.copy_(case["state"])
 
-        self.assertEqual(backend._rec_capture_bs, [case["q"].shape[0]])
-        self.assertEqual(int(backend._rec_state_idx_buf[0]), 0)
-        self.assertGreater(len(backend._rec_graphs), 0)
-        untouched = [i for i in range(pool_size) if i != 0]
-        torch.testing.assert_close(
-            state[untouched],
-            before[untouched],
-            atol=0,
-            rtol=0,
-            msg="warmup recovery wrote a live slot: the capture did not join its "
-            "caller-stream producer before the first launch",
+            # Producer work still in flight on the caller stream: a poison index and
+            # step, then a ~100ms delay before the zero-fill the capture issues.
+            backend._rec_state_idx_buf.fill_(live_slot)
+            backend._rec_acc_steps_buf.fill_(width - 1)
+            torch.cuda._sleep(200_000_000)
+            backend.capture_recovery_graphs([batch_size])
+            torch.cuda.synchronize()
+
+            self.assertEqual(backend._rec_capture_bs, [batch_size])
+            self.assertIn(batch_size, backend._rec_graphs)
+            self.assertEqual(int(backend._rec_state_idx_buf[0]), 0)
+            untouched = [i for i in range(temporal.shape[0]) if i != 0]
+            torch.testing.assert_close(
+                temporal[untouched],
+                before[untouched],
+                atol=0,
+                rtol=0,
+                msg="warmup recovery wrote a live slot: the capture did not join its "
+                "caller-stream producer before the first launch",
+            )
+
+            # Not vacuous: the graph that was captured does the recovery. Point it at
+            # the real slots and the last draft position and replay.
+            backend._rec_state_idx_buf[:batch_size] = case["slots"]
+            backend._rec_acc_steps_buf[:batch_size] = width - 1
+            backend._rec_state_idx_buf[batch_size:] = 0
+            backend._rec_acc_steps_buf[batch_size:] = 0
+            backend._recovery_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(backend._recovery_stream):
+                backend._rec_graphs[batch_size].replay()
+            torch.cuda.synchronize()
+            for row in range(batch_size):
+                torch.testing.assert_close(
+                    temporal[int(case["slots"][row])],
+                    intermediate[row, width - 1],
+                    atol=ATOL,
+                    rtol=RTOL,
+                    msg="captured recovery graph did not commit the accepted state",
+                )
+
+    def test_metadata_replay_cannot_order_the_recovery_the_seam_does(self):
+        """Last-writer-wins proof that metadata prep is not the join's owner.
+
+        A previous step's recovery is still running on the side stream (a delayed
+        sentinel write into a live row) while this step's metadata prep is served by
+        the captured glue graph. Ordering is established by the dispatch seam calling
+        drain_pending_recovery, so the step's own write to that row lands last. Skip
+        the seam and the side stream lands last and wins -- that is the second phase
+        below, and it is the reason the seam exists: on the graph-dispatch path
+        nothing else runs, because _forward_raw returns at the graph branch.
+        """
+        from sglang.srt.model_executor.runner.metadata_glue_graph import (
+            MetadataGlueGraph,
         )
+
+        width = WIDTHS[0]
+        case = self._case(2, 404, width)
+        pool = _make_pool(case["state"].shape[0] - 1, width, "none")
+        # The prep under test is the wrapper's own delegation loop, with no children.
+        backend, temporal = self._warmup_backend(case, pool)
+        row = int(case["slots"][0])
+        event = pool.state_recovery_event
+        self.assertIsInstance(event, torch.cuda.Event)
+        glue = MetadataGlueGraph(device=DEVICE)
+        glue.NUM_WARMUP = 0  # go straight to a real capture of the prep
+
+        def delayed_recovery(value):
+            backend._ensure_recovery_stream()
+            with torch.cuda.stream(backend._recovery_stream):
+                torch.cuda._sleep(200_000_000)
+                temporal[row].fill_(value)
+                event.record()
+            backend._recovery_event_pending = True
+
+        with self._no_buffer():
+            # 1. The prep the glue records (and every replay that replaces it) must
+            # leave the join for the forward.
+            delayed_recovery(1.0)
+            glue.run(backend, SimpleNamespace(), "key")
+            self.assertTrue(
+                backend._recovery_event_pending,
+                "captured/replayed metadata prep consumed a join it never establishes",
+            )
+            # 2. Without the seam drain, the side stream's write lands last: this is
+            # the failure the review found, and the probe's sensitivity control.
+            temporal[row].fill_(0.5)
+            torch.cuda.synchronize()
+            self.assertGreater(temporal[row].float().mean().item(), 0.9)
+
+            # 3. With it, this step's write is ordered after the recovery and wins.
+            delayed_recovery(2.0)
+            glue.run(backend, SimpleNamespace(), "key")
+            backend.drain_pending_recovery()
+            self.assertFalse(backend._recovery_event_pending)
+            temporal[row].fill_(3.0)
+            torch.cuda.synchronize()
+            self.assertLess(temporal[row].float().mean().item(), 3.5)
+            self.assertAlmostEqual(temporal[row].float().mean().item(), 3.0, delta=0.5)
+            self.assertEqual(glue.replays, 1, "the second step replayed the graph")
 
     def test_state_pool_publishes_the_recovery_fence(self):
         """The pool, not the backend, owns the event the HiCache write leg joins.
@@ -525,37 +678,8 @@ class TestRecoverSSMSM120(unittest.TestCase):
         Checked on real hardware because it is allocated only for a CUDA state pool
         (see MambaPool.state_recovery_event and the CPU seam tests).
         """
-        from sglang.srt.configs.mamba_utils import (
-            Mamba2CacheParams,
-            Mamba2StateDType,
-            Mamba2StateShape,
-        )
-        from sglang.srt.mem_cache.memory_pool import MambaPool
-
-        shape = Mamba2StateShape.create(
-            tp_world_size=1,
-            intermediate_size=2 * HV,
-            n_groups=1,
-            num_heads=HV,
-            head_dim=K,
-            state_size=V,
-            conv_kernel=4,
-        )
-        params = Mamba2CacheParams(
-            shape=shape,
-            dtype=Mamba2StateDType(conv=torch.bfloat16, temporal=torch.bfloat16),
-            layers=[0],
-        )
-        base = dict(
-            size=2,
-            spec_state_size=2,
-            cache_params=params,
-            mamba_layer_ids=[0],
-            device="cuda",
-            speculative_num_draft_tokens=WIDTHS[0],
-        )
-        none_pool = MambaPool(gdn_mtp_cache_mode="none", **base)
-        full_pool = MambaPool(gdn_mtp_cache_mode="full", **base)
+        none_pool = _make_pool(2, WIDTHS[0], "none")
+        full_pool = _make_pool(2, WIDTHS[0], "full")
         # The event the HiCache write leg joins exists exactly when the mode records
         # it, and it is the same object across every read of one pool.
         self.assertIsInstance(none_pool.state_recovery_event, torch.cuda.Event)

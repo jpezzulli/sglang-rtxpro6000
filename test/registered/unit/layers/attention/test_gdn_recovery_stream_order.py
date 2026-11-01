@@ -26,6 +26,8 @@ ordered; they do not prove the joins are sufficient on real hardware (see
 here touches a device.
 """
 
+import contextlib
+import inspect
 import sys
 import types
 import unittest
@@ -387,29 +389,55 @@ class TestStateProducerPublication(unittest.TestCase):
         backend.drain_pending_recovery()
         self.assertEqual(len(log), 1, "a drained recovery must not re-join")
 
-    def test_metadata_plans_join_before_the_forward_reads_the_pool(self):
+    def test_metadata_preparation_cannot_consume_the_join(self):
+        """None of the metadata-preparation variants may order or consume the join.
+
+        `init_forward_metadata_out_graph` is the exact function the metadata glue
+        graph captures (MetadataGlueGraph.run) and then replays for every later
+        step: the wait is either recorded into a graph where it waits on an event
+        recorded outside it (so it orders nothing), or skipped because the replay
+        runs no Python at all. Either way the pending flag was cleared by something
+        that never established the ordering, and the next verify read an SSM pool
+        the recovery was still committing and overwrote a conv/a-b stash it was
+        still reading. Preparation must leave the join to the dispatch seam.
+        """
         log = []
         backend = _hybrid(log=log, pool_event=_FakeEvent("pool", log))
-        backend._recovery_event_pending = True
+        backend.attn_backend_list = []
         forward_batch = SimpleNamespace(
             forward_mode=SimpleNamespace(is_draft_extend_v2=lambda: False)
         )
-        backend.attn_backend_list = []
-        backend.init_forward_metadata(forward_batch)
-        self.assertEqual(log, [("join", "pool", None)])
 
-        backend._recovery_event_pending = True
-        log.clear()
-        backend.init_forward_metadata_out_graph(forward_batch)
-        self.assertEqual(log, [("join", "pool", None)])
+        for name, call in (
+            ("eager prep", lambda: backend.init_forward_metadata(forward_batch)),
+            (
+                "out-of-graph prep (what the glue captures)",
+                lambda: backend.init_forward_metadata_out_graph(forward_batch),
+            ),
+            (
+                "out-of-graph prep during capture",
+                lambda: backend.init_forward_metadata_out_graph(
+                    forward_batch, in_capture=True
+                ),
+            ),
+            (
+                "in-graph prep",
+                lambda: backend.init_forward_metadata_in_graph(forward_batch),
+            ),
+        ):
+            with self.subTest(name):
+                backend._recovery_event_pending = True
+                log.clear()
+                call()
+                self.assertEqual(log, [], "preparation must issue no cross-stream wait")
+                self.assertTrue(
+                    backend._recovery_event_pending,
+                    "preparation must not clear the flag before the forward owns it",
+                )
 
-        # During capture the wrapper must not enqueue a cross-stream wait into the
-        # graph being captured.
-        backend._recovery_event_pending = True
-        log.clear()
-        backend.init_forward_metadata_out_graph(forward_batch, in_capture=True)
-        self.assertEqual(log, [])
-        self.assertTrue(backend._recovery_event_pending)
+        backend.drain_pending_recovery()
+        self.assertEqual(log, [("join", "pool", None)])
+        self.assertFalse(backend._recovery_event_pending)
 
     def test_full_mode_pool_carries_no_recovery_event(self):
         # The event is allocated by the mode that records it, so a full-mode launch
@@ -462,8 +490,6 @@ class TestCowClearJoinSite(unittest.TestCase):
     """
 
     def _forward_raw_source(self):
-        import inspect
-
         from sglang.srt.model_executor.model_runner import ModelRunner
 
         return inspect.getsource(ModelRunner._forward_raw)
@@ -478,10 +504,206 @@ class TestCowClearJoinSite(unittest.TestCase):
         # The base class owns the no-op, so the hot path is one virtual call and the
         # runner never re-derives "is this a RecoverSSM launch".
         src = self._forward_raw_source()
-        line = next(
-            line for line in src.splitlines() if "drain_pending_recovery" in line
+        call = "self.attn_backend.drain_pending_recovery()"
+        lines = [
+            line.strip()
+            for line in src.splitlines()
+            if call in line and not line.strip().startswith("#")
+        ]
+        self.assertEqual(lines, [call], "one join call, and it is a call")
+
+    def test_the_join_precedes_the_graph_dispatch_that_returns_early(self):
+        """The eager-only position was the bug: the cuda-graph branch returns first.
+
+        Behaviour is pinned in TestDispatchSeamJoinsBeforeGraphReplay; this is the
+        structural guard against the call being moved back below the branch.
+        """
+        src = self._forward_raw_source()
+        join = src.index("drain_pending_recovery()")
+        dispatch = src.index("if can_run_graph:")
+        self.assertLess(join, dispatch)
+        self.assertLess(join, src.index("prepare_for_forward"))
+
+    def test_ownership_is_not_duplicated_into_the_prep_methods(self):
+        """The join lives in exactly one place; prep keeps no copy of it."""
+        from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
+            HybridLinearAttnBackend as H,
         )
-        self.assertEqual(line.strip(), "self.attn_backend.drain_pending_recovery()")
+
+        for method in (
+            H.init_forward_metadata,
+            H.init_forward_metadata_out_graph,
+            H.init_forward_metadata_in_graph,
+        ):
+            with self.subTest(method.__name__):
+                self.assertNotIn("_wait_recovery_if_pending", inspect.getsource(method))
+        self.assertIn(
+            "_wait_recovery_if_pending",
+            inspect.getsource(H.drain_pending_recovery),
+        )
+
+
+class _FakeCapturedGraph:
+    def __init__(self, log):
+        self.log = log
+
+    def replay(self):
+        self.log.append(("glue-graph-replay",))
+
+
+class _GlueReplayDecodeRunner:
+    """The decode cuda-graph runner's uncaptured host half, replaying a glue graph
+    that was captured on an earlier step."""
+
+    def __init__(self, log, glue, backend, key):
+        self.log, self.glue, self.backend, self.key = log, glue, backend, key
+
+    def can_run_graph(self, forward_batch):
+        return True
+
+    def execute(self, forward_batch, pp_proxy_tensors=None):
+        # load_batch -> _init_replay_attn_metadata -> the captured-prep fast path.
+        self.glue.run(self.backend, SimpleNamespace(batch=forward_batch), self.key)
+        self.log.append(("model-graph-launch",))
+        return "logits"
+
+
+class TestDispatchSeamJoinsBeforeGraphReplay(unittest.TestCase):
+    """The actual target-compute boundary, with an already-captured metadata replay.
+
+    Real ModelRunner._forward_raw, real HybridLinearAttnBackend drain, real
+    MetadataGlueGraph in its replayed state. The join must land on the compute
+    stream before the graph is launched -- the graph branch returns early, so a
+    join placed anywhere below the branch never runs on this path at all.
+    """
+
+    def _forward_raw(self, *, pending):
+        from sglang.srt.model_executor.runner.metadata_glue_graph import (
+            MetadataGlueGraph,
+        )
+
+        log = []
+        event = _FakeEvent("pool", log)
+        backend = _hybrid(log=log, pool_event=event)
+        backend._recovery_event_pending = pending
+        glue = MetadataGlueGraph(device="cuda")
+        key = ("target-verify", 4)
+        # Already captured on an earlier step: run() must take the replay branch.
+        glue._states[key] = {
+            "warmups": glue.NUM_WARMUP,
+            "graph": _FakeCapturedGraph(log),
+            "meta": [(backend, "metadata-of-capture-key")],
+        }
+        runner = model_runner_module.ModelRunner.__new__(
+            model_runner_module.ModelRunner
+        )
+        runner.device = "cuda"
+        runner.model = SimpleNamespace(shared_experts_config=None)
+        runner.attn_backend = backend
+        runner.hisparse_coordinator = None
+        runner.decode_cuda_graph_runner = _GlueReplayDecodeRunner(
+            log, glue, backend, key
+        )
+        forward_batch = SimpleNamespace(
+            forward_mode=SimpleNamespace(
+                is_cuda_graph=lambda: True,
+                is_cpu_graph=lambda: False,
+                is_decode=lambda: False,
+            )
+        )
+        fake_model = SimpleNamespace(
+            override=lambda shared_experts: contextlib.nullcontext()
+        )
+        with (
+            patch.object(model_runner_module, "get_model", return_value=fake_model),
+            patch.object(model_runner_module, "has_forward_context", return_value=True),
+            patch.object(
+                model_runner_module, "get_forward_context", return_value="ctx"
+            ),
+            patch.object(
+                model_runner_module,
+                "forward_context",
+                lambda ctx, forward_batch: contextlib.nullcontext(),
+            ),
+        ):
+            out = runner._forward_raw(forward_batch, pp_proxy_tensors=None)
+        return log, backend, glue, out
+
+    def test_the_seam_join_orders_the_graph_that_replays_captured_prep(self):
+        log, backend, glue, out = self._forward_raw(pending=True)
+        self.assertEqual(
+            log,
+            [("join", "pool", None), ("glue-graph-replay",), ("model-graph-launch",)],
+        )
+        self.assertFalse(backend._recovery_event_pending)
+        self.assertEqual(glue.replays, 1)
+        self.assertEqual(glue.eager, 0, "the captured prep must not have run eagerly")
+        self.assertEqual(
+            backend.forward_metadata,
+            "metadata-of-capture-key",
+            "the replay must still reinstall the captured metadata objects",
+        )
+        self.assertTrue(out.can_run_graph)
+
+    def test_a_step_with_nothing_pending_costs_one_noop_call(self):
+        log, backend, glue, _ = self._forward_raw(pending=False)
+        self.assertEqual(
+            log, [("glue-graph-replay",), ("model-graph-launch",)], "no stray wait"
+        )
+        self.assertFalse(backend._recovery_event_pending)
+
+    def test_the_prep_the_glue_graph_captures_issues_no_join(self):
+        """Both glue branches: the prep it records, and the replay that replaces it.
+
+        The old placement cleared the pending flag in the warm-up/capture calls and
+        then ordered nothing at all on every replayed step, so from the second step
+        onward the recovery was never joined on the path that reads the pool.
+        """
+        from sglang.srt.model_executor.runner.metadata_glue_graph import (
+            MetadataGlueGraph,
+        )
+
+        log = []
+        glue = MetadataGlueGraph(device="cuda")
+        backend = _hybrid(log=log, pool_event=_FakeEvent("pool", log))
+        backend.attn_backend_list = []
+        backend._recovery_event_pending = True
+        calls = []
+
+        class _Probe:
+            attn_backend_list = []
+
+            def init_forward_metadata_out_graph(self, fb_view, in_capture=False):
+                calls.append(fb_view)
+                backend.init_forward_metadata_out_graph(fb_view, in_capture=in_capture)
+
+        for step in range(glue.NUM_WARMUP):
+            with self.subTest(warmup=step):
+                glue.run(_Probe(), f"fb-view-{step}", "k")
+                self.assertEqual(log, [], "the prep the glue records issues no wait")
+                self.assertTrue(
+                    backend._recovery_event_pending,
+                    "planning/capture must leave the join to the forward",
+                )
+        self.assertEqual(calls, ["fb-view-0", "fb-view-1"])
+
+        # Now in its captured state: only reinstall + device-op replay, no Python
+        # prep, no wait -- and the flag must still be there for the dispatch seam.
+        glue._states["k"] = {
+            "warmups": glue.NUM_WARMUP,
+            "graph": _FakeCapturedGraph(log),
+            "meta": [(backend, "metadata-of-capture-key")],
+        }
+        glue.run(_Probe(), "fb-view-2", "k")
+        self.assertEqual(
+            log,
+            [("glue-graph-replay",)],
+            "the replay issues no wait, so it cannot be the join",
+        )
+        self.assertEqual(calls, ["fb-view-0", "fb-view-1"], "no Python prep ran")
+        self.assertTrue(backend._recovery_event_pending)
+        backend.drain_pending_recovery()
+        self.assertEqual(log[-1], ("join", "pool", None))
 
 
 class _Req:

@@ -11,6 +11,8 @@ so the control is the same checkpoint, weights and seed.
 
 import unittest
 
+import torch
+
 from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.kits.eval_accuracy_kit import GSM8KMixin
 from sglang.test.server_fixtures.default_fixture import DefaultServerBase
@@ -70,6 +72,12 @@ def _args(*extra):
     return _BASE_ARGS + list(extra)
 
 
+# A server-launch test with no accelerator does not get to fall back to CPU: the
+# harness would try to serve a 397B checkpoint on the host and report a launch failure
+# instead of the truth, which is that there is no GPU here.
+@unittest.skipUnless(
+    torch.cuda.is_available(), "requires CUDA: this launches a real server"
+)
 class _RecoverSSMGSM8KBase(GSM8KMixin, DefaultServerBase):
     model = RECOVER_SSM_MODEL
     timeout = 2400

@@ -2061,6 +2061,17 @@ class ModelRunner:
         reinit_attn_backend: bool = False,
         split_forward_count: int = 1,
     ) -> ModelRunnerOutput:
+        # gdn_mtp_cache_mode=none: the side-stream accepted-state recovery is a
+        # second writer of the state pool and a reader of the per-layer conv/a-b
+        # stash, so this forward must join it BEFORE it dispatches anything -- the
+        # decode-graph branch below returns early, and this forward's deferred
+        # CoW/clear can zero or copy a slot the recovery is still committing (a
+        # request that finished last step has its accepted state written by the
+        # recovery and its slot can already be handed to this batch). This is the
+        # one consuming join point: metadata preparation cannot own it, because
+        # SGLANG_ENABLE_METADATA_GLUE_GRAPH captures that prep and replays it
+        # without the Python join (see HybridLinearAttnBackend.drain_pending_recovery).
+        self.attn_backend.drain_pending_recovery()
         prepare = getattr(self.model, "prepare_for_forward", None)
         if prepare is not None:
             prepare(forward_batch)
@@ -2112,16 +2123,9 @@ class ModelRunner:
             # and the collectives depend on.
             self._prepare_eager_forward_batch(forward_batch)
 
-            # gdn_mtp_cache_mode=none: a side-stream accepted-state recovery is a
-            # second writer of the state pool, and this forward's deferred CoW/clear
-            # can zero or copy a slot that recovery is still committing (a request
-            # that finished last step has its accepted state written by the recovery,
-            # and its slot can already be handed to this batch). Join before the pool
-            # is touched; the init_forward_metadata joins cover the graph paths, run
-            # later than here on the eager one.
-            self.attn_backend.drain_pending_recovery()
             # Deferred mamba COW/clear on the forward stream, before the extend
-            # dispatch below reads the pool.
+            # dispatch below reads the pool. The recovery join above is what makes
+            # this safe for a slot the recovery is still committing.
             self._maybe_execute_deferred_mamba_cow_and_clear(forward_batch)
 
             dwdp_mgr = get_global_dwdp_manager()

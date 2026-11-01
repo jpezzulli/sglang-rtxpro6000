@@ -1310,10 +1310,16 @@ class HybridLinearAttnBackend(AttentionBackend):
         self._recovery_stream_ctx = torch.cuda.stream(self._recovery_stream)
 
     def _wait_recovery_if_pending(self):
-        """Join the side-stream gdn_mtp_cache_mode=none SSM recovery before a
-        target forward reads the SSM pool. The wait also prevents the upcoming
-        forward from overwriting the per-layer recovery stash while the
-        side-stream recovery is still reading it."""
+        """Join the side-stream gdn_mtp_cache_mode=none SSM recovery into the current
+        (compute) stream before this forward reads the SSM pool or writes the conv /
+        a-b stash. The wait also prevents the upcoming forward from overwriting the
+        per-layer recovery stash while the side-stream recovery is still reading it.
+
+        Reached only from ``drain_pending_recovery``, i.e. only from uncaptured host
+        code at a forward's dispatch seam or at backend retirement -- never from
+        metadata preparation, which can be captured, replayed or planned on another
+        stream.
+        """
         if self._recovery_event_pending:
             # Event.wait() with no stream defaults to the current stream inside
             # C++ -- same ordering as current_stream().wait_event(event), without
@@ -1348,14 +1354,26 @@ class HybridLinearAttnBackend(AttentionBackend):
     def drain_pending_recovery(self) -> None:
         """Join a side-stream recovery that no forward has joined yet.
 
-        The join normally happens in ``init_forward_metadata*`` of THIS wrapper
-        and only there. A speculative width switch replaces the whole backend
-        set, so after a switch the incoming backend's first target forward has
-        no reason to look at the outgoing one's ``_recovery_event_pending`` --
-        and that still-running recovery reads the SSM pool (one allocation every
-        state's backend addresses) exactly where the new state's forward writes.
-        Whoever retires a backend therefore drains it first; the SSM/KV pools
-        stay shared, only the join is ordered.
+        This is the ONE consuming join point, and it sits on the uncaptured
+        dispatch seam of a forward (``ModelRunner._forward_raw``, before the
+        cuda-graph branch) rather than in metadata preparation. Preparation is
+        the wrong owner twice over: ``SGLANG_ENABLE_METADATA_GLUE_GRAPH``
+        captures ``init_forward_metadata_out_graph`` into a graph and then
+        REPLAYS it, so the Python join neither runs on the steps that matter nor
+        survives recording (a recorded ``cudaStreamWaitEvent`` on an event
+        recorded outside the graph freezes the dependency at capture time), and
+        planning/capture on a side stream would otherwise clear the pending flag
+        before the forward takes ownership of the ordering. See
+        ``MetadataGlueGraph.run``: after the first capture it only reinstalls
+        metadata and replays device ops.
+
+        A speculative width switch replaces the whole backend set, so after a
+        switch the incoming backend's first target forward has no reason to look
+        at the outgoing one's ``_recovery_event_pending`` -- and that
+        still-running recovery reads the SSM pool (one allocation every state's
+        backend addresses) exactly where the new state's forward writes. Whoever
+        retires a backend therefore drains it first; the SSM/KV pools stay
+        shared, only the join is ordered.
         """
         self._wait_recovery_if_pending()
 
@@ -1396,8 +1414,10 @@ class HybridLinearAttnBackend(AttentionBackend):
         forward_batch: ForwardBatch,
         in_capture: bool = False,
     ):
-        if not in_capture:
-            self._wait_recovery_if_pending()
+        # Deliberately no recovery join here: this prep is exactly what the
+        # metadata glue graph captures and replays, so a join would be recorded
+        # once (and then wait on nothing) or skipped entirely. The consuming wait
+        # is at the forward dispatch seam -- see drain_pending_recovery.
         for attn_backend in self.attn_backend_list:
             attn_backend.init_forward_metadata_out_graph(
                 forward_batch, in_capture=in_capture
@@ -1482,7 +1502,10 @@ class HybridLinearAttnBackend(AttentionBackend):
             # linear/mamba metadata (it requires query_start_loc).
             self.full_attn_backend.init_forward_metadata(forward_batch)
             return
-        self._wait_recovery_if_pending()
+        # Same reason as in init_forward_metadata_out_graph: preparation, in any
+        # variant, is not allowed to consume the recovery join. It may be captured
+        # (breakable/capturable prep), it may run on the plan stream, and the
+        # caller that dispatches the forward has already joined at its seam.
         for attn_backend in self.attn_backend_list:
             attn_backend.init_forward_metadata(forward_batch)
 
