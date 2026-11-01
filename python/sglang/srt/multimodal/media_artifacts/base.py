@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any, Optional, Protocol, get_args, get_type_hints, runtime_checkable
 
 import numpy as np
 import torch
@@ -41,6 +41,14 @@ from sglang.srt.multimodal.cache import (
     media_preprocess_kwargs,
     parse_content_hash,
     snapshot_media,
+)
+from sglang.srt.multimodal.cache.identity import (
+    build_artifact_configuration,
+    snapshot_witness,
+)
+from sglang.srt.multimodal.cache.shared_preprocess_cache import (
+    SharedCacheRequest,
+    SharedPreprocessCache,
 )
 from sglang.srt.utils import load_image
 
@@ -147,7 +155,7 @@ class MediaArtifactCacheMixin:
         """
         if modality != Modality.IMAGE:
             raise NotImplementedError(
-                f"{modality.name.lower()} artifact decoding " "requires a model adapter"
+                f"{modality.name.lower()} artifact decoding requires a model adapter"
             )
         data = snapshot.data
         if isinstance(data, torch.Tensor):
@@ -159,7 +167,10 @@ class MediaArtifactCacheMixin:
             return data
         image, _ = load_image(data, self.gpu_image_decode)
         if isinstance(image, Image.Image):
-            image.load()
+            try:
+                image.load()
+            except OSError as error:
+                raise ValueError(f"Could not decode image: {error}") from error
         return image
 
     def snapshot_media_source(self, source: Any, modality: Modality) -> MediaSnapshot:
@@ -171,7 +182,7 @@ class MediaArtifactCacheMixin:
         """
         if modality != Modality.IMAGE:
             raise NotImplementedError(
-                f"{modality.name.lower()} artifact identity " "requires a model adapter"
+                f"{modality.name.lower()} artifact identity requires a model adapter"
             )
         return snapshot_media(source)
 
@@ -293,6 +304,11 @@ class MediaArtifactCacheMixin:
         if len(featureless_hit_mask) != media_count:
             raise ValueError("featureless_hit_mask must align with media_data")
 
+        if isinstance(self.mm_preprocess_cache, SharedPreprocessCache):
+            return await self._prepare_shared_artifacts(
+                media_data, content_hashes, modality
+            )
+
         # keep per-input state aligned for duplicates and partial hits
         artifacts: list[Optional[MediaArtifact]] = [None] * media_count
         snapshots: list[Optional[MediaSnapshot]] = [None] * media_count
@@ -411,6 +427,134 @@ class MediaArtifactCacheMixin:
         if any(artifact is None for artifact in artifacts):
             raise RuntimeError("Artifact cache did not resolve every media item")
         return [artifact for artifact in artifacts if artifact is not None]
+
+    async def _prepare_shared_artifacts(self, media_data, content_hashes, modality):
+        generation = self.mm_preprocess_cache.cache_info()["generation"]
+        description = self.processor_fingerprint_description
+        artifact_type = get_args(get_type_hints(self.prepare_artifact_batch)["return"])[
+            0
+        ]
+        futures = [
+            self.io_executor.submit(self.snapshot_media_source, source, modality)
+            for source in media_data
+        ]
+        snapshots = [await asyncio.wrap_future(future) for future in futures]
+        requests = []
+        for index, (source, snapshot, caller_hash) in enumerate(
+            zip(media_data, snapshots, content_hashes)
+        ):
+            if caller_hash is not None and caller_hash != snapshot.content_digest:
+                raise ValueError(f"content hash mismatch for media_data[{index}]")
+            requests.append(
+                SharedCacheRequest(
+                    self._artifact_key(
+                        snapshot.content_digest, source, modality=modality
+                    ),
+                    snapshot_witness(snapshot),
+                    build_artifact_configuration(
+                        description,
+                        modality.name.lower(),
+                        self.artifact_preprocess_kwargs(source, modality),
+                    ),
+                )
+            )
+
+        async def compute(indices):
+            entries = []
+            for index in indices:
+                media = await asyncio.wrap_future(
+                    self.io_executor.submit(
+                        self.decode_media_snapshot, snapshots[index], modality
+                    )
+                )
+                entries.append(
+                    MediaArtifactInput(
+                        snapshots[index].content_digest,
+                        requests[index].key,
+                        modality,
+                        media,
+                    )
+                )
+            artifacts = await self._run_preprocess_and_build_artifact_batch(entries)
+            if len(artifacts) != len(entries):
+                raise ValueError(
+                    "prepare_artifact_batch must return one artifact per cache miss"
+                )
+            for artifact, entry in zip(artifacts, entries):
+                self.validate_artifact(artifact, entry)
+            return artifacts
+
+        artifacts = await self.mm_preprocess_cache.resolve_many(
+            requests, compute, artifact_type=artifact_type, generation=generation
+        )
+        for artifact, snapshot, request in zip(artifacts, snapshots, requests):
+            self.validate_artifact(
+                artifact,
+                MediaArtifactInput(
+                    snapshot.content_digest, request.key, modality, None
+                ),
+            )
+        return artifacts
+
+    async def prepare_media_artifacts_without_cache(
+        self,
+        media_data: Sequence[Any],
+        *,
+        content_hashes: Optional[Sequence[Optional[str]]] = None,
+        modality: Optional[Modality] = None,
+    ) -> list[MediaArtifact]:
+        """Build request-local artifacts without cache lookup or retention."""
+        modality = self._resolve_artifact_modality(modality)
+        media_count = len(media_data)
+        if content_hashes is None:
+            content_hashes = [None] * media_count
+        if len(content_hashes) != media_count:
+            raise ValueError(
+                f"mm_content_hashes has {len(content_hashes)} entries for "
+                f"{media_count} {modality.name.lower()} items"
+            )
+        content_hashes = [parse_content_hash(value) for value in content_hashes]
+
+        snapshot_futures = [
+            self.io_executor.submit(self.snapshot_media_source, source, modality)
+            for source in media_data
+        ]
+        snapshots = []
+        for index, future in enumerate(snapshot_futures):
+            snapshot = await asyncio.wrap_future(future)
+            caller_hash = content_hashes[index]
+            if caller_hash is not None and caller_hash != snapshot.content_digest:
+                raise ValueError(
+                    f"content hash mismatch for media_data[{index}]: "
+                    f"expected {caller_hash}, got {snapshot.content_digest}"
+                )
+            snapshots.append(snapshot)
+
+        decode_futures = [
+            self.io_executor.submit(self.decode_media_snapshot, snapshot, modality)
+            for snapshot in snapshots
+        ]
+        entries = []
+        for source, snapshot, future in zip(media_data, snapshots, decode_futures):
+            entries.append(
+                MediaArtifactInput(
+                    content_digest=snapshot.content_digest,
+                    artifact_key=self._artifact_key(
+                        snapshot.content_digest, source, modality=modality
+                    ),
+                    modality=modality,
+                    media=await asyncio.wrap_future(future),
+                )
+            )
+
+        artifacts = await self._run_preprocess_and_build_artifact_batch(entries)
+        if len(artifacts) != len(entries):
+            raise ValueError(
+                "prepare_artifact_batch must return one artifact per media input"
+            )
+        for artifact, entry in zip(artifacts, entries):
+            self.validate_artifact(artifact, entry)
+        return artifacts
 
     async def _compute_cache_misses(
         self,
