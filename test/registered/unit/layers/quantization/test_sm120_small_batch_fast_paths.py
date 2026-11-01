@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1010,8 +1011,12 @@ def _load_gpu_coverage_module():
     try:
         spec = importlib.util.spec_from_file_location("sm120_gemv_tests", path)
         module = importlib.util.module_from_spec(spec)
+        # Registered before execution: inspect.getsource resolves a class back to
+        # its file through sys.modules, and the coverage checks below read source.
+        sys.modules[spec.name] = module
         spec.loader.exec_module(module)
     except ModuleNotFoundError as err:
+        sys.modules.pop(spec.name, None)
         pytest.skip(f"GPU coverage needs an optional dependency ({err.name})")
     return module
 
@@ -1055,6 +1060,145 @@ def test_the_w8a8_fallback_oracle_reads_both_scale_axes_independently():
         ),
         expected[:1],
     )
+
+
+def test_the_row_parallel_fake_carries_every_field_the_fused_caller_reads():
+    """The fused-norm caller reads shard metadata straight off the out_proj.
+
+    It does so with plain attribute access -- deliberately, so a layer it cannot
+    fully reason about raises instead of quietly fusing through a half-known
+    layout -- which means a test fake that omits one field fails on hardware
+    rather than declining.  Pinned statically, so that class of mistake is CPU
+    evidence: every field the consumer reads must be one the fixture assigns the
+    way ``RowParallelLinear.__init__`` does.
+    """
+    import inspect
+    import re
+
+    qwen3_5 = _require_port("sglang.srt.models.qwen3_5")
+    tests = _load_gpu_coverage_module()
+
+    def code_of(obj):
+        """Source with comments dropped, so a mention is not an assignment."""
+        return "".join(
+            "" if line.lstrip().startswith("#") else line.split("#", 1)[0] + "\n"
+            for line in inspect.getsource(obj).splitlines(keepends=True)
+        )
+
+    consumer = code_of(qwen3_5.Qwen3_5GatedDeltaNet._norm_out_proj_fused)
+    reads = set(re.findall(r"self\.out_proj\.(\w+)", consumer)) | set(
+        re.findall(r'getattr\(self\.out_proj,\s*"(\w+)"', consumer)
+    )
+    assigned = set(re.findall(r"self\.(\w+)\s*=", code_of(tests._Projection)))
+    assert reads, "the consumer stopped reading out_proj metadata"
+    assert not reads - assigned, f"fake out_proj is missing {sorted(reads - assigned)}"
+    # The refusal coverage is what keeps the guards honest, so the fake has to
+    # declare the biased/sharded cases it is asked about, not just the happy one.
+    assert {"bias", "use_decode_attn_tp"} <= assigned
+
+
+def test_the_fused_norm_caller_decides_everything_it_can_on_cpu(monkeypatch):
+    """The fused/fallback decision, up to the line that launches a kernel.
+
+    Every guard ``_norm_out_proj_fused`` applies before the GEMV prologue is an
+    attribute or shape test, so the refusals and the ``[tokens, num_v_heads x
+    head_v_dim]`` reading are checkable without hardware -- the three SM120 cases
+    that failed on a fake's missing metadata fail here first now.  Only the fused
+    kernel's arithmetic is left to the GPU file.
+    """
+    qwen3_5 = _require_port("sglang.srt.models.qwen3_5")
+    monkeypatch.setattr(qwen3_5, "_is_cuda", True)
+    g, heads, tokens = 8, 4, 2
+
+    class _Method:
+        def __init__(self):
+            self.calls = []
+
+        def apply_norm_gated(self, *args):
+            self.calls.append(args)
+            return "fused"
+
+    method = _Method()
+    layer = SimpleNamespace(
+        quant_method=method,
+        input_size=g * heads,
+        input_size_per_partition=g * heads,
+        output_size=16,
+        output_size_per_partition=16,
+        logical_widths=[16],
+        with_bias=False,
+        bias=None,
+        input_is_parallel=False,
+        reduce_results=True,
+        use_decode_attn_tp=False,
+    )
+    norm = SimpleNamespace(
+        group_size=None,
+        norm_before_gate=True,
+        bias=None,
+        weight=torch.ones(g),
+        eps=1e-6,
+        activation="swish",
+    )
+    fake = SimpleNamespace(head_v_dim=g, out_proj=layer, norm=norm)
+    x = torch.zeros(tokens * heads, g, dtype=torch.bfloat16)
+    shape = (tokens, heads, g)
+    monkeypatch.setenv("SGLANG_NORM_INTO_GEMV", "1")
+
+    fused = qwen3_5.Qwen3_5GatedDeltaNet._norm_out_proj_fused(fake, x, x, shape)
+    assert fused == "fused", "a faithful single-rank biased-free out_proj fuses"
+    _, a, z, norm_weight, group, eps, sigmoid = method.calls[0]
+    # Both operands are re-viewed as one GEMV row per token, and one norm group
+    # per contiguous head_v_dim slice of it.
+    assert tuple(a.shape) == tuple(z.shape) == (tokens, heads * g)
+    assert group == g and norm_weight.shape == (g,) and eps == 1e-6
+    assert sigmoid is False
+
+    def declines(target, **overrides):
+        previous = {name: getattr(target, name, None) for name in overrides}
+        try:
+            for name, value in overrides.items():
+                setattr(target, name, value)
+            before = len(method.calls)
+            assert (
+                qwen3_5.Qwen3_5GatedDeltaNet._norm_out_proj_fused(fake, x, x, shape)
+                is None
+            ), overrides
+            assert len(method.calls) == before, "a declined call reached the kernel"
+        finally:
+            for name, value in previous.items():
+                setattr(target, name, value)
+
+    declines(layer, input_size=g * heads * 2)  # a row-parallel shard: partial dot
+    declines(layer, use_decode_attn_tp=True)
+    declines(layer, bias=torch.zeros(1))
+    declines(norm, group_size=g)
+    declines(norm, norm_before_gate=False)
+    declines(norm, activation="gelu")
+    declines(norm, weight=torch.ones(g, 1))
+    assert (
+        qwen3_5.Qwen3_5GatedDeltaNet._norm_out_proj_fused(
+            fake, x, x, (tokens, heads, g, 1)
+        )
+        is None
+    )
+    assert (
+        qwen3_5.Qwen3_5GatedDeltaNet._norm_out_proj_fused(
+            fake,
+            torch.zeros(tokens * heads + 8, g, dtype=torch.bfloat16),
+            torch.zeros(tokens * heads + 8, g, dtype=torch.bfloat16),
+            shape,
+        )
+        is None
+    ), "a padded or strided z breaks the one-group-per-row reading"
+
+    norm.activation = "sigmoid"
+    qwen3_5.Qwen3_5GatedDeltaNet._norm_out_proj_fused(fake, x, x, shape)
+    assert method.calls[-1][-1] is True
+    with envs.SGLANG_NORM_INTO_GEMV.override(False):
+        assert (
+            qwen3_5.Qwen3_5GatedDeltaNet._norm_out_proj_fused(fake, x, x, shape) is None
+        ), "the switch is re-read per call"
 
 
 # --------------------------------------------------------------------------- #

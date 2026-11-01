@@ -265,9 +265,24 @@ class _Projection(nn.Module):
             requires_grad=False,
         )
         self.quant_method = UnquantizedLinearMethod()
-        self.output_size_per_partition = out_features
+        # The identity a bias-free, single-rank RowParallelLinear carries.  The
+        # fused-norm caller reads shard metadata directly -- no getattr fallback
+        # to satisfy a fake -- so an omitted field here raises AttributeError on
+        # hardware instead of declining the fusion; the pinned mirror of
+        # ``RowParallelLinear.__init__`` keeps one missing field from becoming a
+        # another GPU round-trip (see the CPU coverage file).
+        self.input_size = in_features
+        self.output_size = out_features
         self.input_size_per_partition = in_features
+        self.output_size_per_partition = out_features
         self.logical_widths = [out_features]
+        self.with_bias = False
+        self.bias = None
+        self.input_is_parallel = False
+        self.reduce_results = True
+        # RowParallelLinear's own default; a decode-attention-TP shard flips it
+        # and the fusion must decline that layer.
+        self.use_decode_attn_tp = False
 
 
 @pytest.fixture(scope="module")
