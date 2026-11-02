@@ -1,6 +1,6 @@
 import logging
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Union
 
 import torch
 
@@ -43,6 +43,23 @@ if TYPE_CHECKING:
 
 ATTENTION_BACKENDS = {}
 HYBRID_GDN_SM100_BACKENDS = {"triton", "trtllm_mha", "fa4", "flashinfer"}
+
+
+def qsa_replaces_full_attention_backend(runner: "ModelRunner") -> bool:
+    """Whether the hybrid-GDN branch of ``attn_backend_wrapper`` builds QSA
+    for this runner's full-attention layers and discards whatever the
+    resolved backend string constructed.
+
+    Single definition of the replacement decision, consulted by the wrapper
+    itself and by the setup dispatch when it decides whether the FlashInfer
+    construction may be skipped; a broad model-selection predicate lives
+    here once rather than at both call sites.
+    """
+    from sglang.srt.layers.attention.qsa.config import is_qwen_qsa
+
+    return hybrid_gdn_config(runner.model_config) is not None and is_qwen_qsa(
+        runner.model_config.hf_config
+    )
 
 
 def register_attention_backend(name):
@@ -376,10 +393,21 @@ def create_minicpm_flashinfer_backend(runner):
     return MiniCPMSparseBackend(runner, use_flashinfer=True)
 
 
-def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBackend"):
+def attn_backend_wrapper(
+    runner: "ModelRunner",
+    full_attn_backend: Union["AttentionBackend", Callable[[], "AttentionBackend"]],
+):
     """
     Wrapper for special models like hybrid GDN, so we don't
     need to change the code of the original attention backend.
+
+    ``full_attn_backend`` may be a zero-argument builder for the resolved
+    full-attention backend -- the setup dispatch only defers it in the
+    proven QSA-discard domain (see ``qsa_replaces_full_attention_backend``
+    and ``attention_backend_setup._build_backend_from_str``). Every site
+    that keeps the backend materializes it; the QSA replacement is the one
+    branch that may discard an unbuilt one, and no other backend's eager
+    construction, ordering, warnings or rejections change.
     """
     assert not (
         hybrid_gdn_config(runner.model_config) is not None and runner.use_mla_backend
@@ -391,9 +419,14 @@ def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBac
         uses_minimax_m3_nvfp4_native_stack,
     )
 
+    def _materialize() -> "AttentionBackend":
+        # AttentionBackend instances are not callable; a callable here is
+        # the deferred FlashInfer builder, nothing else.
+        return full_attn_backend() if callable(full_attn_backend) else full_attn_backend
+
     if isinstance(runner.model_config.hf_text_config, Dots3Config):
         return runner.model_config.hf_text_config.wrap_attention_backend(
-            runner, full_attn_backend
+            runner, _materialize()
         )
 
     if is_minimax_sparse(runner.model_config.hf_config):
@@ -410,7 +443,7 @@ def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBac
 
         sparse_backend = MiniMaxSparseAttnBackend(runner)
         return MiniMaxHybridAttnBackend(
-            full_attn_backend, sparse_backend, sparse_backend.sparse_layer_ids
+            _materialize(), sparse_backend, sparse_backend.sparse_layer_ids
         )
 
     if cfg := mambaish_config(runner.model_config):
@@ -425,7 +458,7 @@ def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBac
             )
 
             return InklingShortConvHybridAttnBackend(
-                full_attn_backend,
+                _materialize(),
                 InklingShortConvAttnBackend(runner),
                 cfg.full_attention_layer_ids,
             )
@@ -507,9 +540,8 @@ def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBac
                 )
             logger.info(f"Using hybrid linear attention backend for hybrid GDN models.")
             linear_attn_backend = GDNAttnBackend(runner)
-            from sglang.srt.layers.attention.qsa.config import is_qwen_qsa
 
-            if is_qwen_qsa(runner.model_config.hf_config):
+            if qsa_replaces_full_attention_backend(runner):
                 from sglang.srt.layers.attention.qwen_sparse_attn_backend import (
                     QwenSparseAttnBackend,
                 )
@@ -593,11 +625,16 @@ def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBac
             full_attn_layers = [0]
         else:
             full_attn_layers = cfg.full_attention_layer_ids
+        # A deferred builder is only deferred while this branch replaces the
+        # full-attention side with QSA; every other path keeps the backend
+        # and materializes it here, eagerly as before. (The split
+        # prefill/decode dispatch hands in a built HybridAttnBackend.)
+        full_attn_backend = _materialize()
         return hybrid_backend_cls(
             full_attn_backend, linear_attn_backend, full_attn_layers
         )
 
-    return full_attn_backend
+    return _materialize()
 
 
 @register_attention_backend("intel_xpu")

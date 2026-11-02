@@ -9,6 +9,7 @@ from sglang.srt.environ import envs
 from sglang.srt.layers.attention.attention_registry import (
     ATTENTION_BACKENDS,
     attn_backend_wrapper,
+    qsa_replaces_full_attention_backend,
 )
 from sglang.srt.layers.attention.tbo_backend import TboAttnBackend
 from sglang.srt.runtime_context import get_parallel, get_platform
@@ -217,13 +218,10 @@ def _build_resolved_backend(
     init_new_workspace: bool,
 ) -> AttentionBackend:
     if resolved.is_draft_override:
-        attn_backend = attn_backend_wrapper(
-            model_runner,
-            _build_full_attention_backend_from_str(
-                model_runner=model_runner,
-                backend_str=resolved.prefill,
-                init_new_workspace=init_new_workspace,
-            ),
+        attn_backend = _build_backend_from_str(
+            model_runner=model_runner,
+            backend_str=resolved.prefill,
+            init_new_workspace=init_new_workspace,
         )
     elif resolved.decode != resolved.prefill:
         if get_platform().is_sail:
@@ -266,14 +264,64 @@ def _build_resolved_backend(
             "The feature of hybrid attention backend is experimental and unstable. Please raise an issue if you encounter any problem."
         )
     else:
-        full = _build_full_attention_backend_from_str(
+        attn_backend = _build_backend_from_str(
             model_runner=model_runner,
             backend_str=resolved.prefill,
             init_new_workspace=init_new_workspace,
         )
-        _require_dcp_target_verify(model_runner, full)
-        attn_backend = attn_backend_wrapper(model_runner, full)
     return attn_backend
+
+
+def _build_backend_from_str(
+    *, model_runner: ModelRunner, backend_str: str, init_new_workspace: bool
+) -> AttentionBackend:
+    if (
+        backend_str == "flashinfer"
+        and qsa_replaces_full_attention_backend(model_runner)
+        and not _dcp_target_verify_guarded(model_runner)
+    ):
+        # The one proven discard: attn_backend_wrapper will replace the
+        # full-attention side with QwenSparseAttnBackend (the decision is
+        # the shared qsa_replaces_full_attention_backend selector, checked
+        # again at its own site in the wrapper), and the FlashInfer
+        # constructor would only pin its 384 MiB device workspace (or a
+        # private one under init_new_workspace) for a backend nobody keeps.
+        # The wrapper has no pre-construction rejection to lose here: the
+        # flashinfer factory's preamble only selects the MHA vs MLA class,
+        # and the wrapper's own hybrid+MLA assert (which the base hit after
+        # construction) still fires identically before anything is built.
+        # The DCP guard is inert for this runner, so skipping the build
+        # cannot evade it: where it governs, the backend stays eager below
+        # and still answers it. Every other backend string -- dsa, nsa,
+        # hpc_ops, the MLA-only trio, triton, fa3, ... -- takes the
+        # untouched eager path, keeping constructor ordering, warnings and
+        # registered incompatibility errors exactly as on the base. The
+        # split prefill/decode composition likewise keeps eager children.
+        model_runner.init_new_workspace = init_new_workspace
+        full_attn_backend = lambda: ATTENTION_BACKENDS["flashinfer"](model_runner)
+    else:
+        full_attn_backend = _build_full_attention_backend_from_str(
+            model_runner=model_runner,
+            backend_str=backend_str,
+            init_new_workspace=init_new_workspace,
+        )
+    # Same build -> guard -> wrap order as the base single-backend path; the
+    # guard returns before touching the deferred builder (see above).
+    _require_dcp_target_verify(model_runner, full_attn_backend)
+    return attn_backend_wrapper(model_runner, full_attn_backend)
+
+
+def _dcp_target_verify_guarded(model_runner: ModelRunner) -> bool:
+    """Whether :func:`_require_dcp_target_verify` inspects a runner's verify
+    backend, as opposed to returning early. The deferred FlashInfer builder
+    is only handed to an inert guard, so the skip never hides a rejection.
+    """
+    return not (
+        model_runner.is_draft_worker
+        or model_runner.spec_algorithm.is_none()
+        or not get_parallel().dcp_enabled
+        or not get_memory().enable_unified_memory
+    )
 
 
 def _require_dcp_target_verify(
@@ -283,12 +331,7 @@ def _require_dcp_target_verify(
     each rank's shard of DCP-widened pages and merges across ranks. The backend
     that runs it, as speculative_attention_mode selects, must declare that it
     can; one that cannot would fail at the first verify."""
-    if (
-        model_runner.is_draft_worker
-        or model_runner.spec_algorithm.is_none()
-        or not get_parallel().dcp_enabled
-        or not get_memory().enable_unified_memory
-    ):
+    if not _dcp_target_verify_guarded(model_runner):
         return
     if not verify_backend.supports_dcp_target_verify:
         raise ValueError(
