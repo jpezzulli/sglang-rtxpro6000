@@ -1472,6 +1472,32 @@ class _HCNorms:
     output: Optional[torch.Tensor] = None
 
 
+def _configure_rowwise_fp8(config) -> bool:
+    """Resolve the process-wide online rowwise-FP8 switch for this launch.
+
+    Automatic selection (no launch flag required, exact SM120 plus recognized
+    Flash-Next metadata, never a directory name) resolved from the ACTUAL
+    loaded configuration and the device this model is being built on; see
+    ``sglang.kernels.ops.gemm.sm120_online_fp8`` for the representation.
+    Idempotent, and it must run before the first mixer is constructed with
+    the HC opt-in: a mixer decides at construction whether its mix weights are
+    meta-born and ingest-quantized or stay plain BF16, and that decision is
+    this switch.
+    """
+    from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+        checkpoint_eligible,
+        configure_online_fp8,
+    )
+
+    cuda_available = torch.cuda.is_available()
+    return configure_online_fp8(
+        envs.SGLANG_SM120_ONLINE_MXFP8.get(),
+        cuda_available=cuda_available,
+        capability=(torch.cuda.get_device_capability() if cuda_available else None),
+        model_eligible=checkpoint_eligible(config, torch.get_default_dtype()),
+    )
+
+
 def _has_ple(layer_id, config) -> bool:
     return (layer_id + 1) in config.ple_layer_ids
 
@@ -1599,15 +1625,22 @@ class Qwen4ExpLayerExtensionMixin:
             rms_norm_eps=config.rms_norm_eps,
             hc_per_branch_norm=True,
         )
+        # The mixers resolve the FP8 decision at construction, so the launch
+        # switch is published here; the install hook below re-reads the one
+        # decision. This model is the only source that asks for HC rowwise
+        # FP8 -- any other model or hardware keeps the plain BF16 mixers.
+        _configure_rowwise_fp8(config)
         self.attn_hyper_connection = GatedResidual(
             hc_config,
             use_mix=True,
             use_combine=True,
+            online_fp8=True,
         )
         self.mlp_hyper_connection = GatedResidual(
             hc_config,
             use_mix=True,
             use_combine=True,
+            online_fp8=True,
         )
         self.attn_boundary, self.ffn_boundary = _build_qwen4_exp_stages(
             config,
@@ -1638,25 +1671,13 @@ class Qwen4ExpLayerExtensionMixin:
         ``sglang.kernels.ops.gemm.sm120_online_fp8`` for the representation.
         """
         from sglang.kernels.ops.gemm.sm120_online_fp8 import (
-            checkpoint_eligible,
-            configure_online_fp8,
             install_rowwise_fp8_on_eligible_linears,
         )
         from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 
-        cuda_available = torch.cuda.is_available()
         self._online_fp8_linears = install_rowwise_fp8_on_eligible_linears(
             self,
-            enabled=configure_online_fp8(
-                envs.SGLANG_SM120_ONLINE_MXFP8.get(),
-                cuda_available=cuda_available,
-                capability=(
-                    torch.cuda.get_device_capability() if cuda_available else None
-                ),
-                model_eligible=checkpoint_eligible(
-                    self.config, torch.get_default_dtype()
-                ),
-            ),
+            enabled=_configure_rowwise_fp8(self.config),
             # Routers and PLE keep the representation they were configured with;
             # online FP8 is bounded to the transformer projections.
             excluded_module_type=(FusedMoE, Qwen4ExpPLELayer),
@@ -2097,8 +2118,13 @@ class Qwen4ExpModel(Qwen3_5ForCausalLM):
             rms_norm_eps=config.rms_norm_eps,
             hc_per_branch_norm=True,
         )
+        # Same decision as the per-layer mixers, published before construction
+        # (the MTP draft's backbone reaches this through the identical class,
+        # so target and draft quantize their mix weights the same way or not
+        # at all).
+        _configure_rowwise_fp8(config)
         self.hyper_connection_mixer = (
-            GatedResidual(hc_config, use_combine=False)
+            GatedResidual(hc_config, use_combine=False, online_fp8=True)
             if self.pp_group.is_last_rank
             else PPMissingLayer()
         )
@@ -2337,12 +2363,38 @@ class Qwen4ExpForConditionalGeneration(Qwen3VLForConditionalGeneration):
             online_fp8_enabled,
             otherwise_unquantized,
             replace_linear_weight_rowwise_fp8,
+            rowwise_scale_of,
         )
 
+        if not online_fp8_enabled():
+            return
+        # Every mixer that opted into meta-born FP8 must have met its
+        # checkpoint shard: an ingested Parameter carries its row scale, and a
+        # mix weight still on meta is a weight name the loader never reached
+        # (an HC weight is never half-copied, so BF16 residue is a missing
+        # load, not a partial one). Fail the boot instead of serving E4M3-less
+        # magnitudes, then let the head take its own converted state.
+        hc_weights = 0
+        for module in self.modules():
+            if not isinstance(module, GatedResidual) or not getattr(
+                module, "_online_fp8_mix", False
+            ):
+                continue
+            for mixer_name in ("input_mix_weight_down", "input_mix_weight_up"):
+                weight = getattr(module, mixer_name).weight
+                if rowwise_scale_of(weight) is None:
+                    raise RuntimeError(
+                        "Flash-Next online FP8 HyperConnection weight is missing "
+                        "its rowwise scale after load"
+                    )
+                hc_weights += 1
+        logger.info(
+            "Flash-Next rowwise FP8 HyperConnection mix weights ready: %d; GDN "
+            "recurrent-state allocation remains unchanged",
+            hc_weights,
+        )
         head = getattr(self, "lm_head", None)
         if head is None or not self.pp_group.is_last_rank:
-            return
-        if not online_fp8_enabled():
             return
         if not otherwise_unquantized(head):
             logger.info(

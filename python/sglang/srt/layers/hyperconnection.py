@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from sglang.kernels.ops.gemm.hc_mix import fused_hc_mix, fused_hc_mix_supported
+from sglang.srt.layers.hc_mix2_triton import hc_norm_mix2, hc_norm_mix2_supported
 from sglang.srt.layers.hc_mix_flydsl import (
     flydsl_hc_mix_supported,
     flydsl_hc_mix_weights_supported,
@@ -130,6 +131,7 @@ class GatedResidual(HyperConnectionBase):
         use_mix: bool = True,
         use_combine: bool = True,
         role: Optional[str] = None,
+        online_fp8: bool = False,
     ):
         super().__init__(config, use_mix, use_combine, role)
 
@@ -146,18 +148,37 @@ class GatedResidual(HyperConnectionBase):
         )
 
         if use_mix:
+            # Opt-in per model, resolved per launch: only a source that runs
+            # the accepted rowwise-FP8 reader may pass online_fp8, and only an
+            # eligible launch (exact SM120, recognized Flash-Next checkpoint)
+            # turns it on.  Everything else keeps the plain BF16 mix weights.
+            from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+                attach_rowwise_ingest,
+                online_fp8_enabled,
+            )
+
+            rowwise_mix = online_fp8 and online_fp8_enabled()
+            self._online_fp8_mix = rowwise_mix
             self.input_mix_weight_down = nn.Linear(
                 self.hidden_size * self.hc_count,
                 self.config.hc_lowrank,
                 bias=False,
+                device="meta" if rowwise_mix else None,
                 dtype=config.params_dtype,
             )
             self.input_mix_weight_up = nn.Linear(
                 self.config.hc_lowrank,
                 self.hc_count * self.hidden_size,
                 bias=False,
+                device="meta" if rowwise_mix else None,
                 dtype=config.params_dtype,
             )
+            if rowwise_mix:
+                # Quantize checkpoint shards before they enter device memory;
+                # the resident Parameter remains paired with its row scales.
+                attach_rowwise_ingest(
+                    [self.input_mix_weight_down, self.input_mix_weight_up]
+                )
             lowrank = self.config.hc_lowrank
             self._jit_mix_ok = (
                 torch.cuda.is_available()
@@ -263,6 +284,42 @@ class GatedResidual(HyperConnectionBase):
             )
             return mixed_input, (hyper_input, hyper_input, None)
 
+        # Donor HC MIX2: one launch each for the per-branch norm, the split-K
+        # down projection and the up projection, reading the resident rowwise
+        # FP8 mix weights and their row scales as they stand. Resolved per call
+        # (a weight update replaces Parameter and scales together) and checked
+        # before the separate normalization below, because K0 *is* that
+        # normalization; it hands back the same (hyper_input, normed) residuals
+        # the combine path consumes and supersedes even a caller-prepared norm.
+        # Anything it cannot serve -- wider rows, deterministic inference, TP,
+        # other hardware -- falls through to the untouched paths below.
+        w_down = self.input_mix_weight_down.weight
+        w_up = self.input_mix_weight_up.weight
+        if hc_norm_mix2_supported(
+            hyper_input,
+            self.hc_norm.weight,
+            w_down,
+            w_up,
+            self.hc_count,
+            self.hidden_size,
+        ):
+            mixed_input, hyper_input_normed = hc_norm_mix2(
+                hyper_input,
+                self.hc_norm.weight,
+                self.hc_norm.variance_epsilon,
+                w_down,
+                w_up,
+                self.hc_count,
+                self.hidden_size,
+            )
+            # MIX2 is exact-SM120; the gate-stream partial below is an
+            # SM100-only companion, so this branch never has one.
+            return mixed_input.to(self.params_dtype), (
+                hyper_input,
+                hyper_input_normed,
+                None,
+            )
+
         if normalized_input is not None:
             assert self.config.hc_per_branch_norm
             assert normalized_input.shape == hyper_input.shape
@@ -320,10 +377,29 @@ class GatedResidual(HyperConnectionBase):
                 self.hidden_size,
             ).to(self.params_dtype)
         else:
+            down_weight = self.input_mix_weight_down.weight
+            up_weight = self.input_mix_weight_up.weight
+            if (
+                down_weight.dtype == torch.float8_e4m3fn
+                or up_weight.dtype == torch.float8_e4m3fn
+            ):
+                from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+                    dequantize_rowwise_weight,
+                )
+
+                # Prefill/deterministic execution uses the compiled BF16 path.
+                # Materialize only transient BF16 operands from resident FP8;
+                # no BF16 copy of either weight is kept resident.
+                down_weight = dequantize_rowwise_weight(
+                    down_weight, hyper_input_normed.dtype
+                )
+                up_weight = dequantize_rowwise_weight(
+                    up_weight, hyper_input_normed.dtype
+                )
             mixed_input = self._mix_compute(
                 hyper_input_normed,
-                self.input_mix_weight_down.weight,
-                self.input_mix_weight_up.weight,
+                down_weight,
+                up_weight,
                 self.hc_count,
                 self.hidden_size,
             ).to(self.params_dtype)

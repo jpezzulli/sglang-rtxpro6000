@@ -313,6 +313,120 @@ class TestHeadWeightLifecycle(unittest.TestCase):
         self.assertEqual(tuple(fp8.require_rowwise_scale(weight).shape), (512,))
 
 
+class TestHyperConnectionIngest(unittest.TestCase):
+    """The HyperConnection mix weights' ingest lifecycle (accepted donor port).
+
+    The mix weights are born on meta precisely so their BF16 copy never becomes
+    resident device state: the checkpoint shard is quantized on CPU and only
+    the E4M3 values and their FP32 row scales are transferred. The loader
+    re-attaches itself to each replacement Parameter, so a reload recomputes
+    values and scales together, and row selection moves the pair as one unit.
+    """
+
+    @staticmethod
+    def _meta_linear(rows=2, columns=4):
+        return nn.Linear(columns, rows, bias=False, device="meta", dtype=torch.bfloat16)
+
+    def test_meta_ingest_installs_resident_fp8_parameter_and_scale(self):
+        linear = self._meta_linear()
+        self.assertEqual(
+            fp8.attach_rowwise_ingest([linear], target_device=torch.device("cpu")), 1
+        )
+        loaded = torch.tensor(
+            [[-3.0, -1.0, 1.0, 3.0], [2.0, 2.0, 2.0, 2.0]],
+            dtype=torch.bfloat16,
+        )
+        linear.weight.weight_loader(linear.weight, loaded)
+        self.assertEqual(linear.weight.device.type, "cpu")
+        self.assertEqual(linear.weight.dtype, torch.float8_e4m3fn)
+        torch.testing.assert_close(
+            fp8.dequantize_rowwise_weight(linear.weight), loaded, rtol=0.03, atol=0.03
+        )
+
+    def test_reload_after_ingest_replaces_values_and_scales_together(self):
+        linear = self._meta_linear()
+        fp8.attach_rowwise_ingest([linear], target_device=torch.device("cpu"))
+        first = torch.randn(2, 4, dtype=torch.bfloat16)
+        linear.weight.weight_loader(linear.weight, first)
+        weight = linear.weight
+        stale_scale = fp8.require_rowwise_scale(weight).clone()
+        updated = first * 3
+        linear.weight.weight_loader(linear.weight, updated)
+        self.assertEqual(linear.weight.dtype, torch.float8_e4m3fn)
+        # The module now reads a fresh value/scale pair; the object it replaced
+        # still carries its own pair, and the live scales describe the new rows.
+        self.assertIsNot(linear.weight, weight)
+        torch.testing.assert_close(
+            fp8.dequantize_rowwise_weight(weight), first, rtol=0.03, atol=0.03
+        )
+        torch.testing.assert_close(
+            fp8.dequantize_rowwise_weight(linear.weight), updated, rtol=0.03, atol=0.03
+        )
+        fresh = fp8.require_rowwise_scale(linear.weight)
+        self.assertFalse(torch.allclose(fresh, stale_scale))
+
+    def test_invalid_ingest_inputs_fail_loud(self):
+        linear = self._meta_linear()
+        fp8.attach_rowwise_ingest([linear], target_device=torch.device("cpu"))
+        with self.assertRaisesRegex(RuntimeError, "shape mismatch"):
+            linear.weight.weight_loader(
+                linear.weight, torch.ones(3, 4, dtype=torch.bfloat16)
+            )
+        with self.assertRaisesRegex(RuntimeError, "BF16"):
+            linear.weight.weight_loader(
+                linear.weight, torch.ones(2, 4, dtype=torch.float32)
+            )
+
+    def test_attach_is_all_or_nothing_and_requires_meta_weights(self):
+        meta = self._meta_linear()
+        resident = nn.Linear(4, 2, bias=False, dtype=torch.bfloat16)
+        with self.assertRaisesRegex(RuntimeError, "meta-born"):
+            fp8.attach_rowwise_ingest(
+                [meta, resident], target_device=torch.device("cpu")
+            )
+        # The checkable weight is not half-wired either: a pair either all
+        # ingests or none does.
+        self.assertFalse(hasattr(meta.weight, "weight_loader"))
+        with self.assertRaisesRegex(RuntimeError, "2-D Parameters"):
+            fp8.attach_rowwise_ingest(
+                [
+                    nn.Parameter(
+                        torch.empty(4, device="meta", dtype=torch.bfloat16),
+                        requires_grad=False,
+                    )
+                ]
+            )
+
+    def test_row_selection_after_ingest_carries_matching_scales(self):
+        linear = self._meta_linear(rows=5, columns=4)
+        fp8.attach_rowwise_ingest([linear], target_device=torch.device("cpu"))
+        loaded = torch.arange(20, dtype=torch.bfloat16).reshape(5, 4)
+        linear.weight.weight_loader(linear.weight, loaded)
+        rows = torch.tensor([4, 1, 3])
+        selected = fp8.select_rowwise_weight_rows(linear.weight, rows)
+        self.assertEqual(tuple(selected.shape), (3, 4))
+        self.assertTrue(
+            torch.equal(
+                fp8.require_rowwise_scale(selected),
+                fp8.require_rowwise_scale(linear.weight)[rows],
+            )
+        )
+        # Values and scales moved as one unit: the selected rows dequantize
+        # exactly as the same rows of the ingested weight do.
+        torch.testing.assert_close(
+            fp8.dequantize_rowwise_weight(selected),
+            fp8.dequantize_rowwise_weight(linear.weight)[rows],
+        )
+        # And the pair still describes the checkpoint's own values, within the
+        # E4M3 magnitude a row-wise code can carry.
+        torch.testing.assert_close(
+            fp8.dequantize_rowwise_weight(selected).float(),
+            loaded[rows].float(),
+            rtol=0.07,
+            atol=0.07,
+        )
+
+
 class _FakePostLoadLinear(nn.Module):
     """Stands in for a LinearBase whose FP8 layout the method must verify."""
 

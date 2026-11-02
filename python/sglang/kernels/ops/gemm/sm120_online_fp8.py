@@ -636,6 +636,81 @@ def select_rowwise_weight_rows(
     return selected
 
 
+def _ingest_rowwise_weight(
+    linear: torch.nn.Module,
+    target_device: Optional[torch.device],
+    parameter: torch.Tensor,
+    loaded_weight: torch.Tensor,
+    *args,
+    **kwargs,
+) -> None:
+    """Quantize one checkpoint shard on CPU and make the FP8 pair resident.
+
+    The HyperConnection mix weights are born on meta precisely so their full
+    BF16 copy never becomes resident device state: the shard is quantized to
+    E4M3 with one FP32 scale per output row on CPU, and only the values and
+    scales that stay are transferred.  The loader re-attaches itself to the
+    replacement Parameter, so a reload recomputes values and scales together
+    instead of copying BF16 into FP8 storage next to stale scales.
+    """
+    if parameter.shape != loaded_weight.shape:
+        raise RuntimeError(
+            "SM120 online FP8 checkpoint shape mismatch: "
+            f"expected {tuple(parameter.shape)}, got {tuple(loaded_weight.shape)}"
+        )
+    if loaded_weight.dtype != torch.bfloat16:
+        raise RuntimeError(
+            "SM120 online FP8 HyperConnection ingest requires BF16 checkpoint "
+            f"weights, got {loaded_weight.dtype}"
+        )
+    destination = target_device
+    if destination is None:
+        destination = torch.device("cuda", torch.cuda.current_device())
+    source = (
+        loaded_weight
+        if loaded_weight.device.type == "cpu"
+        else loaded_weight.to(device="cpu")
+    )
+    quantized, scale = quantize_rowwise_fp8(source)
+    new_parameter = torch.nn.Parameter(
+        quantized.to(device=destination), requires_grad=False
+    )
+    _copy_parameter_attrs(parameter, new_parameter)
+    setattr(new_parameter, _SCALE_ATTR, scale.to(device=destination))
+    new_parameter.weight_loader = functools.partial(
+        _ingest_rowwise_weight, linear, target_device
+    )
+    linear.weight = new_parameter
+
+
+def attach_rowwise_ingest(
+    linears: Iterable[torch.nn.Module], *, target_device: Optional[torch.device] = None
+) -> int:
+    """Attach an all-or-nothing loader to meta-born BF16 linear weights.
+
+    Every weight is checked before any loader is attached: a mix weight that
+    arrived on a real device, or that is not a 2-D BF16 Parameter, fails the
+    whole pair rather than leaving one mixer half-converted (the MIX2 reader
+    treats a one-sided FP8 pair as a loud failure, not a fallback).
+    """
+    checked = []
+    for linear in linears:
+        weight = getattr(linear, "weight", None)
+        if not isinstance(weight, torch.nn.Parameter) or weight.dim() != 2:
+            raise RuntimeError("SM120 online FP8 ingest requires 2-D Parameters")
+        if weight.device.type != "meta" or weight.dtype != torch.bfloat16:
+            raise RuntimeError(
+                "SM120 online FP8 ingest requires meta-born BF16 weights, got "
+                f"device={weight.device} dtype={weight.dtype}"
+            )
+        checked.append((linear, weight))
+    for linear, weight in checked:
+        weight.weight_loader = functools.partial(
+            _ingest_rowwise_weight, linear, target_device
+        )
+    return len(checked)
+
+
 # --------------------------------------------------------------------------- #
 # Eligible-linear installation
 # --------------------------------------------------------------------------- #
