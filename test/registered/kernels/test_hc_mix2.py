@@ -270,6 +270,81 @@ def test_hc_norm_mix2_cuda_graph_replays_changed_input(layer, rows):
     assert nrmse <= 0.02 and cosine >= 0.999
 
 
+def test_hc_weight_reload_updates_the_captured_graph_without_recapture(layer):
+    """The service seam the storage lifecycle exists for: ``update_weights_from_
+    tensor`` (load_format=None) re-runs ``load_weights`` WITHOUT recapturing
+    the graphs, and a captured MIX2 launch baked the weight and scale pointers.
+    The reload through the actual attached loaders must rewrite the resident
+    pair in place, so the very next replay serves the new E4M3 values and row
+    scales -- not a stale tensor, and not storage the allocator reused. A
+    rebound Parameter would fail the pointer identities asserted here.
+    """
+    hyper_input = _randn((4, K), seed=1000, scale=0.25)
+    down = layer.input_mix_weight_down.weight
+    up = layer.input_mix_weight_up.weight
+    s_down, s_up = rowwise_scale_of(down), rowwise_scale_of(up)
+    pointers = (down.data_ptr(), s_down.data_ptr(), up.data_ptr(), s_up.data_ptr())
+
+    for _ in range(2):
+        layer.mix(hyper_input)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        mixed, _ = layer.mix(hyper_input)
+    old_ref = _reference_mixed(
+        _reference_norm(hyper_input, layer.hc_norm.weight), down, s_down, up, s_up
+    )
+    graph.replay()
+    torch.cuda.synchronize()
+    nrmse, cosine = _normalized_error(mixed, old_ref)
+    assert nrmse <= 0.02 and cosine >= 0.999
+    pre_reload = mixed.clone()
+
+    # The reload itself: the same loader the weight-update path resolves.
+    new_down = _randn(tuple(down.shape), seed=1100, scale=1.0 / math.sqrt(K))
+    new_up = _randn(tuple(up.shape), seed=1101, scale=1.0 / math.sqrt(LOWRANK))
+    layer.input_mix_weight_down.weight.weight_loader(
+        layer.input_mix_weight_down.weight, new_down
+    )
+    layer.input_mix_weight_up.weight.weight_loader(
+        layer.input_mix_weight_up.weight, new_up
+    )
+
+    # Stable storage: same Parameters, same data, and the same scale tensors
+    # at the same addresses the graph captured.
+    assert layer.input_mix_weight_down.weight is down
+    assert layer.input_mix_weight_up.weight is up
+    assert rowwise_scale_of(down) is s_down and rowwise_scale_of(up) is s_up
+    assert (
+        down.data_ptr(),
+        s_down.data_ptr(),
+        up.data_ptr(),
+        s_up.data_ptr(),
+    ) == pointers
+    # Quantized from the fresh BF16 checkpoint values, not requantized codes:
+    # the row scales now describe the new rows' maxima.
+    for weight, loaded, scale in (
+        (down, new_down, s_down),
+        (up, new_up, s_up),
+    ):
+        expected = loaded.float().abs().amax(dim=1).clamp_min(1e-8) / 448.0
+        torch.testing.assert_close(scale, expected, rtol=1e-3, atol=0)
+
+    graph.replay()
+    torch.cuda.synchronize()
+    reloaded_ref = _reference_mixed(
+        _reference_norm(hyper_input, layer.hc_norm.weight), down, s_down, up, s_up
+    )
+    new_err, cosine = _normalized_error(mixed, reloaded_ref)
+    assert new_err <= 0.02 and cosine >= 0.999
+    # Sensitivity against the old weights: the replay moved well past its
+    # accuracy budget, so the graph read the reloaded storage rather than still
+    # satisfying the pre-reload pair (which is what a silently stale or
+    # rebound weight would do).
+    stale_err = _normalized_error(pre_reload, reloaded_ref)[0]
+    assert stale_err > max(0.04, 4 * new_err), (stale_err, new_err)
+
+
 @pytest.mark.parametrize("rows", ROWS)
 def test_gated_residual_mix_uses_mix2_and_feeds_combine(layer, rows, mix2_spy):
     hyper_input = _randn((rows, K), seed=500 + rows, scale=0.25)

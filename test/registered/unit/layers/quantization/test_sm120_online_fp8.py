@@ -318,9 +318,11 @@ class TestHyperConnectionIngest(unittest.TestCase):
 
     The mix weights are born on meta precisely so their BF16 copy never becomes
     resident device state: the checkpoint shard is quantized on CPU and only
-    the E4M3 values and their FP32 row scales are transferred. The loader
-    re-attaches itself to each replacement Parameter, so a reload recomputes
-    values and scales together, and row selection moves the pair as one unit.
+    the E4M3 values and their FP32 row scales are transferred. The first load
+    may rebind the meta Parameter (attaching this loader for the next one);
+    every later load rewrites the SAME resident weight and scale storage in
+    place -- update_weights_from_tensor does not recapture the CUDA graphs
+    that baked those pointers -- and a rejected reload mutates neither.
     """
 
     @staticmethod
@@ -343,27 +345,72 @@ class TestHyperConnectionIngest(unittest.TestCase):
             fp8.dequantize_rowwise_weight(linear.weight), loaded, rtol=0.03, atol=0.03
         )
 
-    def test_reload_after_ingest_replaces_values_and_scales_together(self):
+    def test_reload_writes_the_resident_pair_in_place(self):
         linear = self._meta_linear()
         fp8.attach_rowwise_ingest([linear], target_device=torch.device("cpu"))
-        first = torch.randn(2, 4, dtype=torch.bfloat16)
+        first = torch.tensor(
+            [[-3.0, -1.0, 1.0, 3.0], [2.0, 2.0, 2.0, 2.0]],
+            dtype=torch.bfloat16,
+        )
         linear.weight.weight_loader(linear.weight, first)
         weight = linear.weight
+        weight_ptr = weight.data_ptr()
         stale_scale = fp8.require_rowwise_scale(weight).clone()
-        updated = first * 3
+        scale = fp8.require_rowwise_scale(weight)
+        scale_ptr = scale.data_ptr()
+        updated = torch.tensor(
+            [[6.0, 2.0, -2.0, -6.0], [-1.0, -1.0, -1.0, -1.0]],
+            dtype=torch.bfloat16,
+        )
         linear.weight.weight_loader(linear.weight, updated)
-        self.assertEqual(linear.weight.dtype, torch.float8_e4m3fn)
-        # The module now reads a fresh value/scale pair; the object it replaced
-        # still carries its own pair, and the live scales describe the new rows.
-        self.assertIsNot(linear.weight, weight)
+        # update_weights_from_tensor replays load_weights WITHOUT recapturing
+        # the graphs, and a captured MIX2 launch baked these pointers: the
+        # reload rewrites the same weight and scale storage, it does not
+        # rebind a new Parameter underneath the graph.
+        self.assertIs(linear.weight, weight)
+        self.assertEqual(weight.data_ptr(), weight_ptr)
+        self.assertIs(fp8.require_rowwise_scale(linear.weight), scale)
+        self.assertEqual(scale.data_ptr(), scale_ptr)
+        # The previously held references read the new pair: values and scales
+        # moved together, and the scales describe the new rows, not the ones
+        # that were replaced.
         torch.testing.assert_close(
-            fp8.dequantize_rowwise_weight(weight), first, rtol=0.03, atol=0.03
+            fp8.dequantize_rowwise_weight(weight), updated, rtol=0.03, atol=0.03
         )
-        torch.testing.assert_close(
-            fp8.dequantize_rowwise_weight(linear.weight), updated, rtol=0.03, atol=0.03
+        self.assertFalse(torch.allclose(scale, stale_scale))
+
+    def test_invalid_reload_leaves_resident_pair_unchanged(self):
+        linear = self._meta_linear()
+        fp8.attach_rowwise_ingest([linear], target_device=torch.device("cpu"))
+        loaded = torch.tensor(
+            [[-3.0, -1.0, 1.0, 3.0], [2.0, 2.0, 2.0, 2.0]],
+            dtype=torch.bfloat16,
         )
-        fresh = fp8.require_rowwise_scale(linear.weight)
-        self.assertFalse(torch.allclose(fresh, stale_scale))
+        linear.weight.weight_loader(linear.weight, loaded)
+        weight = linear.weight
+        scale = fp8.require_rowwise_scale(weight)
+        codes_before = weight.detach().clone().float()
+        scale_before = scale.clone()
+        with self.assertRaisesRegex(RuntimeError, "shape mismatch"):
+            linear.weight.weight_loader(
+                linear.weight, torch.ones(3, 4, dtype=torch.bfloat16)
+            )
+        with self.assertRaisesRegex(RuntimeError, "BF16"):
+            linear.weight.weight_loader(
+                linear.weight, torch.ones(2, 4, dtype=torch.float32)
+            )
+        # Rejected reloads are non-events: the resident pair still reads
+        # exactly what the last accepted load wrote.
+        self.assertIs(linear.weight, weight)
+        self.assertTrue(torch.equal(weight.detach().float(), codes_before))
+        self.assertTrue(torch.equal(scale, scale_before))
+        # A pair stripped of its scale cannot reload either (the state is not
+        # one this lifecycle produced), and that refusal is also non-mutating.
+        delattr(weight, fp8._SCALE_ATTR)
+        with self.assertRaisesRegex(RuntimeError, "missing its rowwise scale"):
+            linear.weight.weight_loader(linear.weight, loaded * 2)
+        self.assertTrue(torch.equal(weight.detach().float(), codes_before))
+        self.assertFalse(hasattr(weight, fp8._SCALE_ATTR))
 
     def test_invalid_ingest_inputs_fail_loud(self):
         linear = self._meta_linear()

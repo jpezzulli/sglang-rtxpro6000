@@ -577,8 +577,10 @@ def test_mix_passes_the_live_weights_to_mix2(monkeypatch, sm120):
     layer.input_mix_weight_up.weight = up
     hyper_input = torch.zeros(4, K, dtype=torch.bfloat16)
     layer.mix(hyper_input)
-    # A weight update replaces Parameter and scale together (see
-    # _ingest_rowwise_weight); mix() must not hand the kernels a stale reference.
+    # A weight update replaces the Parameter together with its scale on the
+    # first ingest, and rewrites both in place afterwards (see
+    # _ingest_rowwise_weight); mix() must hand the kernels the live weights,
+    # never a stale reference.
     new_down, new_up = _fp8_pair()
     layer.input_mix_weight_down.weight = new_down
     layer.input_mix_weight_up.weight = new_up

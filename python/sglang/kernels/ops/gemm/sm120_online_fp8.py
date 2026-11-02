@@ -649,9 +649,19 @@ def _ingest_rowwise_weight(
     The HyperConnection mix weights are born on meta precisely so their full
     BF16 copy never becomes resident device state: the shard is quantized to
     E4M3 with one FP32 scale per output row on CPU, and only the values and
-    scales that stay are transferred.  The loader re-attaches itself to the
-    replacement Parameter, so a reload recomputes values and scales together
-    instead of copying BF16 into FP8 storage next to stale scales.
+    scales that stay are transferred.
+
+    The FIRST load may allocate: it replaces the meta Parameter, binds the new
+    row scale beside it and re-attaches this loader, so a later load cannot
+    copy BF16 into FP8 storage next to stale scales.  EVERY LATER load writes
+    through the storage already resident instead of rebounding a new pair:
+    ``update_weights_from_tensor`` re-runs ``load_weights`` without recapturing
+    the CUDA graphs, and a captured MIX2 launch bakes the weight and scale
+    pointers, so a rebound Parameter would leave the graph serving the old
+    tensor (or the allocator reusing its storage underneath it).  Shape,
+    dtype, device and scale presence are all validated -- and the CPU
+    quantization runs -- before either resident tensor is touched, so a
+    rejected reload leaves weight and scale exactly as they were.
     """
     if parameter.shape != loaded_weight.shape:
         raise RuntimeError(
@@ -672,15 +682,37 @@ def _ingest_rowwise_weight(
         else loaded_weight.to(device="cpu")
     )
     quantized, scale = quantize_rowwise_fp8(source)
-    new_parameter = torch.nn.Parameter(
-        quantized.to(device=destination), requires_grad=False
-    )
-    _copy_parameter_attrs(parameter, new_parameter)
-    setattr(new_parameter, _SCALE_ATTR, scale.to(device=destination))
-    new_parameter.weight_loader = functools.partial(
-        _ingest_rowwise_weight, linear, target_device
-    )
-    linear.weight = new_parameter
+    if parameter.device.type == "meta":
+        new_parameter = torch.nn.Parameter(
+            quantized.to(device=destination), requires_grad=False
+        )
+        _copy_parameter_attrs(parameter, new_parameter)
+        setattr(new_parameter, _SCALE_ATTR, scale.to(device=destination))
+        new_parameter.weight_loader = functools.partial(
+            _ingest_rowwise_weight, linear, target_device
+        )
+        linear.weight = new_parameter
+        return
+    # A reload must find the pair this loader installed: E4M3 storage with its
+    # FP32 row scale on the weight's device. Anything else is a state this
+    # lifecycle did not produce, and the resident pair stays untouched.
+    resident_scale = require_rowwise_scale(parameter)
+    if (
+        resident_scale.shape != tuple(scale.shape)
+        or resident_scale.device != parameter.device
+    ):
+        raise RuntimeError(
+            "SM120 online FP8 HyperConnection reload cannot write the resident "
+            f"weight/scale pair in place: weight={tuple(parameter.shape)}@"
+            f"{parameter.device} scale={tuple(resident_scale.shape)}@"
+            f"{resident_scale.device}"
+        )
+    # Transfer both halves before mutating either, so a failed copy cannot
+    # leave new codes paired with an old scale.
+    moved_weight = quantized.to(device=parameter.device)
+    moved_scale = scale.to(device=resident_scale.device)
+    parameter.data.copy_(moved_weight)
+    resident_scale.copy_(moved_scale)
 
 
 def attach_rowwise_ingest(

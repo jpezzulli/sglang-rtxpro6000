@@ -306,9 +306,9 @@ def _rowwise_fp8_pair(w_down: torch.Tensor, w_up: torch.Tensor, k: int, lowrank:
     """(s_down, s_up) of the resident rowwise FP8 pair, or None if this is not one.
 
     The scales are read off the live Parameter tensors the caller passed, never
-    cached: a weight update replaces the Parameter and its scale attribute
-    together, so checking and launching on the same two objects cannot pair a
-    new weight with an old scale. A half-quantised pair raises: one FP8 weight
+    cached: a first ingest replaces the Parameter together with its scale
+    attribute, and later loads rewrite both in place, so checking and launching
+    on the same two objects cannot pair a new weight with an old scale. A half-quantised pair raises: one FP8 weight
     without its scale is not a format to guess about, and the other weight of
     the pair has already been reinterpreted.
     """

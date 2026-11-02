@@ -287,7 +287,8 @@ class GatedResidual(HyperConnectionBase):
         # Donor HC MIX2: one launch each for the per-branch norm, the split-K
         # down projection and the up projection, reading the resident rowwise
         # FP8 mix weights and their row scales as they stand. Resolved per call
-        # (a weight update replaces Parameter and scales together) and checked
+        # (a weight update replaces the Parameter on first ingest and rewrites
+        # value and scale in place afterwards) and checked
         # before the separate normalization below, because K0 *is* that
         # normalization; it hands back the same (hyper_input, normed) residuals
         # the combine path consumes and supersedes even a caller-prepared norm.
