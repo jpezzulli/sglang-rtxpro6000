@@ -23,8 +23,17 @@ The 27B FP8 DFlash2 profile
 is unchanged at fixed block 8. Native width routing ships as the bundled
 tiered policy (block 8 at one running request, block 4 at two or more);
 since 3.1.2 the policy is selectable with `PENNY_MTP_POLICY` and `tiered`
-remains the default. The accepted release awaiting publication is Penny Royal
-3.1.4: the Anthropic fix where histories carrying recognized nested
+remains the default. The prepared release awaiting publication is Penny Royal
+3.1.5: the Mamba temporal-state checkpoint copy previously gathered every
+selected source slot into one temporary tensor before writing the destination
+slots, so one copy could spike transient GPU memory; the gather is now chunked
+against a 64 MiB budget with a one-slot floor, bounding the temporary
+allocation, small copies still run as one batched assignment, and copied and
+untouched slots were checked exact
+(adapting upstream issue 47916 / PR 47984 at f1d06b0f in PR #156; original
+author Tanish Malekar, co-author Claude Sonnet 5.5; see RELEASE_NOTES_3.1.5.md
+for the per-hardware evidence). Penny Royal 3.1.4 is published, with the
+Anthropic fix where histories carrying recognized nested
 `tool_reference` blocks that returned HTTP 500 on the bundled Froggeric v22.5
 template now render safely, preserving names, order and IDs, keeping native
 structured handling where supported, with unsupported blocks still returning a
@@ -185,8 +194,10 @@ actual answer grading on the qualified sources; extended or repetitive
 reasoning is not penalized and `ask_user` is a valid tool choice. Recorded
 deviations are listed with the measurements.
 
-- [3.1.4 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.4.md): accepted Anthropic `tool_reference` fix plus Codex-style Responses tool, Qwen parser and deferred-budget scope; tag and image pending, old candidate build cancelled, open limitations in the 3.1.4 section of LIMITATIONS.md.
-- [3.1.4 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.4.json): accepted head identity, merged and pending PRs, upstream lineage, separately recorded evidence and qualification limits.
+- [3.1.5 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.5.md): chunked hybrid-Mamba checkpoint copy; tag and image pending publication, evidence separated by hardware.
+- [3.1.5 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.5.json): candidate identity, upstream lineage, per-hardware evidence and pending publication fields.
+- [3.1.4 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.4.md): published 2026-10-29; accepted Anthropic `tool_reference` fix plus Codex-style Responses tool, Qwen parser and deferred-budget scope; the first candidate build was rejected and the promoted image carries the native-derived pins; open limitations in the 3.1.4 section of LIMITATIONS.md.
+- [3.1.4 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.4.json): published identity: accepted and integrated head, merged PRs, upstream lineage, separately recorded evidence, the published image digest and qualification limits.
 - [3.1.3 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.3.md): six accepted correctness fixes, the 27B DFlash2 maturity correction, reused validation evidence and open exceptions.
 - [3.1.3 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.3.json): Fix identities, validation scope and published image identity.
 - [3.1.2 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.2.md): native-MTP width-policy setting, DFlash2 checkpoint-tracking fix, EPD idle-sleep fix, DFlash2 alpha labeling and contributor acknowledgements.

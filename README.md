@@ -19,7 +19,7 @@ so long-running sessions can pick up from cached history.
 
 [Get started](#build-and-launch) · [Conversation cache](#hicache-and-nixl) ·
 [Performance](#performance) ·
-[3.1.4 release notes](RELEASE_NOTES_3.1.4.md) · [Community results](COMMUNITY-RESULTS.md)
+[3.1.5 release notes](RELEASE_NOTES_3.1.5.md) · [Community results](COMMUNITY-RESULTS.md)
 
 **Penny Royal 3.1:** Flash-Next runs native NEXTN MTP with FR-Spec as the
 maintained default profile, with automatic KV pool sizing replacing the preset
@@ -27,6 +27,8 @@ cap; Flash-Next DFlash2 with a separate draft model, fixed concurrency
 width routing (block 6 for one request, block 4 for two or more) and
 FlashInfer draft-token verification is an **experimental / alpha** profile,
 fully available to opt into.
+
+**3.1.5 (prepared):** bounds temporary GPU memory in hybrid-Mamba checkpoint copies. Publication is pending, so [3.1.4](RELEASE_NOTES_3.1.4.md), published 2026-10-29, is the current published release; see the [3.1.5 notes](RELEASE_NOTES_3.1.5.md).
 
 **3.1.4 (published 2026-10-29):** fixes Anthropic `tool_reference` histories, improves Responses tools, replay and image handling, and installs the dependency versions qualified on the native host. [Release notes](RELEASE_NOTES_3.1.4.md). [3.1.3](RELEASE_NOTES_3.1.3.md) stays available as the previous release.
 
@@ -330,7 +332,7 @@ over what was actually worth keeping.
 | Understand the FP8 and SSD options | [Online FP8](FP8.md) · [NVMe PLE](NVME-PLE.md) |
 | See measurements | [Results and history](RESULTS.md) · [Community reports](COMMUNITY-RESULTS.md) |
 | Read the implementation details | [Backends](BACKENDS.md) · [Memory and persistence](MEMORY-AND-PERSISTENCE.md) |
-| Check changes and source lineage | [3.1.4 notes](RELEASE_NOTES_3.1.4.md) · [Machine-readable notes](release-3.1.4.json) · [History](CHANGES.md) · [Provenance](PROVENANCE.md) |
+| Check changes and source lineage | [3.1.5 notes](RELEASE_NOTES_3.1.5.md) · [Machine-readable notes](release-3.1.5.json) · [History](CHANGES.md) · [Provenance](PROVENANCE.md) |
 | Check known issues | [Limitations](LIMITATIONS.md) |
 | Use an AI assistant for setup | [llms.txt](llms.txt) |
 
@@ -370,7 +372,7 @@ components retain their own licenses.
 <a id="scope-and-limitations"></a>
 <a id="documentation-map"></a>
 
-[Current release notes](RELEASE_NOTES_3.1.4.md) · [Benchmark history](RESULTS.md) ·
+[3.1.5 preparation notes](RELEASE_NOTES_3.1.5.md) · [Benchmark history](RESULTS.md) ·
 [Configuration reference](CONFIGURATION.md) · [Known issues](LIMITATIONS.md)
 
 <!-- Compatibility anchors for earlier versions of this guide. -->

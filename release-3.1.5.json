@@ -1,0 +1,62 @@
+{
+  "schema": "release-notes/3.1.5",
+  "version": "3.1.5",
+  "status": {
+    "is_draft": true,
+    "publication_approved": false,
+    "published": false,
+    "container": "not built",
+    "note": "Release-prep record on the staged candidate; nothing is published. The pennyroyal-v3.1.5 tag and the v3.1.5 image do not exist yet, no build source, digest or tag SHA is assumed, and the published download pair remains pennyroyal-v3.1.4 source with the v3.1.4 image (release-3.1.4.json)."
+  },
+  "source": {
+    "candidate_head": "e31c7a1d530dd9bbeea081ee1d49d69c5e153114",
+    "candidate_ref": "work/3.1.5-mamba-copy-20261103",
+    "candidate_base": "120cbbe66205cf70de0b339b1bdcc3e014bb0e79",
+    "candidate_note": "The single runtime commit sits on the 3.1.4 documentation base above the published 3.1.4 lineage 2008ba3193684d47e7ce7806713d5a76bf1b9510. This release-prep change moves only version assets, image defaults and documentation; the runtime commit is untouched.",
+    "release_tag": "pennyroyal-v3.1.5",
+    "release_tag_status": "pending; not cut, no SHA assumed"
+  },
+  "changes": [
+    {
+      "commit": "e31c7a1d530dd9bbeea081ee1d49d69c5e153114",
+      "pr": 156,
+      "pr_state": "open",
+      "issues": [],
+      "upstream": {
+        "repo": "sgl-project/sglang",
+        "issue": 47916,
+        "pr": 47984,
+        "commit": "f1d06b0f5f68911c860660975659eed7c75f0dcc"
+      },
+      "summary": "The MambaPool temporal-state copy previously gathered every selected source slot into one temporary tensor before writing the destination slots, so one checkpoint copy could spike transient GPU memory. The gather is now chunked against a 64 MiB budget with a one-slot floor, bounding the temporary allocation to a full state slot at least; small copies remain a single batched assignment and source and destination slot sets must stay disjoint. Copied and untouched slots were checked exact.",
+      "profiles": [
+        "Hybrid-Mamba checkpoint copies (27B and Flash-Next)"
+      ]
+    }
+  ],
+  "validation": {
+    "review": "Independent public review of the runtime change is clean; the focused public tests were 3 tests plus 2 subtests in total, run on the public tree before this record.",
+    "rtx_a4000": "Transient gather peak measured over four copies: 576 to 144 MiB on the 27B state shape and 216 to 54 MiB on the Flash-Next shape; copied and untouched slots exact.",
+    "rtx_pro_6000": "Both profiles, run separately, served four correct answers with natural stops and 9,344 GPU-cached tokens per request with zero host/storage reuse; Flash-Next served all four from one prefill (37,376 cached tokens).",
+    "caveats": "The concurrent 27B requests entered prefill separately, so no multi-slot 27B gather was exercised in one batch there. No RTX PRO 6000 peak-memory measurement, no KV-capacity or DFlash host-RAM savings claim, no broad qualification or throughput campaign, and no speed claim.",
+    "dependencies": "No pin or baseline change: the checked-in baseline was verified on 2026-11-03 against the qualified native Python 3.12.13 environment, where the actual 231 distributions matched every native package version in the manifest exactly, with types-PyYAML as the only expected image-only addition. The existing strict parity gate must run in the future candidate image.",
+    "container_build": "not built; image, digest, host banner and publication checks are open gates to be run by the maintainer."
+  },
+  "contributors": [
+    {
+      "name": "Tanish Malekar",
+      "email": "60835372+tanish-malekar@users.noreply.github.com",
+      "url": "https://github.com/tanish-malekar",
+      "contribution": "Original author of the chunked MambaPool temporal-state copy (upstream issue 47916, PR 47984), adapted in PR #156 with the commit's original attribution and sign-off preserved"
+    },
+    {
+      "name": "Claude Sonnet 5.5",
+      "contribution": "Co-author credited in the upstream commit"
+    },
+    {
+      "name": "Penny Royal",
+      "email": "Pennyroyal@agentmail.to",
+      "contribution": "Release assets and release documentation"
+    }
+  ]
+}

@@ -1,5 +1,25 @@
 # Penny Royal release history
 
+## 3.1.5 — Hybrid-Mamba checkpoint copies stay within a bounded gather (publication pending)
+
+Prepared as the single-fix release for PR #156, adapting upstream
+sgl-project/sglang issue #47916 / PR #47984 (at `f1d06b0f5f68911c860660975659eed7c75f0dcc`).
+The `pennyroyal-v3.1.5` tag and the `v3.1.5` image are not published yet; pending
+fields are in [release-3.1.5.json](release-3.1.5.json).
+
+- The MambaPool temporal-state copy gathered every selected source slot into
+  one temporary tensor before writing the destination slots, so one checkpoint
+  copy could spike transient GPU memory. The gather is now chunked against a
+  64 MiB budget with a one-slot floor, bounding the temporary allocation to a
+  full slot at least, and small copies still run as one batched assignment: on
+  an RTX A4000 the transient gather peak across four copies fell 576→144 MiB
+  (27B state shape) and 216→54 MiB (Flash-Next), with copied and untouched
+  slots checked exact; on RTX PRO 6000 both profiles served four correct
+  answers with natural stops and 9,344 GPU-cached tokens per request, zero
+  host/storage, the concurrent 27B requests entering prefill separately.
+  Behavior and defaults are otherwise unchanged (head `e31c7a1d`; original
+  author Tanish Malekar, co-author Claude Sonnet 5.5).
+
 ## 3.1.4 — Published Responses, parser and budget scope with the Anthropic tool-reference fix
 
 Accepted as the release head `3a4de81398c087bbb8cf25cbe4b8bb67f6f2160b` on
