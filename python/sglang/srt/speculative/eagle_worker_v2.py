@@ -214,6 +214,18 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         # Alias for better readability
         self.draft_runner = self.draft_worker.model_runner
         self._init_dsa_index_share_state()
+        # Bind the target embed/lm_head into the draft *before* the scheduler
+        # profiles the KV pool (port of upstream sgl-project/sglang#42472).
+        # MTP draft classes allocate their own embedding + lm_head shell which
+        # set_embed_and_head() frees via del + empty_cache once rebound to the
+        # target tensors. In stock ordering that rebinding happens at the tail
+        # of alloc_memory_pool(), i.e. AFTER init_target_memory_pool() has
+        # sized the pool against the shell-inflated footprint, so the KV pool
+        # collapses even though the memory is reclaimable.
+        # Idempotent: alloc_memory_pool() still calls init_token_map()/
+        # init_lm_head() unchanged; rebinding the same tensors is a no-op.
+        self.init_token_map()
+        self.init_lm_head()
         # Eager draft-extend seed buffer (graph paths use their own static ones).
         self.dsa_extend_topk_buf: Optional[torch.Tensor] = None
         self.draft_tp_context = (
