@@ -58,9 +58,11 @@ set; a full source checkout is optional. `RELEASE_REF` names the published tag
 [release-3.1.3.json](../../release-3.1.3.json) for the previous release). The
 `pennyroyal-v3.1.4` source and `v3.1.4` image below are the published pair; keep
 the two tags together, since startup files and image belong to the same release.
-3.1.5 is prepared but not yet published, so the pair below stays the currently
-available download; at publication, set `RELEASE_REF` to `pennyroyal-v3.1.5`
-and the image tag to `v3.1.5` together.
+3.1.5 is built and verified but not yet published, so the pair below stays the
+currently available download: that image exists only as
+`ghcr.io/jpezzulli/sglang-rtxpro6000:build-6825003f79580f54f433a8bdc0ca53b812f6dbee`
+until publication, when you set `RELEASE_REF` to `pennyroyal-v3.1.5` and the
+image tag to `v3.1.5` together.
 
 ```bash
 RELEASE_REF='pennyroyal-v3.1.4'

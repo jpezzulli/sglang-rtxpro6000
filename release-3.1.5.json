@@ -5,22 +5,53 @@
     "is_draft": true,
     "publication_approved": false,
     "published": false,
-    "container": "not built",
-    "note": "Release-prep record on the staged candidate; nothing is published. The pennyroyal-v3.1.5 tag and the v3.1.5 image do not exist yet, no build source, digest or tag SHA is assumed, and the published download pair remains pennyroyal-v3.1.4 source with the v3.1.4 image (release-3.1.4.json)."
+    "container": "built and verified as the candidate; not promoted to a versioned tag",
+    "note": "Final publication checkpoint on the built candidate. The release source is merged and the image is built and verified, but publication is not approved, so nothing is published. The only image that exists is ghcr.io/jpezzulli/sglang-rtxpro6000:build-6825003f79580f54f433a8bdc0ca53b812f6dbee; the pennyroyal-v3.1.5 source tag, the v3.1.5 versioned image promotion and the public release do not exist yet, and no tag SHA or promotion run is assumed. The published download pair remains pennyroyal-v3.1.4 source with the v3.1.4 image (release-3.1.4.json)."
   },
   "source": {
     "candidate_head": "e31c7a1d530dd9bbeea081ee1d49d69c5e153114",
     "candidate_ref": "work/3.1.5-mamba-copy-20261103",
     "candidate_base": "120cbbe66205cf70de0b339b1bdcc3e014bb0e79",
-    "candidate_note": "The single runtime commit sits on the 3.1.4 documentation base above the published 3.1.4 lineage 2008ba3193684d47e7ce7806713d5a76bf1b9510. This release-prep change moves only version assets, image defaults and documentation; the runtime commit is untouched.",
+    "candidate_note": "The single runtime commit sits on the 3.1.4 documentation base above the published 3.1.4 lineage 2008ba3193684d47e7ce7806713d5a76bf1b9510, and merged as PR #156. It is untouched by the release-prep series, which moves only version assets, image defaults and documentation and merged as PR #157 on top of it.",
+    "image_source": "6825003f79580f54f433a8bdc0ca53b812f6dbee",
+    "image_source_tree": "eac1f5f8c58d4d409ec3137a422f785731e9beac",
+    "image_source_note": "The image build source is the integrated release head, the PR #157 merge commit: the runtime candidate above plus the accepted release-prep assets and documentation. This build source and the release tag are separate identities; the tag is cut at publication, above it.",
     "release_tag": "pennyroyal-v3.1.5",
-    "release_tag_status": "pending; not cut, no SHA assumed"
+    "release_tag_status": "pending; not cut, no SHA assumed, promotion run not created",
+    "merged_prs": [
+      {
+        "number": 156,
+        "state": "merged",
+        "head": "e31c7a1d530dd9bbeea081ee1d49d69c5e153114",
+        "merge_commit": "8a5c3885106b96c110967947bc65055f30930d13",
+        "fixes": "Chunked MambaPool temporal-state copy, the release's single runtime change"
+      },
+      {
+        "number": 157,
+        "state": "merged",
+        "head": "416356def968a3b7163f0493a2ce0f188541eb3b",
+        "merge_commit": "6825003f79580f54f433a8bdc0ca53b812f6dbee",
+        "fixes": "Release assets, launch defaults and documentation for 3.1.5"
+      }
+    ]
+  },
+  "container": {
+    "candidate_image": "ghcr.io/jpezzulli/sglang-rtxpro6000:build-6825003f79580f54f433a8bdc0ca53b812f6dbee",
+    "versioned_image": "does not exist yet: ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.5 is created by promotion after publication approval, without rebuilding",
+    "digest": "sha256:6a10be9d0b34a3b78d81d20c649a1278ecea8acebdec835185a2605837c44f37",
+    "digest_scope": "Registry manifest-index digest for the candidate tag (linux/amd64 manifest sha256:c7b41abbaf032c6c1769e665383b01ad90b1450111d3f88692c6ee36c6ad2ca1, config sha256:734c64fabf9fd189df07d02b368fc1d93073a73806ee46916646784269abbc4f), taken from registry metadata and re-checked on the host.",
+    "build_run": 41736115304,
+    "build_url": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/41736115304",
+    "build_status": "success from source 6825003f79580f54f433a8bdc0ca53b812f6dbee; the run created no release and pushed no versioned tag",
+    "artifact": "10 layers, 7,632,561,951 compressed bytes, 15,758,812,493 bytes local size",
+    "published_pair_remains": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.4 with the pennyroyal-v3.1.4 source (release-3.1.4.json)"
   },
   "changes": [
     {
       "commit": "e31c7a1d530dd9bbeea081ee1d49d69c5e153114",
       "pr": 156,
-      "pr_state": "open",
+      "pr_state": "merged",
+      "pr_merge_commit": "8a5c3885106b96c110967947bc65055f30930d13",
       "issues": [],
       "upstream": {
         "repo": "sgl-project/sglang",
@@ -39,8 +70,10 @@
     "rtx_a4000": "Transient gather peak measured over four copies: 576 to 144 MiB on the 27B state shape and 216 to 54 MiB on the Flash-Next shape; copied and untouched slots exact.",
     "rtx_pro_6000": "Both profiles, run separately, served four correct answers with natural stops and 9,344 GPU-cached tokens per request with zero host/storage reuse; Flash-Next served all four from one prefill (37,376 cached tokens).",
     "caveats": "The concurrent 27B requests entered prefill separately, so no multi-slot 27B gather was exercised in one batch there. No RTX PRO 6000 peak-memory measurement, no KV-capacity or DFlash host-RAM savings claim, no broad qualification or throughput campaign, and no speed claim.",
-    "dependencies": "No pin or baseline change: the checked-in baseline was verified on 2026-11-03 against the qualified native Python 3.12.13 environment, where the actual 231 distributions matched every native package version in the manifest exactly, with types-PyYAML as the only expected image-only addition. The existing strict parity gate must run in the future candidate image.",
-    "container_build": "not built; image, digest, host banner and publication checks are open gates to be run by the maintainer."
+    "dependencies": "No pin or baseline change in this release: the checked-in baseline was verified on 2026-11-03 against the qualified native Python 3.12.13 environment, where the actual 231 distributions matched every native package version in the manifest exactly, with types-PyYAML as the only expected image-only addition. The strict parity gate ran in the built candidate: 231 native against 218 image distributions, zero shared runtime dependency-version differences, the 14 native development exclusions and the one previously pinned image build addition, with both dependency gates passing in the build.",
+    "container_build": "Built: run 41736115304 completed successfully from source 6825003f79580f54f433a8bdc0ca53b812f6dbee and uploaded ghcr.io/jpezzulli/sglang-rtxpro6000:build-6825003f79580f54f433a8bdc0ca53b812f6dbee at index digest sha256:6a10be9d0b34a3b78d81d20c649a1278ecea8acebdec835185a2605837c44f37. The remaining gates are publication decisions: the release tag, the versioned image promotion and the public release, all run by the maintainer.",
+    "image_verification": "Recorded 2026-11-03. The exact candidate was checked offline on the host against index digest sha256:6a10be9d0b34a3b78d81d20c649a1278ecea8acebdec835185a2605837c44f37 (linux/amd64 manifest sha256:c7b41abbaf032c6c1769e665383b01ad90b1450111d3f88692c6ee36c6ad2ca1, config sha256:734c64fabf9fd189df07d02b368fc1d93073a73806ee46916646784269abbc4f): 10 layers, 7,632,561,951 compressed bytes, 15,758,812,493 bytes local size. The image's own --check passed, including the NIXL, PLE and patched FlashInfer checks, and the source, patch and test hash checks and 16 of 16 image recipe checks passed. The container banner reads 'Penny Royal 3.1.5 | source 6825003f79' with installed SGLang 0.5.19+g6825003f7958, matching the native banner for the same source; dependency parity is recorded above.",
+    "image_gpu_serving": "Recorded 2026-11-03. The exact image at the digest above booted the public tiered Flash-Next profile with native NEXTN on an RTX PRO 6000, with NIXL, 32 GB HiCache and medium reasoning effort, configured with a limit of four running requests and 24 Mamba slots; the limit is a concurrency ceiling, not observed simultaneous traffic. The smoke sent one generation request and then one parallel-tool-call request. Health answered 200; streaming generation returned exactly READY with a natural stop and DONE, and the parallel-tool-call fixture emitted lookup_alpha with key=ALPHA and lookup_bravo with key=BRAVO as valid JSON with two distinct IDs, no prose, finish_reason tool_calls and DONE. These are tool-call emission checks, not execution of the declared dummy tools. The native everyday service was restored afterwards and passed the same two requests. This is a bounded generation and tool smoke: no benchmark, no throughput or timing claim, and the dated two-profile and A4000 evidence above is unchanged."
   },
   "contributors": [
     {

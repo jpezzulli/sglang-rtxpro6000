@@ -2,10 +2,12 @@
 
 ## 3.1.5 — Hybrid-Mamba checkpoint copies stay within a bounded gather (publication pending)
 
-Prepared as the single-fix release for PR #156, adapting upstream
-sgl-project/sglang issue #47916 / PR #47984 (at `f1d06b0f5f68911c860660975659eed7c75f0dcc`).
-The `pennyroyal-v3.1.5` tag and the `v3.1.5` image are not published yet; pending
-fields are in [release-3.1.5.json](release-3.1.5.json).
+Built as the single-fix release from merged PR #156, adapting upstream
+sgl-project/sglang issue #47916 / PR #47984 (at `f1d06b0f5f68911c860660975659eed7c75f0dcc`),
+on release source `6825003f79580f54f433a8bdc0ca53b812f6dbee`. The image is built
+and verified at its build-SHA tag; the `pennyroyal-v3.1.5` tag and the `v3.1.5`
+promotion are not published yet, and the build, digests, container checks and
+pending fields are in [release-3.1.5.json](release-3.1.5.json).
 
 - The MambaPool temporal-state copy gathered every selected source slot into
   one temporary tensor before writing the destination slots, so one checkpoint
