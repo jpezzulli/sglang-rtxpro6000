@@ -28,7 +28,7 @@ width routing (block 6 for one request, block 4 for two or more) and
 FlashInfer draft-token verification is an **experimental / alpha** profile,
 fully available to opt into.
 
-**3.1.5 (prepared):** bounds temporary GPU memory in hybrid-Mamba checkpoint copies. Publication is pending, so [3.1.4](RELEASE_NOTES_3.1.4.md), published 2026-10-29, is the current published release; see the [3.1.5 notes](RELEASE_NOTES_3.1.5.md).
+**3.1.5 (published 2026-11-03):** bounds temporary GPU memory in hybrid-Mamba checkpoint copies. The release image is `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.5`, promoted without rebuilding; see the [3.1.5 notes](RELEASE_NOTES_3.1.5.md). [3.1.4](RELEASE_NOTES_3.1.4.md), published 2026-10-29, stays available as the previous release.
 
 **3.1.4 (published 2026-10-29):** fixes Anthropic `tool_reference` histories, improves Responses tools, replay and image handling, and installs the dependency versions qualified on the native host. [Release notes](RELEASE_NOTES_3.1.4.md). [3.1.3](RELEASE_NOTES_3.1.3.md) stays available as the previous release.
 
@@ -372,7 +372,7 @@ components retain their own licenses.
 <a id="scope-and-limitations"></a>
 <a id="documentation-map"></a>
 
-[3.1.5 preparation notes](RELEASE_NOTES_3.1.5.md) · [Benchmark history](RESULTS.md) ·
+[3.1.5 release notes](RELEASE_NOTES_3.1.5.md) · [Benchmark history](RESULTS.md) ·
 [Configuration reference](CONFIGURATION.md) · [Known issues](LIMITATIONS.md)
 
 <!-- Compatibility anchors for earlier versions of this guide. -->

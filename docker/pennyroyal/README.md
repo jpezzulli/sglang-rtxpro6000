@@ -54,16 +54,13 @@ is copied out of the image and no image rebuild is needed.
 
 Use matching published source and image tags. Download the small launch-file
 set; a full source checkout is optional. `RELEASE_REF` names the published tag
-(see [release-3.1.4.json](../../release-3.1.4.json) for the 3.1.4 identity, and
-[release-3.1.3.json](../../release-3.1.3.json) for the previous release). The
-`pennyroyal-v3.1.4` source and `v3.1.4` image below are the published pair; keep
+(see [release-3.1.5.json](../../release-3.1.5.json) for the 3.1.5 identity, and
+[release-3.1.4.json](../../release-3.1.4.json) for the previous release). The
+`pennyroyal-v3.1.5` source and `v3.1.5` image below are the published pair; keep
 the two tags together, since startup files and image belong to the same release.
-3.1.5 is prepared but not yet published, so the pair below stays the currently
-available download; at publication, set `RELEASE_REF` to `pennyroyal-v3.1.5`
-and the image tag to `v3.1.5` together.
 
 ```bash
-RELEASE_REF='pennyroyal-v3.1.4'
+RELEASE_REF='pennyroyal-v3.1.5'
 BASE="https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/$RELEASE_REF/docker/pennyroyal/launch"
 mkdir -p pennyroyal/config
 cd pennyroyal
@@ -155,7 +152,7 @@ the target checkpoint; add `--startup config/start-flash-next-dflash2.sh`
 for the optional DFlash2 profile, which also needs its draft checkpoint:
 
 ```bash
-IMAGE='ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.4'   # the published image for the launch files above; keep it on the same release as RELEASE_REF, and switch to v3.1.5 only when that image publishes
+IMAGE='ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.5'   # the published image for the launch files above; keep it on the same release as RELEASE_REF
 ./run.sh --image "$IMAGE"
 ```
 
