@@ -23,7 +23,7 @@ The 27B FP8 DFlash2 profile
 is unchanged at fixed block 8. Native width routing ships as the bundled
 tiered policy (block 8 at one running request, block 4 at two or more);
 since 3.1.2 the policy is selectable with `PENNY_MTP_POLICY` and `tiered`
-remains the default. The built release awaiting publication is Penny Royal
+remains the default. The current published release is Penny Royal
 3.1.5: the Mamba temporal-state checkpoint copy previously gathered every
 selected source slot into one temporary tensor before writing the destination
 slots, so one copy could spike transient GPU memory; the gather is now chunked
@@ -32,11 +32,14 @@ allocation, small copies still run as one batched assignment, and copied and
 untouched slots were checked exact
 (adapting upstream issue 47916 / PR 47984 at f1d06b0f, merged in PR #156;
 original author Tanish Malekar, co-author Claude Sonnet 5.5; see
-RELEASE_NOTES_3.1.5.md for the per-hardware evidence). The 3.1.5 image is built
-and verified at its build-SHA tag and the release source is 6825003f; the
-pennyroyal-v3.1.5 tag, the v3.1.5 image tag and the public release are still
-pending approval, so the published download pair stays 3.1.4. Penny Royal 3.1.4
-is published, with the
+RELEASE_NOTES_3.1.5.md for the per-hardware evidence). The 3.1.5 image was built
+and verified at its build-SHA tag from release source 6825003f and published
+2026-11-03: the pennyroyal-v3.1.5 tag is cut and
+ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.5 is served at index digest
+sha256:6a10be9d0b34a3b78d81d20c649a1278ecea8acebdec835185a2605837c44f37, promoted
+without rebuilding, so the published download pair is pennyroyal-v3.1.5 with
+v3.1.5. Penny Royal 3.1.4
+is published as the previous release, with the
 Anthropic fix where histories carrying recognized nested
 `tool_reference` blocks that returned HTTP 500 on the bundled Froggeric v22.5
 template now render safely, preserving names, order and IDs, keeping native
@@ -198,8 +201,8 @@ actual answer grading on the qualified sources; extended or repetitive
 reasoning is not penalized and `ask_user` is a valid tool choice. Recorded
 deviations are listed with the measurements.
 
-- [3.1.5 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.5.md): chunked hybrid-Mamba checkpoint copy; image built and verified at its build-SHA tag, version tag and public release pending, evidence separated by hardware.
-- [3.1.5 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.5.json): merged PR identities, build source and digests, upstream lineage, per-hardware evidence and pending publication fields.
+- [3.1.5 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.5.md): chunked hybrid-Mamba checkpoint copy; published 2026-11-03 as pennyroyal-v3.1.5 with the v3.1.5 image tag and public release, evidence separated by hardware.
+- [3.1.5 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.5.json): merged PR identities, build source and digests, upstream lineage, per-hardware evidence, published status and the promotion record.
 - [3.1.4 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.4.md): published 2026-10-29; accepted Anthropic `tool_reference` fix plus Codex-style Responses tool, Qwen parser and deferred-budget scope; the first candidate build was rejected and the promoted image carries the native-derived pins; open limitations in the 3.1.4 section of LIMITATIONS.md.
 - [3.1.4 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.4.json): published identity: accepted and integrated head, merged PRs, upstream lineage, separately recorded evidence, the published image digest and qualification limits.
 - [3.1.3 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.3.md): six accepted correctness fixes, the 27B DFlash2 maturity correction, reused validation evidence and open exceptions.
