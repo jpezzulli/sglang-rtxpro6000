@@ -389,7 +389,7 @@ class QwenVLImageProcessor(MediaArtifactCacheMixin, SGLangBaseProcessor):
             image_token_id=hf_config.image_token_id,
             # The regex that matches expanded image tokens.
             image_token_regex=re.compile(
-                r"<\|vision_start\|>(?:<\|image_pad\|>)+<\|vision_end\|>|<image>"
+                r"<\|vision_start\|>(?:<\|image_pad\|>)+<\|vision_end\|>"
             ),
             video_token_id=self.VIDEO_TOKEN_ID,
             audio_token_id=self.audio_token_id,
