@@ -1693,7 +1693,7 @@ def _startup_cache_assignment(text: str, name: str) -> tuple[bool, Optional[str]
         elif char in "'\"":
             quote = char
         elif char == "#" and index > 0 and raw[index - 1] in " \t":
-            raw = raw[:index].rstrip()
+            raw = raw[:index].rstrip(" \t")
             break
     # Whitespace before an unquoted value starts a command in Bash; it is not
     # harmless padding around a saved-file value.
@@ -1738,7 +1738,7 @@ def _startup_file_cache_issue(
     as a cache the launch would use.
     """
     try:
-        text = startup.read_text(encoding="utf-8")
+        text = startup.read_bytes().decode("utf-8")
     except FileNotFoundError:
         return None
     except (OSError, UnicodeError):

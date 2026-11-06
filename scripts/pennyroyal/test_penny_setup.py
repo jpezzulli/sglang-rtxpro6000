@@ -1611,6 +1611,26 @@ class SetupSessionTests(FixtureMixin):
         startup.write_bytes(original.encode() + b"\n# encoded \xe9\n")
         plan = pc.build_plan("container", config, {}, repo_root=self.repo)
         self.assertTrue([i for i in plan.warnings if i.key in pc.MM_CACHE_KEYS])
+        for directory, budget, expected_dir, expected_budget in (
+            ("", "128\r", "", "128"),
+            ("/cache/photos#v1\u00a0 # keep", "128", "/cache/photos#v1", "128"),
+        ):
+            with self.subTest(directory=directory, budget=budget):
+                startup.write_bytes(
+                    (
+                        f"{pc.MM_CACHE_DIR_KEY}={directory}\n"
+                        f"{pc.MM_CACHE_SIZE_KEY}={budget}\n"
+                    ).encode()
+                )
+                self.assertIsNotNone(
+                    pc._startup_file_cache_issue(
+                        startup,
+                        {
+                            pc.MM_CACHE_DIR_KEY: expected_dir,
+                            pc.MM_CACHE_SIZE_KEY: expected_budget,
+                        },
+                    )
+                )
 
     def test_inherited_cache_values_are_checked_before_serialization(self):
         for mode in ("native", "container"):
