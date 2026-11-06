@@ -33,6 +33,8 @@ from sglang.srt.multimodal.cache import (
     PreprocessFingerprintProvider,
     build_processor_fingerprint,
 )
+from sglang.srt.multimodal.cache.identity import build_processor_description
+from sglang.srt.multimodal.cache.shared_preprocess_cache import SharedPreprocessCache
 from sglang.srt.multimodal.processors.executor import MultimodalProcessorExecutor
 from sglang.srt.multimodal.transport.cuda_ipc import (
     MM_FEATURE_CACHE_SIZE,
@@ -286,10 +288,36 @@ class BaseMultimodalProcessor(ABC):
             else requested_cache_mb
         )
         tokenizer_worker_num = max(int(get_serving().tokenizer_worker_num), 1)
-        worker_cache_bytes = total_cache_mb * 1024 * 1024 // tokenizer_worker_num
-        self.mm_preprocess_cache = MultimodalPreprocessCache(
-            max_size_bytes=worker_cache_bytes,
-            max_entries=8192,
+        shared_directory = get_mm().mm_preprocess_cache_dir
+        worker_cache_bytes = (
+            total_cache_mb
+            * 1024
+            * 1024
+            // (1 if shared_directory else tokenizer_worker_num)
+        )
+        self.mm_preprocess_cache = (
+            SharedPreprocessCache(
+                shared_directory, max_size_bytes=worker_cache_bytes, max_entries=8192
+            )
+            if shared_directory
+            else MultimodalPreprocessCache(
+                max_size_bytes=worker_cache_bytes, max_entries=8192
+            )
+        )
+        self.processor_fingerprint_description = (
+            build_processor_description(
+                self,
+                hf_config,
+                exact=True,
+                extra={
+                    "hf_config": hf_config.to_dict(),
+                    "image_processor": self._processor.image_processor.to_dict()
+                    if getattr(self._processor, "image_processor", None) is not None
+                    else None,
+                },
+            )
+            if shared_directory
+            else None
         )
         self.trust_mm_content_hashes = bool(get_mm().trust_mm_content_hashes)
         # The fingerprint is needed only to build artifact keys. Avoid inspecting
@@ -302,7 +330,7 @@ class BaseMultimodalProcessor(ABC):
         if self.mm_preprocess_cache.enabled:
             logger.info(
                 "Multimodal preprocess cache enabled for %s: %d MiB total "
-                "(%d MiB per tokenizer worker), at most 8192 entries; "
+                "(%d MiB per cache instance), at most 8192 entries; "
                 "caller content hashes are %s.",
                 type(self).__name__,
                 total_cache_mb,
@@ -1717,9 +1745,9 @@ class BaseMultimodalProcessor(ABC):
                 and not raw_audios
                 and not raw_videos
             ):
-                assert isinstance(
-                    base_output.input_ids, list
-                ), f"expected list[int] input_ids, got {type(base_output.input_ids)}"
+                assert isinstance(base_output.input_ids, list), (
+                    f"expected list[int] input_ids, got {type(base_output.input_ids)}"
+                )
                 try:
                     counts = self.resolve_image_token_counts(raw_images)
                     image_placeholder_token_id = mm_tokens.image_token_id
