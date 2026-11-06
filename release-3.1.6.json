@@ -2,10 +2,10 @@
   "schema": "release-notes/3.1.6",
   "version": "3.1.6",
   "status": {
-    "is_draft": true,
-    "publication_approved": false,
-    "published": false,
-    "container": "Candidate image built and verified. Version-tag promotion and publication await approval."
+    "is_draft": false,
+    "publication_approved": true,
+    "published": true,
+    "container": "Published as ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6 by promoting the verified digest without rebuilding. The release tag and notes are cut from these publication records."
   },
   "source": {
     "candidate_head": "6c5cf32b51b6fead7b0760eba7486e6fb6c5e2cc",
@@ -16,7 +16,6 @@
     "image_source": "470eada6c67f4096cb35b237b67e1d07f9dae1b6",
     "image_source_note": "The integrated main after setup PR #164 and release-assets PR #165. The final release tag may add publication documentation; the November 6 runtime measurements remain attributed to candidate 6c5cf32b51.",
     "release_tag": "pennyroyal-v3.1.6",
-    "release_tag_commit": null,
     "merged_prs": [
       {
         "number": 162,
@@ -87,17 +86,19 @@
       "commit": "470eada6c67f4096cb35b237b67e1d07f9dae1b6",
       "tree": "409f17ac031347c03e0219c0e47704df6afe4b61",
       "note": "Integrated runtime, reviewed launcher/configurator propagation, version assets and release documentation; this is the image build source."
-    }
+    },
+    "release_tag_note": "The immutable release tag adds publication documentation above the image source; resolve pennyroyal-v3.1.6 for its final commit."
   },
   "container": {
-    "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6 (pending)",
+    "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6",
     "candidate_image": "ghcr.io/jpezzulli/sglang-rtxpro6000:build-470eada6c67f4096cb35b237b67e1d07f9dae1b6",
     "digest": "sha256:facb0cb1b92510f78a3e841fe9551531be4dd8c9c1cbb79144b84400ed965e35",
     "build_run": 42257180075,
     "build_url": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/42257180075",
-    "build_status": "success; candidate verified locally, version-tag promotion pending",
+    "build_status": "success; candidate verified locally and promoted without rebuilding",
     "artifact": "10 layers; 7,632,786,475 compressed layer bytes; 15,759,425,357 bytes local uncompressed image size",
-    "digest_scope": "OCI index; linux/amd64 manifest sha256:2421772f11871fbe60a6599464cc5be926f0550122161aa2f4d31bd18ef3d6d8; config sha256:31936dafd2ba2f04c4e41fd625ad4ac20e1e9b6e563c399fe358f6b35cf8e6b6"
+    "digest_scope": "OCI index; linux/amd64 manifest sha256:2421772f11871fbe60a6599464cc5be926f0550122161aa2f4d31bd18ef3d6d8; config sha256:31936dafd2ba2f04c4e41fd625ad4ac20e1e9b6e563c399fe358f6b35cf8e6b6",
+    "promotion": "Run https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/42284413700 completed successfully at 2026-11-06T19:59:45Z. Every build step was skipped. The v3.1.6 tag resolves to the verified index digest recorded here."
   },
   "changes": [
     {
