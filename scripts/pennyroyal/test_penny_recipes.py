@@ -325,6 +325,81 @@ class ContainerDefaultsTest(unittest.TestCase):
         return path.read_text()
 
 
+class SharedImageCacheLaunchPathTest(unittest.TestCase):
+    """One optional pair of settings, eight public launch paths, one helper.
+
+    The runtime takes the directory only with a positive budget, and keeps the
+    existing per-worker cache when the budget arrives alone, so the launch files
+    have to agree about that rule instead of each route inventing its own. These
+    checks pin the shared helper as the single place the pair becomes argv; the
+    real launches are
+    test/registered/unit/pennyroyal/test_prebuilt_container_launch.py.
+    """
+
+    LAUNCHERS = (
+        CONFIGS / "serve-flash-next.sh",
+        CONFIGS / "serve-flash-next-frspec.sh",
+        CONFIGS / "serve-flash-next-dflash2.sh",
+        CONFIGS / "serve-qwen38-27b-dflash2.sh",
+        LAUNCH / "config" / "start-flash-next.sh",
+        LAUNCH / "config" / "start-flash-next-frspec.sh",
+        LAUNCH / "config" / "start-flash-next-dflash2.sh",
+        LAUNCH / "config" / "start-27b-dflash2.sh",
+    )
+
+    def test_every_launch_path_builds_the_same_argument_array(self):
+        for launcher in self.LAUNCHERS:
+            with self.subTest(launcher=str(launcher)):
+                text = launcher.read_text()
+                # The helper is read, resolved and spliced; no launch path states the
+                # flags of its own, so none can drift from the others. A recipe is
+                # always read from the tree it ships with; a mounted startup file is
+                # read from the image the operator chose, which may predate the
+                # helper, so that one copy has to carry the empty array on its own
+                # and refuse a cache it cannot build rather than ignore the setting.
+                if launcher.parent == LAUNCH / "config":
+                    self.assertRegex(
+                        text,
+                        r"PENNY_MM_PREPROCESS_CACHE_ARGS=\(\)\n"
+                        r'if \[\[ -n "\$\{PENNY_MM_PREPROCESS_CACHE_DIR:-\}'
+                        r'\$\{PENNY_MM_PREPROCESS_CACHE_SIZE_MB:-\}" \]\]; then\n'
+                        r'  if \[\[ ! -r "\$IMAGE_CONFIGS/mm-preprocess-cache\.sh" '
+                        r"\]\]; then",
+                    )
+                    self.assertIn("which this image does not carry", text)
+                else:
+                    self.assertRegex(
+                        text,
+                        r'source ".*\$SCRIPT_DIR/mm-preprocess-cache\.sh"\n'
+                        r"pennyroyal_mm_preprocess_cache_args\n",
+                    )
+                self.assertIn('"${PENNY_MM_PREPROCESS_CACHE_ARGS[@]}"', text)
+
+    def test_the_startup_files_state_the_pair_they_read(self):
+        # Off by default, on the line an operator edits and the configurator
+        # writes, in the file the container launch actually reads.
+        for launcher in self.LAUNCHERS:
+            if launcher.parent != LAUNCH / "config":
+                continue
+            with self.subTest(launcher=str(launcher)):
+                text = launcher.read_text()
+                self.assertIn("PENNY_MM_PREPROCESS_CACHE_DIR=\n", text)
+                self.assertIn("PENNY_MM_PREPROCESS_CACHE_SIZE_MB=\n", text)
+
+    def test_the_shared_helper_is_the_only_place_the_pair_becomes_flags(self):
+        helper = (CONFIGS / "mm-preprocess-cache.sh").read_text()
+        self.assertIn('--mm-preprocess-cache-dir "$directory"', helper)
+        self.assertIn('--mm-preprocess-cache-size-mb "$budget"', helper)
+        # A directory without a positive budget stops the launch, and the reason
+        # names both settings; a lone budget, 0 included, is still forwarded.
+        self.assertIn("needs a positive PENNY_MM_PREPROCESS_CACHE_SIZE_MB", helper)
+        self.assertIn("must be a whole number of MiB", helper)
+        self.assertIn("must be an absolute directory", helper)
+        for launcher in self.LAUNCHERS:
+            text = launcher.read_text()
+            self.assertNotIn("--mm-preprocess-cache", text, launcher)
+
+
 class DFlash2RoutedWidthRecipeTest(unittest.TestCase):
     """The Flash-Next DFlash2 launch paths carry the qualified routed profile:
     the FR-Spec map, the fixed width policy, the widest routed launch width, and

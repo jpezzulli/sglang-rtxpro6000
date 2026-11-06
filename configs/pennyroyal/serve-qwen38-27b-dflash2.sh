@@ -46,6 +46,8 @@ if [[ ! "$HICACHE_SIZE_GB" =~ ^[1-9][0-9]*$ ]]; then
 fi
 source "$SCRIPT_DIR/chat-template.sh"
 source "$SCRIPT_DIR/reasoning-effort.sh"
+source "$SCRIPT_DIR/mm-preprocess-cache.sh"
+pennyroyal_mm_preprocess_cache_args
 source "$SCRIPT_DIR/tp-devices.sh"
 # Name the release and its source before any preflight step can fail.
 source "$SCRIPT_DIR/startup-summary.sh"
@@ -193,6 +195,7 @@ launch_args=(serve \
   --attention-backend flashinfer --decode-attention-backend trtllm_mha \
   --trust-remote-code --chat-template "$CHAT_TEMPLATE" \
   --image-processor-backend "$IMAGE_PROCESSOR_BACKEND" \
+  "${PENNY_MM_PREPROCESS_CACHE_ARGS[@]}" \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \
   --default-chat-template-kwargs "$DEFAULT_CHAT_TEMPLATE_KWARGS" \

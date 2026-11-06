@@ -163,7 +163,52 @@ any speed increases with DFlash2 vs native MTP.
 | `GPU` (native saved settings) / `NVIDIA_GPU` (Compose `.env`) / `--gpu` in `run.sh` | `0` | The inference GPU (index or UUID). Exported as `CUDA_VISIBLE_DEVICES` natively; Compose reserves exactly that device. |
 | `TP_SIZE` | 1 | Tensor-parallel ranks, positive integer. TP1 is the qualified default on every profile; `27b` pins 1. **TP2 is expected to work; it has not been tested on two-GPU hardware.** The launcher refuses a TP size the visible GPUs cannot serve; expose both cards (`run.sh --gpu 0,1`, or edit the Compose device reservation) and keep a sidecar out of the TP pair. |
 | `SGLANG_MM_PREPROCESS_DEVICE` | `cpu` | Media preprocessing: `cpu` (PIL, keeps JPEG work off the model GPU), or `cuda:N` for the model GPU (`N=0`) or a second GPU (`N≥1`, Torchvision backend). CUDA choices spend serving headroom; image dimensions and concurrency set the requirement. Backend pixel differences select a new persistence identity; older cache directories remain. |
+| `PENNY_MM_PREPROCESS_CACHE_DIR` | unset — off | Private directory the tokenizer workers share for image preprocessing artifacts. Unset or blank is no shared cache and nothing is created; inside a container the path is the container's own (`/cache/<name>` or `/dev/shm/<name>`). Requires a positive `PENNY_MM_PREPROCESS_CACHE_SIZE_MB`. See [Shared image preprocessing cache](#shared-image-preprocessing-cache). |
+| `PENNY_MM_PREPROCESS_CACHE_SIZE_MB` | unset — the runtime's own default | Budget for that cache in **MiB** (`1 MiB = 1024×1024` bytes) — not the decimal GB of the RAM tier or the GiB of the NIXL disk budget. On its own it sizes the existing per-worker cache, and `0` there turns that cache off. A directory needs a positive value. |
 | `NCCL_P2P_DISABLE` | unset | Container/Compose escape hatch for P2P/ACS isolation on some two-card hosts; empty leaves NCCL defaults untouched. |
+
+<a id="shared-image-preprocessing-cache"></a>
+
+### Shared image preprocessing cache
+
+Image preprocessing runs once per tokenizer worker: the same picture in a long
+agent history is decoded, resized and normalised again in every worker. Point
+both settings at one private directory and a budget, and compatible workers on
+one host reuse the same artifact instead. It is opt-in on every launch path, and
+nothing about the default launch changes:
+
+```bash
+export PENNY_MM_PREPROCESS_CACHE_DIR=/dev/shm/pennyroyal-mm
+export PENNY_MM_PREPROCESS_CACHE_SIZE_MB=3072
+./run-penny
+```
+
+- **Two settings, one feature, four recipes and four startup files.** The native
+  recipes read the exported pair; the container startup files state the same pair
+  in their own settings block, which is where `./configure-penny --container`
+  writes your answer; `compose.yaml` forwards it for the operators who run an
+  image profile. A relative directory, or a directory with no positive budget,
+  stops the launch with the reason instead of letting the server reject it after
+  the model has loaded. The startup file is yours and keeps its settings; the
+  helper that turns the pair into flags comes from the image you start, so an
+  older pin launches exactly the launch it always gave while both lines stay
+  blank, and a cache asked for there is refused by name rather than ignored.
+- **A budget on its own is not this feature.** With no directory it sizes the
+  cache each worker already keeps, exactly as before, and `0` there turns that
+  cache off. The directory is what makes it shared.
+- **The budget is one global bound**, not one per worker, and it is retained
+  bytes, not a process RSS limit or a tmpfs quota. The directory records it in
+  its own index, so a later launch that asks for a different number is refused:
+  changing the budget means pointing at a fresh directory. Nothing is deleted
+  for you, and an LRU-evicted artifact is simply recomputed on the next request.
+- **It costs host memory or tmpfs, not GPU memory**, and it is separate from the
+  `PENNY_HICACHE_SIZE_GB` RAM tier and the `SGLANG_HICACHE_NIXL_MAX_CACHE_GB`
+  disk budget. The cache is content-addressed on the exact source bytes and the
+  full processor configuration, so a different backend or preprocessing device
+  cannot be served out of it.
+- **`./configure-penny` asks for both** in the advanced section, shows what the
+  launch will do in `--check` and `--show-config`, and answers `none` on a rerun
+  write the explicit blank that switches the feature back off.
 
 ## Speculation and precision escape hatches
 

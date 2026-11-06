@@ -31,6 +31,17 @@ TP_SIZE=1
 PENNY_PLE_BACKEND=ram
 # cpu keeps vision work off the model GPU; cuda:N needs that extra device.
 export SGLANG_MM_PREPROCESS_DEVICE=cpu
+# Optional shared image preprocessing cache (off by default): one private
+# directory the tokenizer workers share, and the MiB budget it may use. Both
+# blank keeps today's launch; a budget alone is the existing per-worker cache
+# (0 turns it off) and a directory needs a positive budget. /cache/<name> and
+# /dev/shm/<name> are the two places this container can already write, and a
+# directory keeps the budget its index recorded: change the budget, point at a
+# fresh directory. This line decides, the same way the lines around it decide
+# capacity and the width policy: edit it here, or save the answer with
+# ./configure-penny --container, which writes it into this file.
+PENNY_MM_PREPROCESS_CACHE_DIR=
+PENNY_MM_PREPROCESS_CACHE_SIZE_MB=
 # Disk tier: on (the qualified default) adds the NIXL FILE backend under
 # /nixl. off keeps the GPU radix cache and the host-RAM HiCache tier above and
 # drops only the disk tier: no NIXL root, config, namespace derivation or
@@ -101,6 +112,19 @@ fi
 source "$IMAGE_CONFIGS/chat-template.sh"
 source "$IMAGE_CONFIGS/request-capacity.sh"
 source "$IMAGE_CONFIGS/reasoning-effort.sh"
+# The image preprocessing cache is the one 3.1.6 setting block a container can ask
+# for and not get: an image pinned to an older release carries no helper file, and
+# with nothing asked for the launch has to stay the launch that image always gave.
+# Anything asked for is refused by name rather than quietly ignored.
+PENNY_MM_PREPROCESS_CACHE_ARGS=()
+if [[ -n "${PENNY_MM_PREPROCESS_CACHE_DIR:-}${PENNY_MM_PREPROCESS_CACHE_SIZE_MB:-}" ]]; then
+  if [[ ! -r "$IMAGE_CONFIGS/mm-preprocess-cache.sh" ]]; then
+    echo "the image preprocessing cache settings need $IMAGE_CONFIGS/mm-preprocess-cache.sh, which this image does not carry; launch without PENNY_MM_PREPROCESS_CACHE_DIR and PENNY_MM_PREPROCESS_CACHE_SIZE_MB, or use the v3.1.6 image" >&2
+    exit 1
+  fi
+  source "$IMAGE_CONFIGS/mm-preprocess-cache.sh"
+  pennyroyal_mm_preprocess_cache_args
+fi
 source "$IMAGE_CONFIGS/tp-devices.sh"
 # Name the release and its source before any preflight step can fail.
 source "$IMAGE_CONFIGS/startup-summary.sh"
@@ -325,6 +349,7 @@ launch_args=(serve \
   --hicache-mem-layout page_first "${HICACHE_STORAGE_ARGS[@]}" \
   "${PLE_ARGS[@]}" --trust-remote-code \
   --chat-template "$CHAT_TEMPLATE" --image-processor-backend "$IMAGE_PROCESSOR_BACKEND" \
+  "${PENNY_MM_PREPROCESS_CACHE_ARGS[@]}" \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \
   --default-chat-template-kwargs "$DEFAULT_CHAT_TEMPLATE_KWARGS" \

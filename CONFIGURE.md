@@ -109,6 +109,16 @@ and manage the files yourself. Restart the server to apply changed settings.
   them changes nothing.
 - **PLE:** Flash-Next table placement in RAM or a prepared NVMe snapshot,
   independent of whether NIXL is on.
+- **Shared image preprocessing cache (`PENNY_MM_PREPROCESS_CACHE_DIR` and
+  `PENNY_MM_PREPROCESS_CACHE_SIZE_MB`):** an opt-in directory the tokenizer
+  workers share, plus its MiB budget. Both questions are in the advanced section
+  and both default to off: pressing Enter on a fresh setup saves nothing and the
+  launch is what it always was. On a rerun Enter keeps a saved answer, so `none`
+  is the answer that switches it back off. A budget alone stays the existing
+  per-worker cache; a directory needs a positive budget, and it keeps the budget
+  it was made with, so a changed number needs a fresh directory. A container save
+  writes the pair into the startup script's settings block, the same way it writes
+  the width policy.
 - **Other settings:** model paths, ports, context/request capacity, reasoning,
   and the existing WSL2 host-memory workaround.
 

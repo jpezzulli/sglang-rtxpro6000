@@ -50,15 +50,16 @@ class Prompt:
     def say(self, text: str = "") -> None:
         print(text, file=self.stdout)
 
-    def _read(self, label: str) -> str:
+    def _read(self, label: str, keep_spaces: bool = False) -> str:
         self.stdout.write(label)
         self.stdout.flush()
         line = self.stdin.readline()
         if line == "":
             self.say("")
             raise Cancelled()
-        answer = line.rstrip("\n").rstrip("\r").strip()
-        if answer.lower() in {"q", "quit"}:
+        line = line.rstrip("\n").rstrip("\r")
+        answer = line if keep_spaces else line.strip()
+        if answer.strip().lower() in {"q", "quit"}:
             raise Cancelled()
         return answer
 
@@ -73,6 +74,17 @@ class Prompt:
             if allow_empty:
                 return ""
             self.say("  Enter a value, or 'q' to cancel without saving.")
+
+    def ask_verbatim(self, label: str, default: str = "") -> str:
+        """Ask one question and keep the answer's outer spaces.
+
+        The two image preprocessing cache settings are the only users: a directory
+        or a budget with padding is not the value that was written, and trimming it
+        here would save a path the operator never typed.
+        """
+        suffix = f" [{default}]" if default else " [optional]"
+        answer = self._read(f"{label}{suffix}: ", keep_spaces=True)
+        return answer if answer or not default else default
 
     def ask_validated(
         self, label: str, spec: pc.KeySpec, default: str = "", allow_empty: bool = False
@@ -174,6 +186,8 @@ _ADVANCED_ORDER = (
     "PENNY_PLE_NVME_MODEL",
     "SGLANG_HICACHE_TORCH_PINNED_ALLOC",
     "SGLANG_MM_PREPROCESS_DEVICE",
+    pc.MM_CACHE_DIR_KEY,
+    pc.MM_CACHE_SIZE_KEY,
     "SGLANG_FORWARD_UNKNOWN_TOOLS",
     pc.MTP_POLICY_KEY,
     "MAX_RUNNING_REQUESTS",
@@ -188,6 +202,12 @@ _ADVANCED_ORDER = (
 # asked about -- eligible Flash-Next SM120 launches choose the accepted paths
 # automatically, so a normal setup has no kernel questions to answer.
 _PRIVATE_KEYS = frozenset({"SGLANG_SM120_ONLINE_MXFP8"})
+# Default-off settings whose blank answer is a real decision. Enter keeps what is
+# already saved (that is what an empty answer means everywhere in this wizard), so
+# `none` is the usable way back to off: it saves the explicit blank line that
+# suppresses an inherited value instead of leaving the key unsaid.
+_DEFAULT_OFF_KEYS = (pc.MM_CACHE_DIR_KEY, pc.MM_CACHE_SIZE_KEY)
+_CLEAR_ANSWERS = frozenset({"none", "off", "clear"})
 _ALWAYS_REQUIRED = (
     "TARGET_MODEL",
     "DRAFT_MODEL",
@@ -246,6 +266,16 @@ _EXPLANATIONS = {
     "NVIDIA_GPU": "which physical graphics card the container may use",
     "SGLANG_MM_PREPROCESS_DEVICE": "where image and audio input is prepared; "
     "the CPU is the qualified default",
+    pc.MM_CACHE_DIR_KEY: "the one folder the image preprocessing cache may "
+    "share between the workers that prepare pictures; blank (the "
+    "default) keeps today's launch, where each worker caches on its "
+    "own and nothing is shared, and inside a container the path is "
+    "the container's own (/cache/<name> or /dev/shm/<name>)",
+    pc.MM_CACHE_SIZE_KEY: "how many MiB (1 MiB = 1024*1024 bytes) that "
+    "preprocessing cache may hold on to; blank keeps the runtime's "
+    "own default, 0 means no cache at all, and a shared folder needs "
+    "a positive number here — changing the number means a fresh "
+    "folder, because the folder keeps the number it was made with",
     "PENNY_HICACHE_SIZE_GB": "how much system RAM the KV cache's RAM tier may "
     "use, in decimal GB (1 GB = 1e9 bytes, not GiB). "
     "This is separate from the PLE embedding table, "
@@ -362,6 +392,50 @@ def _ask_cuda_id(prompt: Prompt, spec: pc.KeySpec, default: str) -> str:
         except pc.ConfigError as exc:
             prompt.say(f"  {exc}")
             shown = ""
+
+
+def _key_named_by(message: str, specs: dict) -> str:
+    """Which setting a validator's complaint is about, by the name it quotes."""
+    return next((name for name in specs if name in message), "")
+
+
+def _ask_default_off(
+    prompt: Prompt, spec: pc.KeySpec, default: str, cleared: set[str]
+) -> str:
+    """Ask one default-off setting, where blank means 'leave it off'.
+
+    A plain optional path or number has a trap here: Enter returns whatever is
+    already offered, so there is no way back to off from the wizard. `none` (also
+    `off`/`clear`) records an explicit clear, and `cleared` is what makes that
+    decision survive a save for a key the previous file never mentioned, where a
+    bare omission would keep inheriting the value the operator just rejected.
+    """
+    _explain(
+        prompt,
+        spec.name,
+        extra=f"variable {spec.name}; blank leaves it off, 'none' clears it even "
+        "when the shell carries a value, and Enter keeps one",
+    )
+    label = spec.prompt or f"{spec.name} ({spec.description})"
+    while True:
+        # Read verbatim: ' /dev/shm/mm-cache ' is a different directory than the one
+        # the settings would hold after a trim, and this question is the operator's
+        # chance to say which they meant.
+        answer = prompt.ask_verbatim(label, default=default)
+        if answer.strip().lower() in _CLEAR_ANSWERS:
+            cleared.add(spec.name)
+            return ""
+        if answer != answer.strip():
+            prompt.say(
+                f"  {spec.name} {pc.SPACE_RULE}, got {pc.quote_command_arg(answer)}"
+            )
+            default = ""
+            continue
+        try:
+            return pc.validate_value(spec, answer, "your answer")
+        except pc.ConfigError as exc:
+            prompt.say(f"  {exc}")
+            default = ""
 
 
 def _ask_fixed(prompt: Prompt, spec: pc.KeySpec, default: str) -> str:
@@ -554,6 +628,10 @@ def run_session(
 
     gpus, gpu_note = pc.discover_gpus()
     answers: dict[str, str] = {}
+    # Keys answered with the clear word this session. Their blank is a decision,
+    # not an omission, so it has to reach the file even when the previous file
+    # never mentioned the key; an omitted key would keep inheriting instead.
+    cleared: set[str] = set()
 
     prompt.say("")
     prompt.say("Downloaded model locations, caches, and GPU")
@@ -649,6 +727,9 @@ def run_session(
                 answers[name] = _ask_fixed(prompt, spec, default)
                 continue
             label = spec.prompt or f"{name} ({spec.description})"
+            if name in _DEFAULT_OFF_KEYS:
+                answers[name] = _ask_default_off(prompt, spec, default, cleared)
+                continue
             _explain(prompt, name, extra=f"variable {name}")
             answers[name] = prompt.ask_validated(
                 label,
@@ -662,6 +743,32 @@ def run_session(
     asked = set(answers)
     for name, value in saved.items():
         if name not in asked:
+            answers[name] = value
+
+    # The image preprocessing cache pair is resolved once, here, from the sources
+    # this save owns - this session's answer, else the file's value, else what the
+    # shell exports - and the rules the launcher applies to that pair are applied to
+    # it and to nothing else. A container save records both halves, blanks included,
+    # because the generated folder decides the pair from its own startup script:
+    # freezing only the non-empty half left the settings, that file and a later reload
+    # describing different launches. Natively the recipe reads the environment, so an
+    # unsaved pair stays unsaved and keeps inheriting, as the documented precedence
+    # says, and only a value that cannot be inherited as written (one with padding)
+    # is taken into the questions below, where it can be repaired or switched off.
+    pair = {
+        name: (
+            answers[name]
+            if name in answers
+            else saved[name] if name in saved else environ.get(name, "")
+        )
+        for name in pc.MM_CACHE_KEYS
+    }
+    for name, value in pair.items():
+        if mode == "container":
+            answers[name] = value
+            if not value:
+                cleared.add(name)
+        elif value != value.strip():
             answers[name] = value
 
     changed = {
@@ -683,13 +790,15 @@ def run_session(
     # must not overwrite a good file or claim success. The user may correct the
     # named key, cancel, or explicitly save a not-ready-but-valid state.
     def entries(names: list[str]) -> list[tuple[str, str]]:
-        # A blank saved on purpose (a deliberate suppression) must survive the
-        # rerun as an explicit blank line; new optional blanks that were never
-        # in the file stay omitted, so absence keeps meaning 'inherited'.
+        # A blank that was either saved before or cleared in this session is a
+        # deliberate suppression and is written as an explicit empty line; a new
+        # optional blank that was never in the file stays omitted, so absence
+        # keeps meaning 'inherited'.
+        intentional = saved.keys() | cleared
         return [
             (name, answers[name])
             for name in names
-            if name in answers and (answers[name] != "" or name in saved)
+            if name in answers and (answers[name] != "" or name in intentional)
         ]
 
     def proposed_text() -> str:
@@ -736,15 +845,26 @@ def run_session(
     body = ""
     while True:
         body = proposed_text()
-        config = pc.config_from_text(
-            mode, body, config_path, "proposed answers (not saved yet)"
-        )
-        plan = pc.build_plan(mode, config, environ, repo_root=repo_root)
-        if not plan.errors:
-            break
+        try:
+            config = pc.config_from_text(
+                mode, body, config_path, "proposed answers (not saved yet)"
+            )
+        except pc.ConfigError as exc:
+            key = _key_named_by(str(exc), specs)
+            if key not in pc.MM_CACHE_KEYS:
+                raise
+            # A cache value this save carries, from the previous file or from the
+            # shell, that the settings cannot hold: the menu below names it and lets
+            # the operator fix it or cancel, and it is not something to save past.
+            plan, issues = None, [pc.Issue("error", str(exc), key=key)]
+        else:
+            plan = pc.build_plan(mode, config, environ, repo_root=repo_root)
+            if not plan.errors:
+                break
+            issues = list(plan.errors)
         prompt.say("")
         prompt.say("Not ready to save — fix these or cancel:")
-        for issue in plan.errors:
+        for issue in issues:
             prompt.say(f"  ERROR: {issue.message}")
         attempt += 1
         if attempt >= 4:
@@ -754,16 +874,20 @@ def run_session(
             return 4
         correctable = [
             issue
-            for issue in plan.errors
+            for issue in issues
             if issue.key
             and issue.key in specs
             and (issue.key in answers or issue.key in preserved)
         ]
         choices = sorted({issue.key for issue in correctable})
         options = [(key, f"re-enter {key}") for key in choices]
-        options.append(
-            ("s", "save despite these errors (--check keeps " "reporting them)")
-        )
+        # 'Save anyway' keeps its meaning for every other setting, but the image
+        # cache pair is one decision: a settings file that cannot state it, and the
+        # startup script generated from it, are not written on a maybe.
+        if not any(issue.key in pc.MM_CACHE_KEYS for issue in issues):
+            options.append(
+                ("s", "save despite these errors (--check keeps " "reporting them)")
+            )
         options.append(("c", "cancel; nothing is written"))
         choice = prompt.choose(
             "Fix one setting, save anyway, or cancel", options, default="c"
@@ -781,6 +905,8 @@ def run_session(
         current = answers.get(match.key, preserved.get(match.key, ""))
         if spec.kind in ("bool", "choice", "mm-device"):
             answers[match.key] = _ask_fixed(prompt, spec, current)
+        elif match.key in _DEFAULT_OFF_KEYS:
+            answers[match.key] = _ask_default_off(prompt, spec, current, cleared)
         else:
             answers[match.key] = prompt.ask_validated(
                 f"  new value for {match.key}",
