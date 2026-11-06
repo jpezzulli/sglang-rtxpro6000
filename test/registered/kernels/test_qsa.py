@@ -898,7 +898,7 @@ def test_qsa_indexer_ignores_dp_attention_token_padding():
                     rope_rows=rope.numel(),
                 )
             ),
-            select_prefill_tokens=lambda q, keys, starts, ends, logical, lengths: (
+            select_prefill_tokens=lambda q, keys, starts, ends, logical, lengths, **kwargs: (
                 q.squeeze(1)
             ),
         )
@@ -1540,14 +1540,16 @@ class _DispatchIndexer:
     def __init__(self):
         self.selected = None
         self.logical_positions = None
+        self.prefill_kwargs = None
 
     @staticmethod
     def project_qk(hidden_states, positions, **kwargs):
         rows = hidden_states.shape[0]
         return torch.zeros(rows, 4, 128), torch.zeros(rows, 1, 128), False
 
-    def select_prefill_tokens(self, *args):
+    def select_prefill_tokens(self, *args, **kwargs):
         self.selected = "prefill"
+        self.prefill_kwargs = kwargs
         return torch.tensor([1])
 
     def select_prefill_all_visible_tokens(self, *args):
@@ -1572,6 +1574,7 @@ class _DispatchMetadata:
     pending_ring_slots = None
     prefill_all_visible = False
     prefill_all_visible_scratch = None
+    compress_ratio = COMPRESS_RATIO
     # Consumed by the real _pending_ring_slots helper the dispatch indexer
     # borrows: one token row owned by request slot 1.
     token_to_batch_idx = torch.zeros(2, dtype=torch.int32)
@@ -1719,6 +1722,8 @@ def test_qsa_forward_cuda_dispatches_prefill_and_decode_mqa():
     assert indexer.selected == "prefill"
     assert indexer.logical_positions.tolist() == [0]
     assert prefill_result.item() == 1
+    # No host lengths on the batch: the absolute path stays, no device read.
+    assert indexer.prefill_kwargs == {"max_row_keys": None}
 
     positions.fill_(99)
     decode_result = QSAIndexer.forward_cuda(
@@ -1731,6 +1736,489 @@ def test_qsa_forward_cuda_dispatches_prefill_and_decode_mqa():
     assert indexer.selected == "decode"
     assert indexer.logical_positions.tolist() == [6]
     assert decode_result.item() == 2
+
+
+def test_qsa_forward_cuda_dispatches_host_derived_row_width():
+    """The normal EXTEND dispatch derives the relative logits width from the
+    scheduler's host sequence lengths: the longest request's compressed-block
+    count, never a device read (padding entries only raise the bound)."""
+    indexer = _DispatchIndexer()
+    metadata = _DispatchMetadata()
+
+    QSAIndexer.forward_cuda(
+        indexer,
+        torch.zeros(1, 16),
+        torch.zeros(1, dtype=torch.int32),
+        SimpleNamespace(
+            forward_mode=_ForwardMode(False),
+            seq_lens_cpu=torch.tensor([130, 7, 4099], dtype=torch.int64),
+        ),
+        metadata,
+    )
+    assert indexer.prefill_kwargs == {"max_row_keys": 4099 // COMPRESS_RATIO}
+
+    # Empty host lengths (idle batch) keep the absolute path.
+    indexer.prefill_kwargs = None
+    QSAIndexer.forward_cuda(
+        indexer,
+        torch.zeros(1, 16),
+        torch.zeros(1, dtype=torch.int32),
+        SimpleNamespace(
+            forward_mode=_ForwardMode(False),
+            seq_lens_cpu=torch.empty(0, dtype=torch.int64),
+        ),
+        metadata,
+    )
+    assert indexer.prefill_kwargs == {"max_row_keys": None}
+
+
+def test_qsa_prefill_max_row_keys_reads_host_lengths_only():
+    from sglang.srt.layers.attention.qsa.qsa_indexer import _prefill_max_row_keys
+
+    def width(tuple_lengths, host_lengths):
+        return _prefill_max_row_keys(
+            SimpleNamespace(
+                prefill_sequence_lengths_cpu=tuple_lengths,
+                compress_ratio=COMPRESS_RATIO,
+            ),
+            SimpleNamespace(seq_lens_cpu=host_lengths),
+        )
+
+    host = torch.tensor([130, 7, 4099], dtype=torch.int64)
+    assert width((130, 7, 4099), None) == 4099 // COMPRESS_RATIO
+    assert width(None, host) == 4099 // COMPRESS_RATIO
+    # The backend's own prefill lengths win over the scheduler's when both exist.
+    assert width((16, 20), host) == 20 // COMPRESS_RATIO
+    assert width(None, [130, 7, 4099]) == 4099 // COMPRESS_RATIO
+    assert width(None, None) is None
+    assert width(None, torch.empty(0, dtype=torch.int64)) is None
+    # Stable metadata carries no host length tuple at all: the fallback reads.
+    assert (
+        _prefill_max_row_keys(
+            SimpleNamespace(compress_ratio=COMPRESS_RATIO),
+            SimpleNamespace(seq_lens_cpu=host),
+        )
+        == 4099 // COMPRESS_RATIO
+    )
+
+
+# The maintained Flash-Next indexer shape: 4 query heads of 128 dims, which
+# gives the TileLang prefill kernel block_q = 128 // heads = 32 rows.
+_INDEX_HEADS, _INDEX_HEAD_DIM = 4, 128
+# Row chunks the sized budget allows: the relative layout reaches them by the
+# longest request, the absolute one only by the whole packed batch.
+_RELATIVE_CHUNK_ROWS = 64
+
+# (compressed-block length per request, rows per request per causal sweep,
+# whether each request's first row sees no block)
+_RELATIVE_CASES = [
+    ([70, 30, 15], 11, False),  # row blocks straddle requests, unequal widths
+    ([16, 16], 33, True),  # aligned requests whose first row sees no block
+    ([9], 33, True),  # one short request: chunk tails and empty rows
+    ([1024] * 4, 40, False),  # windows past the 512-block top-k cut
+]
+
+
+def _relative_prefill_case(
+    lengths,
+    rows_per_block,
+    *,
+    empty_rows,
+    device="cpu",
+    seed=11,
+    heads=_INDEX_HEADS,
+    head_dim=_INDEX_HEAD_DIM,
+):
+    """Packed prefill rows over concatenated requests: two causal sweeps per
+    request, so row blocks straddle requests and windows vary. ``empty_rows``
+    gives each request's first row no visible block, as the first
+    ``compress_ratio - 1`` tokens of a fresh request do.
+
+    Returns (q, k, row_starts, row_ends, width) with width the longest request's
+    block count — the relative layout's host-derived width.
+    """
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    offsets = [0]
+    for count in lengths:
+        offsets.append(offsets[-1] + count)
+    k = torch.randn(offsets[-1], 1, head_dim, generator=gen).to(device)
+    starts, ends = [], []
+    for half in range(2):
+        for request, count in enumerate(lengths):
+            for row in range(rows_per_block):
+                frac = (half * rows_per_block + row + 1) / (2 * rows_per_block)
+                empty = empty_rows and half == 0 and row == 0
+                starts.append(offsets[request])
+                ends.append(
+                    offsets[request] + (0 if empty else max(1, int(count * frac)))
+                )
+    q = torch.randn(len(starts), heads, head_dim, generator=gen).to(device)
+    as_tensor = lambda values: torch.tensor(values, dtype=torch.int32, device=device)
+    return q, k, as_tensor(starts), as_tensor(ends), max(lengths)
+
+
+def _dispatched_row_counts(rows, chunk_size):
+    """The row counts one dispatch over ``rows`` walks at ``chunk_size``."""
+    return [min(chunk_size, rows - first) for first in range(0, rows, chunk_size)]
+
+
+def _assert_same_top_k(scores, positions, starts, ends, outputs):
+    """Both layouts made the same cut over each row's own causal window.
+
+    Selected score multisets must agree exactly and no unselected block may
+    strictly outrank the weakest selected one: an exact ReLU-sum tie (a block
+    whose head scores all clamp) can legitimately land on either side of the
+    cut in either layout, so tie swaps are allowed while score and range
+    correctness are not weakened.
+    """
+    for row in range(scores.shape[0]):
+        start, end = int(starts[row]), int(ends[row])
+        length = end - start
+        window = scores[row, start:end]
+        blocks_per_output, values_per_output = [], []
+        for out in outputs:
+            tokens = out[row][out[row] >= 0].long()
+            assert (tokens <= positions[row]).all(), (row, "picked a future token")
+            assert int((out[row] >= 0).sum()) == int((outputs[0][row] >= 0).sum()), (
+                row,
+                "selected a different number of tokens",
+            )
+            blocks = torch.unique(tokens // COMPRESS_RATIO)
+            # The expansion appends the partial trailing group, whose id is one
+            # past the row's last complete block; every other id is in range.
+            assert (blocks <= length).all(), (row, "picked an invisible block")
+            blocks = blocks[blocks < length]
+            blocks_per_output.append(blocks)
+            values_per_output.append(scores[row, start + blocks].sort().values)
+        torch.testing.assert_close(
+            values_per_output[0], values_per_output[1], rtol=0, atol=0
+        )
+        if length <= BLOCK_TOPK:
+            assert torch.equal(
+                blocks_per_output[0].sort().values, blocks_per_output[1].sort().values
+            ), (row, "a window shorter than top-k did not select the same blocks")
+            continue
+        threshold = values_per_output[0].min()
+        for blocks in blocks_per_output:
+            unselected = torch.ones(length, dtype=torch.bool, device=scores.device)
+            unselected[blocks] = False
+            assert (window[unselected] <= threshold).all(), (
+                row,
+                "a better block was left out",
+            )
+
+
+@pytest.mark.parametrize("lengths, rows_per_block, empty_rows", _RELATIVE_CASES)
+def test_qsa_relative_prefill_layout_matches_absolute(
+    lengths, rows_per_block, empty_rows
+):
+    """Request-relative scoring puts the absolute kernel's fp32 values in each
+    row's own window and -inf past it, so chunk tails, empty rows and the widest
+    request's valid width all survive the layout change bit for bit."""
+    from sglang.srt.layers.attention.qsa.mqa import (
+        qsa_mqa_prefill,
+        qsa_mqa_prefill_relative,
+    )
+
+    q, k, starts, ends, width = _relative_prefill_case(
+        lengths, rows_per_block, empty_rows=empty_rows
+    )
+    absolute = qsa_mqa_prefill(q, k, starts, ends)
+    relative = qsa_mqa_prefill_relative(q, k, starts, ends, width)
+
+    assert relative.shape == (q.shape[0], width)
+    for row in range(q.shape[0]):
+        start, end = int(starts[row]), int(ends[row])
+        torch.testing.assert_close(
+            relative[row, : end - start], absolute[row, start:end], rtol=0, atol=0
+        )
+        assert torch.isneginf(relative[row, end - start :]).all(), row
+
+
+def test_qsa_relative_prefill_reference_handles_empty_key_set():
+    """The torch reference of the relative layout keeps the kernel helper's
+    contract on an empty key set — all -inf over the requested width, fp32 on the
+    query device — instead of gathering column 0 out of a [rows, 0] score matrix,
+    and it validates its operands like the absolute reference does."""
+    from sglang.srt.layers.attention.qsa.mqa import (
+        torch_qsa_mqa_prefill,
+        torch_qsa_mqa_prefill_relative,
+    )
+
+    q = torch.zeros(3, _INDEX_HEADS, _INDEX_HEAD_DIM)
+    no_keys = torch.zeros(0, 1, _INDEX_HEAD_DIM)
+    starts = torch.zeros(3, dtype=torch.int32)
+    ends = torch.zeros(3, dtype=torch.int32)
+
+    actual = torch_qsa_mqa_prefill_relative(q, no_keys, starts, ends, 4)
+    assert actual.shape == (3, 4) and actual.dtype == torch.float32
+    assert torch.isneginf(actual).all()
+    # The width floor matches the kernel helper, and no rows keeps the ragged
+    # shape the callers size their output from.
+    assert torch_qsa_mqa_prefill_relative(q, no_keys, starts, ends, 0).shape == (3, 1)
+    empty_rows = torch_qsa_mqa_prefill_relative(q[:0], no_keys, starts[:0], ends[:0], 4)
+    assert empty_rows.shape == (0, 4) and empty_rows.dtype == torch.float32
+
+    # The absolute reference has no column to mask over here at all, which is
+    # exactly why the relative layout must not gather from it.
+    assert torch_qsa_mqa_prefill(q, no_keys, starts, ends).shape == (3, 0)
+
+    # Empty input is no licence to skip the absolute reference's own operand
+    # checks: a mismatched head dimension still fails, keys or no keys.
+    with pytest.raises(ValueError, match="head dimensions must match"):
+        torch_qsa_mqa_prefill_relative(
+            q, torch.zeros(0, 1, q.shape[-1] // 2), starts, ends, 4
+        )
+
+    with pytest.raises(ValueError, match="QSA MQA requires k"):
+        torch_qsa_mqa_prefill_relative(q, no_keys.repeat(1, 2, 1), starts, ends, 4)
+
+
+class _DeviceRows:
+    """A CUDA-resident ``q`` as ``select_prefill_tokens`` sees it: shape, device,
+    ``is_cuda`` and row slicing. The leaf scorers below are stubbed, so only this
+    surface is consulted and the real host control flow still runs."""
+
+    def __init__(self, tensor):
+        self._tensor = tensor
+
+    @property
+    def shape(self):
+        return self._tensor.shape
+
+    @property
+    def device(self):
+        return self._tensor.device
+
+    @property
+    def is_cuda(self):
+        return True
+
+    def __getitem__(self, item):
+        return self._tensor[item]
+
+
+@pytest.mark.parametrize("lengths, rows_per_block, empty_rows", _RELATIVE_CASES)
+def test_qsa_prefill_relative_selection_matches_absolute_selection(
+    monkeypatch, lengths, rows_per_block, empty_rows
+):
+    """``select_prefill_tokens`` with max_row_keys scores through the relative
+    scorer, sizes its row chunks from the longest request instead of the packed
+    batch, hands top-k zero row starts and each row's own causal length, and
+    expands to the same token selections as the absolute layout.
+
+    Both layouts are compared on the CPU with the torch scorer standing in for the
+    TileLang kernel: the row chunking, top-k windows and expansion are the real
+    ones, and the selections are compared as the cut each one made (see
+    ``_assert_same_top_k``), which allows equal-score ties to swap without letting
+    a range or ordering defect through. A packed batch wider than its longest
+    request must dispatch coarser absolute chunks — sizing the relative run on the
+    packed width would give the identical chunk list and be caught here.
+    """
+    from sglang.srt.layers.attention.qsa.mqa import (
+        torch_qsa_mqa_prefill,
+        torch_qsa_mqa_prefill_relative,
+    )
+
+    q, k, starts, ends, width = _relative_prefill_case(
+        lengths, rows_per_block, empty_rows=empty_rows, seed=5
+    )
+    rows = q.shape[0]
+    monkeypatch.setattr(qsa_indexer_module, "HAS_TILELANG", True)
+    # Rows sit at the last token of their causal range; sequence lengths follow.
+    # An empty row is a token before the request's first complete block.
+    visible = (ends - starts).long()
+    sequence_lengths = torch.where(visible > 0, visible * COMPRESS_RATIO, 2).int()
+    positions = (sequence_lengths - 1).long()
+    indexer = SimpleNamespace(
+        layer_id=0,
+        token_topk=TOKEN_TOPK,
+        compress_ratio=COMPRESS_RATIO,
+        block_topk=BLOCK_TOPK,
+    )
+    monkeypatch.setattr(
+        qsa_indexer_module,
+        "_QSA_PREFILL_LOGITS_BUDGET_BYTES",
+        _RELATIVE_CHUNK_ROWS * width * torch.float32.itemsize,
+    )
+    expected_absolute = qsa_indexer_module._qsa_prefill_row_chunk_size(
+        rows, k.shape[0], q.shape[1]
+    )
+    expected_relative = qsa_indexer_module._qsa_prefill_row_chunk_size(
+        rows, width, q.shape[1]
+    )
+    absolute_chunks, relative_chunks = [], []
+
+    def absolute_scorer(q_chunk, keys, chunk_starts, chunk_ends, score_scale=None):
+        absolute_chunks.append(int(q_chunk.shape[0]))
+        return torch_qsa_mqa_prefill(q_chunk, keys, chunk_starts, chunk_ends)
+
+    def relative_scorer(q_chunk, keys, chunk_starts, chunk_ends, row_width):
+        relative_chunks.append(int(q_chunk.shape[0]))
+        assert int(row_width) == width, "the host width did not reach the scorer"
+        return torch_qsa_mqa_prefill_relative(
+            q_chunk, keys, chunk_starts, chunk_ends, row_width
+        )
+
+    monkeypatch.setattr(qsa_indexer_module, "qsa_mqa_prefill", absolute_scorer)
+    monkeypatch.setattr(qsa_indexer_module, "qsa_mqa_prefill_relative", relative_scorer)
+    scores = torch_qsa_mqa_prefill(q, k, starts, ends)
+
+    absolute = QSAIndexer.select_prefill_tokens(
+        indexer, _DeviceRows(q), k, starts, ends, positions, sequence_lengths
+    )
+    relative = QSAIndexer.select_prefill_tokens(
+        indexer,
+        _DeviceRows(q),
+        k,
+        starts,
+        ends,
+        positions,
+        sequence_lengths,
+        max_row_keys=width,
+    )
+
+    assert absolute_chunks == _dispatched_row_counts(rows, expected_absolute)
+    assert relative_chunks == _dispatched_row_counts(
+        rows, expected_relative
+    ), "row chunks were not sized by the longest request"
+    assert len(relative_chunks) >= 2, "the relative path did not run in chunks"
+    if k.shape[0] > width:
+        assert relative_chunks != absolute_chunks, "chunk sizing ignored max_row_keys"
+    _assert_same_top_k(scores, positions, starts, ends, [absolute, relative])
+    # Without a TileLang build (this run) the width still cannot switch layouts.
+    monkeypatch.setattr(qsa_indexer_module, "HAS_TILELANG", False)
+    torch.testing.assert_close(
+        QSAIndexer.select_prefill_tokens(
+            indexer,
+            _DeviceRows(q),
+            k,
+            starts,
+            ends,
+            positions,
+            sequence_lengths,
+            max_row_keys=width,
+        ),
+        absolute,
+    )
+
+
+@pytest.mark.parametrize(
+    "lengths, rows_per_block, empty_rows",
+    [
+        ([700, 3000, 1500], 37, False),  # row blocks straddle requests
+        ([4096] * 6, 64, False),  # aligned blocks, equal lengths
+        ([9000], 8, True),  # one short request: many key splits, empty rows
+    ],
+)
+def test_qsa_relative_prefill_tilelang_scores_equal_absolute(
+    lengths, rows_per_block, empty_rows
+):
+    """GPU oracle (4 heads x 128 dims, the maintained indexer shape):
+    request-relative scoring puts the same fp32 values in each row's own window
+    as the absolute-layout kernel does, bit for bit, and agrees with the torch
+    reference on those windows."""
+    from sglang.srt.layers.attention.qsa.mqa import (
+        HAS_TILELANG,
+        tilelang_qsa_mqa_prefill,
+        tilelang_qsa_mqa_prefill_relative,
+        torch_qsa_mqa_prefill_relative,
+    )
+
+    if not HAS_TILELANG:
+        pytest.skip("tilelang unavailable")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA GPU required")
+    q, k, starts, ends, width = _relative_prefill_case(
+        lengths, rows_per_block, empty_rows=empty_rows, device="cuda", seed=11
+    )
+    q, k = q.to(torch.bfloat16), k.to(torch.bfloat16)
+    absolute = tilelang_qsa_mqa_prefill(q, k, starts, ends)
+    relative = tilelang_qsa_mqa_prefill_relative(q, k, starts, ends, width)
+
+    assert relative.shape == (q.shape[0], width)
+    for row in range(q.shape[0]):
+        start, end = int(starts[row]), int(ends[row])
+        assert torch.equal(relative[row, : end - start], absolute[row, start:end]), row
+
+    reference = torch_qsa_mqa_prefill_relative(q, k, starts, ends, width)
+    window = torch.arange(width, device=q.device) < (ends - starts).long().reshape(
+        -1, 1
+    )
+    torch.testing.assert_close(
+        relative[window], reference[window], rtol=2e-3, atol=2e-3
+    )
+    assert torch.isneginf(reference[~window]).all()
+
+
+@pytest.mark.parametrize(
+    "lengths, rows_per_block", [([600, 1200, 300], 37), ([1500] * 4, 33)]
+)
+def test_qsa_relative_prefill_tilelang_selects_equal_blocks(
+    monkeypatch, lengths, rows_per_block
+):
+    """GPU oracle of the real dispatch on the maintained 4 x 128 shape:
+    ``select_prefill_tokens`` with max_row_keys runs as several row chunks and
+    picks blocks whose scores are the multiset the absolute layout picks, with
+    every pick inside its row's causal range. At least one row's window is longer
+    than block_topk, so the cut itself is exercised.
+
+    Compared as per-row score multisets rather than ids: the fast top-k leaves the
+    order of an exact ReLU-sum tie unspecified, even between two absolute runs."""
+    from sglang.srt.layers.attention.qsa.mqa import (
+        HAS_TILELANG,
+        tilelang_qsa_mqa_prefill,
+    )
+
+    if not HAS_TILELANG:
+        pytest.skip("tilelang unavailable")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA GPU required")
+    q, k, starts, ends, width = _relative_prefill_case(
+        lengths, rows_per_block, empty_rows=True, device="cuda", seed=5
+    )
+    q, k = q.to(torch.bfloat16), k.to(torch.bfloat16)
+    indexer = SimpleNamespace(
+        layer_id=0,
+        token_topk=TOKEN_TOPK,
+        compress_ratio=COMPRESS_RATIO,
+        block_topk=BLOCK_TOPK,
+    )
+    # Shrink the logits budget so both paths run as several row chunks, with
+    # chunk boundaries inside requests, as large batches do.
+    monkeypatch.setattr(
+        qsa_indexer_module,
+        "_QSA_PREFILL_LOGITS_BUDGET_BYTES",
+        32 * width * torch.float32.itemsize,
+    )
+    assert (
+        qsa_indexer_module._qsa_prefill_row_chunk_size(q.shape[0], width, q.shape[1])
+        < q.shape[0]
+    )
+    visible = (ends - starts).long()
+    sequence_lengths = torch.where(visible > 0, visible * COMPRESS_RATIO, 2).int()
+    positions = (sequence_lengths - 1).long()
+    absolute = QSAIndexer.select_prefill_tokens(
+        indexer, q, k, starts, ends, positions, sequence_lengths
+    )
+    relative = QSAIndexer.select_prefill_tokens(
+        indexer,
+        q,
+        k,
+        starts,
+        ends,
+        positions,
+        sequence_lengths,
+        max_row_keys=width,
+    )
+
+    scores = tilelang_qsa_mqa_prefill(q, k, starts, ends)
+    rows_past_topk = 0
+    for row in range(q.shape[0]):
+        length = int(ends[row] - starts[row])
+        rows_past_topk += length > BLOCK_TOPK
+    _assert_same_top_k(scores, positions, starts, ends, [absolute, relative])
+    assert rows_past_topk, "no row exercises the top-k cut"
 
 
 @pytest.mark.parametrize(
