@@ -12,17 +12,37 @@ rollback must be preserved.
 
 The pool double replicates HostKVCache alloc/free/available_size/
 _merge_release_slots (pool_host/base.py) slot-for-slot; it exists only to
-skip the pinned host-buffer allocation of HostKVCache.__init__.
+skip the pinned host-buffer allocation of HostKVCache.__init__.  The storage-hit
+cases pair it with a controller stand-in that borrows the real
+HybridCacheController release-enqueue path over a real HostPoolGroup, so a
+revoke's component staging has to travel the production ownership chain: queued
+page chunks first, then the control-queue drain that frees them exactly once.
+
+The unified storage-hit cases also pin the hybrid (SWA / Mamba) boundary rule:
+a hit that cannot be staged whole is revoked rather than shortened, because the
+shorter boundary was never proven present by the hit query that issued those
+component transfers — trailing keys can be re-targeted onto it, but reading them
+there is unverified I/O.
 """
 
 import unittest
+from collections import defaultdict
+from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import torch
 
-from sglang.srt.mem_cache.hicache_storage import PoolName, PoolTransfer
+from sglang.srt.mem_cache.hicache_storage import (
+    PoolHitPolicy,
+    PoolName,
+    PoolTransfer,
+)
+from sglang.srt.mem_cache.hybrid_cache.hybrid_cache_controller import (
+    HybridCacheController,
+)
 from sglang.srt.mem_cache.pool_host.group import HostPoolGroup, PoolEntry
+from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=4, suite="base-a-test-cpu")
@@ -452,7 +472,7 @@ class TestHiRadixLoadBackShortfall(unittest.TestCase):
         )
         parent.__eq__ = lambda other: other is cache.root_node
         cache.root_node = object()
-        cache.ancester = parent
+        cache.ancester = parent  # codespell:ignore ancester
         return cache, node, evicted, load_state
 
     def test_load_back_evicts_only_the_device_shortfall(self):
@@ -573,56 +593,147 @@ class TestHiRadixStorageHitShortfall(unittest.TestCase):
         self.assertIsNone(operation.host_indices)
 
 
-class TestUnifiedStorageHitShortfall(unittest.TestCase):
-    """UnifiedRadixCache storage-hit prefetch staging drain."""
+class _HybridReleaseController:
+    """Cache-controller stand-in carrying the production release ownership chain.
 
-    def _run(self, free, pending, alloc_len=16, threshold=4, evict_frees=None):
+    ``append_host_mem_release``, its page splitting and the per-pool queue setup
+    are the real ``HybridCacheController`` implementations over a real
+    ``HostPoolGroup`` of the doubles above, so a revoke must hand component
+    staging to the same page-chunk queues the server drains on a later tick. Only
+    the queues are local: no controller thread, no storage backend, no IO.
+    """
+
+    append_host_mem_release = HybridCacheController.append_host_mem_release
+    _append_host_mem_release_pages = (
+        HybridCacheController._append_host_mem_release_pages
+    )
+    _init_extra_host_mem_release_queues = (
+        HybridCacheController._init_extra_host_mem_release_queues
+    )
+
+    def __init__(self, group, operation):
+        self.mem_pool_host = group
+        self.prefetch_hit_queue = Queue()
+        self.prefetch_hit_queue.put(operation)
+        self.ack_prefetch_queue = Queue()
+        self.ack_backup_queue = Queue()
+        self.host_mem_release_queue = Queue()
+        self.prefetch_buffer = Queue()
+        # Cache mode reserved the requested span when the prefetch was issued.
+        self.prefetch_tokens_occupied = 0
+        self._init_extra_host_mem_release_queues()
+
+    def prefetch_rate_limited(self):
+        return False
+
+
+class TestUnifiedStorageHitShortfall(unittest.TestCase):
+    """UnifiedRadixCache storage-hit staging: reclaim sizing, the full-only
+    partial fallback and the hybrid (SWA / Mamba) all-or-nothing guard."""
+
+    HIT_TOKENS = 16
+    PAGE_SIZE = 4
+    # Four distinct page hashes for the 16-token hit at page size 4.
+    HASHES = ["h0", "h1", "h2", "h3"]
+    # The two hybrid layouts this guard exists for: one Mamba checkpoint slot and
+    # a realistic SWA trailing window (the last 8 tokens of the fetched span).
+    # (component, pool, pool size, staged tokens, pool page size)
+    HYBRID_CASES = [
+        (ComponentType.SWA, PoolName.SWA, 32, 8, 4),
+        (ComponentType.MAMBA, PoolName.MAMBA, 8, 1, 1),
+    ]
+
+    def _run(
+        self,
+        free,
+        pending,
+        evict_frees=None,
+        hybrid=None,
+    ):
         from sglang.srt.mem_cache.unified_radix_cache import (
-            _OngoingPrefetch,
             UnifiedRadixCache,
+            _OngoingPrefetch,
         )
 
+        kv = _HostPoolDouble(64, page_size=self.PAGE_SIZE)
+        kv.stage(free=free, pending=pending)
+        entries = [_entry(PoolName.KV, kv, host_evict_fn=None, anchor=True)]
+        comp_xfers = [hybrid] if hybrid else []
+        side_pools = {}
+        for component, pool_name, pool_size, tokens, side_page in comp_xfers:
+            side = _HostPoolDouble(pool_size, page_size=side_page)
+            side_pools[pool_name] = (side, tokens, side_page, pool_size)
+            entries.append(_entry(pool_name, side))
+        group = HostPoolGroup(entries)
+
+        # The component staging a real prefetch carries: allocated from its own
+        # pool, page-aligned, keyed by the page hashes it covers.
+        transfers = []
+        for component, pool_name, _size, tokens, side_page in comp_xfers:
+            staged = group.alloc(tokens, pool=pool_name)
+            self.assertEqual(len(staged), tokens, "the side pool could not stage")
+            transfers.append(
+                (
+                    component,
+                    [
+                        PoolTransfer(
+                            name=pool_name,
+                            host_indices=staged,
+                            keys=self.HASHES[len(self.HASHES) - tokens // side_page :],
+                            # Mamba/SWA states are matched by their trailing
+                            # pages, not by every page of the fetched span.
+                            hit_policy=PoolHitPolicy.TRAILING_PAGES,
+                        )
+                    ],
+                )
+            )
+
+        operation = SimpleNamespace(
+            request_id="r1",
+            storage_hit_count=self.HIT_TOKENS,
+            host_indices=None,
+            hash_value=list(self.HASHES),
+            all_hash_values=list(self.HASHES),
+            is_terminated=lambda: False,
+            # L3-miss accounting snapshots the prefetch issue set.
+            stats_requested_tokens=self.HIT_TOKENS,
+            stats_total_tokens=self.HIT_TOKENS + 40,
+        )
+        cc = _HybridReleaseController(group, operation)
+        cc.prefetch_tokens_occupied = self.HIT_TOKENS
+
         cache = object.__new__(UnifiedRadixCache)
-        cache.tree_core = SimpleNamespace(page_size=1)
-        cache.prefetch_threshold = threshold
+        unlocked = []
+        cache.disable = False
+        cache.tree_core = SimpleNamespace(
+            page_size=self.PAGE_SIZE,
+            dec_host_lock_ref=lambda node_id, params: unlocked.append((node_id, params))
+            or None,
+        )
+        cache.prefetch_threshold = self.PAGE_SIZE
         cache.host_memory_mode = "cache"
-        host = _HostPoolDouble(64)
-        host.stage(free=free, pending=pending)
-        cc = MagicMock()
-        cc.prefetch_rate_limited.return_value = False
-        cc.mem_pool_host = host
+        cache.buffer_pipeline = None
+        cache._prefetch_outcome_stats = defaultdict(int)
         cache.cache_controller = cc
         evicted = []
 
-        def evict_host(n):
-            evicted.append(n)
-            if evict_frees is not None and n >= evict_frees:
-                host.evict(40, evict_frees)
+        def evict_host(size):
+            evicted.append(size)
+            if evict_frees is not None and size >= evict_frees:
+                kv.evict(48, evict_frees)
 
         cache.evict_host = evict_host
-        operation = SimpleNamespace(
-            request_id="r1",
-            storage_hit_count=alloc_len,
-            host_indices=None,
-            hash_value=["h"] * alloc_len,
-            is_terminated=lambda: False,
-        )
-        hit = MagicMock()
-        hit.get.return_value = operation
-        cc.prefetch_hit_queue = hit
-        info = _OngoingPrefetch(
-            anchor_node_id=1,
-            prefetch_key=[0] * alloc_len,
-            host_indices=None,
-            operation=operation,
-            anchor_lock_params=None,
-            comp_xfers={},
-        )
-        cache.ongoing_prefetch = {"r1": info}
-        cache._invalidate_absent_from_hit_query = lambda operation: None
-        cache._account_prefetch_outcome = lambda operation, revoked: None
-        revoked = []
-        cache.revoke_pending_prefetch = lambda rid: revoked.append(rid)
+        anchor_lock_params = SimpleNamespace(req=7, delta=2)
+        cache.ongoing_prefetch = {
+            "r1": _OngoingPrefetch(
+                anchor_node_id=7,
+                prefetch_key=list(range(self.HIT_TOKENS)),
+                host_indices=None,
+                operation=operation,
+                anchor_lock_params=anchor_lock_params,
+                comp_xfers=dict(transfers),
+            )
+        }
         cache._drain_storage_control_queues_impl(
             n_storage_hit=1,
             n_ack_prefetch=0,
@@ -631,22 +742,115 @@ class TestUnifiedStorageHitShortfall(unittest.TestCase):
             extra_release_counts=None,
             log_metrics=False,
         )
-        return cache, host, operation, evicted, revoked
+        return SimpleNamespace(
+            cache=cache,
+            kv=kv,
+            group=group,
+            cc=cc,
+            operation=operation,
+            evicted=evicted,
+            unlocked=unlocked,
+            anchor_lock_params=anchor_lock_params,
+            side_pools=side_pools,
+            transfers=[t for _c, per in transfers for t in per],
+        )
+
+    def _drain_releases(self, run):
+        """The next control-queue tick, which owns the queued host releases."""
+        counts = {
+            pool_name: queue.qsize()
+            for pool_name, queue in run.cc.extra_host_mem_release_queues.items()
+        }
+        run.cache._drain_storage_control_queues_impl(
+            n_storage_hit=0,
+            n_ack_prefetch=0,
+            n_backup=0,
+            n_release=None,
+            extra_release_counts=counts,
+            log_metrics=False,
+        )
 
     def test_hit_alloc_stages_full_hit_after_gap_filling_reclaim(self):
-        _cache, _host, operation, evicted, revoked = self._run(
-            0, 10, evict_frees=6
-        )
-        self.assertEqual(evicted, [6])  # 16 - (0 + 10) available
-        self.assertEqual(revoked, [])
-        self.assertEqual(operation.storage_hit_count, 16)
-        self.assertEqual(len(operation.host_indices), 16)
+        # 0 free + 8 pending for a 16-token hit at page size 4: a page-aligned
+        # reclaim of exactly the 8-token gap must let the FULL hit stage.
+        run = self._run(0, 8, evict_frees=8)
+        self.assertEqual(run.evicted, [8])  # 16 - (0 + 8) available
+        self.assertEqual(run.operation.storage_hit_count, self.HIT_TOKENS)
+        self.assertEqual(len(run.operation.host_indices), self.HIT_TOKENS)
+        self.assertEqual(run.cc.prefetch_buffer.qsize(), 1)
+        self.assertEqual(run.cc.prefetch_tokens_occupied, self.HIT_TOKENS)
+        self.assertEqual(run.unlocked, [])
 
     def test_zero_available_reclaims_full_hit_size_then_revokes(self):
-        _cache, _host, operation, evicted, revoked = self._run(0, 0)
-        self.assertEqual(evicted, [16])
-        self.assertEqual(revoked, ["r1"])
-        self.assertIsNone(operation.host_indices)
+        run = self._run(0, 0)
+        self.assertEqual(run.evicted, [self.HIT_TOKENS])
+        self.assertNotIn("r1", run.cache.ongoing_prefetch)
+        self.assertIsNone(run.operation.host_indices)
+        self.assertEqual(run.cc.prefetch_tokens_occupied, 0)
+
+    def test_kv_only_hit_falls_back_to_a_short_page_aligned_prefix(self):
+        # A KV-only (FULL component) prefetch may still truncate: the disk hit is
+        # real, 8 of the 16 tokens fit page-aligned, and a shorter prefix stays
+        # usable because its sidecars are derived from KV itself.
+        run = self._run(8, 0)
+        self.assertEqual(run.evicted, [8])  # reclaimed the shortfall first
+        self.assertEqual(run.operation.storage_hit_count, 8)
+        self.assertEqual(run.operation.hash_value, self.HASHES[:2])
+        self.assertEqual(len(run.operation.host_indices), 8)
+        self.assertEqual(len(run.cache.ongoing_prefetch["r1"].host_indices), 8)
+        self.assertEqual(list(run.cc.prefetch_buffer.queue), [run.operation])
+        # Nothing was released: the shortened bounce is the whole hit now.
+        self.assertEqual(run.kv.available_size(), 0)
+        self.assertEqual(run.cc.host_mem_release_queue.qsize(), 0)
+
+    def test_hybrid_hit_is_revoked_rather_than_shortened(self):
+        """A hybrid prefetch whose host staging cannot cover the whole disk hit is
+        revoked instead of being staged at a shorter boundary. Its component
+        transfers were queried at that boundary: _sync_trailing_keys can re-target
+        trailing keys onto a shorter span, but the state at the new boundary is
+        unverified, so the hit is dropped rather than read. The boundary and page
+        hashes survive until the ordinary revoke cleanup, which then returns the
+        side allocations exactly once through the controller release queues."""
+        for component, pool_name, pool_size, tokens, side_page in self.HYBRID_CASES:
+            with self.subTest(component=component):
+                run = self._run(
+                    8,
+                    0,
+                    hybrid=(component, pool_name, pool_size, tokens, side_page),
+                )
+
+                self.assertEqual(run.evicted, [8])  # the shortfall was reclaimed
+                self.assertNotIn("r1", run.cache.ongoing_prefetch)
+                self.assertIsNone(run.operation.host_indices)
+                self.assertEqual(run.operation.storage_hit_count, self.HIT_TOKENS)
+                self.assertEqual(run.operation.hash_value, self.HASHES)
+                self.assertEqual(run.cc.prefetch_buffer.qsize(), 0)
+                self.assertEqual(run.unlocked, [(7, run.anchor_lock_params)])
+                self.assertEqual(run.cc.prefetch_tokens_occupied, 0)
+
+                # Ownership stays with the controller until its release drain: the
+                # side pool is still short, and the exact staging we issued sits
+                # queued as page chunks.
+                side = run.side_pools[pool_name][0]
+                self.assertEqual(side.available_size(), pool_size - tokens)
+                release_queue = run.cc.extra_host_mem_release_queues[pool_name]
+                self.assertEqual(release_queue.qsize(), tokens // side_page)
+                self.assertTrue(
+                    torch.equal(
+                        torch.cat(list(release_queue.queue)).sort().values,
+                        run.transfers[0].host_indices.sort().values,
+                    )
+                )
+
+                self._drain_releases(run)
+
+                # Released exactly once, through the production free path: the
+                # pool double rejects a second free of an already-free slot.
+                self.assertEqual(side.available_size(), side.logical_size)
+                self.assertEqual(release_queue.qsize(), 0)
+                self.assertEqual(run.cc.host_mem_release_queue.qsize(), 0)
+                self.assertEqual(run.kv.available_size(), 8)
+                self.assertFalse(run.kv.slot_used.any())
 
 
 class TestSWAComponentPrefetchStaging(unittest.TestCase):
