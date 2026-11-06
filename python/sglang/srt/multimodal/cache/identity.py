@@ -264,9 +264,9 @@ def _canonicalize(value: Any, *, exact: bool = False) -> Any:
             "type": "torch_tensor",
             "dtype": str(snapshot.dtype),
             "shape": list(snapshot.shape),
-            ("data" if exact else "digest"): payload.hex()
-            if exact
-            else _digest_bytes(payload),
+            ("data" if exact else "digest"): (
+                payload.hex() if exact else _digest_bytes(payload)
+            ),
         }
     if isinstance(value, np.generic):
         scalar = np.asarray(value)
@@ -281,9 +281,11 @@ def _canonicalize(value: Any, *, exact: bool = False) -> Any:
             "type": "numpy_array",
             "dtype": snapshot.dtype.str,
             "shape": list(snapshot.shape),
-            ("data" if exact else "digest"): snapshot.tobytes().hex()
-            if exact
-            else _digest_bytes(snapshot.view(np.uint8).tobytes()),
+            ("data" if exact else "digest"): (
+                snapshot.tobytes().hex()
+                if exact
+                else _digest_bytes(snapshot.view(np.uint8).tobytes())
+            ),
         }
     if isinstance(value, Mapping):
         items = [[encode(key), encode(item)] for key, item in value.items()]

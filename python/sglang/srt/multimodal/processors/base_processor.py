@@ -311,9 +311,11 @@ class BaseMultimodalProcessor(ABC):
                 exact=True,
                 extra={
                     "hf_config": hf_config.to_dict(),
-                    "image_processor": self._processor.image_processor.to_dict()
-                    if getattr(self._processor, "image_processor", None) is not None
-                    else None,
+                    "image_processor": (
+                        self._processor.image_processor.to_dict()
+                        if getattr(self._processor, "image_processor", None) is not None
+                        else None
+                    ),
                 },
             )
             if shared_directory
@@ -1745,9 +1747,9 @@ class BaseMultimodalProcessor(ABC):
                 and not raw_audios
                 and not raw_videos
             ):
-                assert isinstance(base_output.input_ids, list), (
-                    f"expected list[int] input_ids, got {type(base_output.input_ids)}"
-                )
+                assert isinstance(
+                    base_output.input_ids, list
+                ), f"expected list[int] input_ids, got {type(base_output.input_ids)}"
                 try:
                     counts = self.resolve_image_token_counts(raw_images)
                     image_placeholder_token_id = mm_tokens.image_token_id
