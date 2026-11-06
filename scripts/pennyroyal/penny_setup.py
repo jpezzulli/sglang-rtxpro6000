@@ -858,7 +858,11 @@ def run_session(
             # the operator fix it or cancel, and it is not something to save past.
             plan, issues = None, [pc.Issue("error", str(exc), key=key)]
         else:
-            plan = pc.build_plan(mode, config, environ, repo_root=repo_root)
+            # This save creates a new folder. Validate the proposed pair here;
+            # inspect its actual startup after writing, not the old folder it replaces.
+            plan = pc.build_plan(
+                mode, config, environ, repo_root=repo_root, check_mounted_cache=False
+            )
             if not plan.errors:
                 break
             issues = list(plan.errors)
@@ -880,11 +884,22 @@ def run_session(
             and (issue.key in answers or issue.key in preserved)
         ]
         choices = sorted({issue.key for issue in correctable})
+        cache_errors = [issue for issue in issues if issue.key in pc.MM_CACHE_KEYS]
+        if cache_errors:
+            # An inherited pair may have no saved answers yet. Let the operator
+            # repair either half, including clearing a directory that lacks a budget.
+            choices = list(
+                dict.fromkeys(
+                    choices
+                    + [issue.key for issue in cache_errors]
+                    + list(pc.MM_CACHE_KEYS)
+                )
+            )
         options = [(key, f"re-enter {key}") for key in choices]
         # 'Save anyway' keeps its meaning for every other setting, but the image
         # cache pair is one decision: a settings file that cannot state it, and the
         # startup script generated from it, are not written on a maybe.
-        if not any(issue.key in pc.MM_CACHE_KEYS for issue in issues):
+        if not cache_errors:
             options.append(
                 ("s", "save despite these errors (--check keeps " "reporting them)")
             )
@@ -897,19 +912,18 @@ def run_session(
                 "Saving despite the errors; --check will keep reporting " "them."
             )
             break
-        match = next((issue for issue in correctable if issue.key == choice), None)
-        if match is None:
+        if choice not in choices:
             prompt.say("Cancelled; nothing was written.")
             return 3
-        spec = specs[match.key]
-        current = answers.get(match.key, preserved.get(match.key, ""))
+        spec = specs[choice]
+        current = answers.get(choice, preserved.get(choice, environ.get(choice, "")))
         if spec.kind in ("bool", "choice", "mm-device"):
-            answers[match.key] = _ask_fixed(prompt, spec, current)
-        elif match.key in _DEFAULT_OFF_KEYS:
-            answers[match.key] = _ask_default_off(prompt, spec, current, cleared)
+            answers[choice] = _ask_fixed(prompt, spec, current)
+        elif choice in _DEFAULT_OFF_KEYS:
+            answers[choice] = _ask_default_off(prompt, spec, current, cleared)
         else:
-            answers[match.key] = prompt.ask_validated(
-                f"  new value for {match.key}",
+            answers[choice] = prompt.ask_validated(
+                f"  new value for {choice}",
                 spec,
                 default=current,
                 allow_empty=spec.kind == "positive-int",

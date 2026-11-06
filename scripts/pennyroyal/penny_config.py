@@ -1261,13 +1261,18 @@ def _adopt(
 
 
 def build_plan(
-    mode: str, config: Config, environ: dict[str, str], repo_root: Optional[Path] = None
+    mode: str,
+    config: Config,
+    environ: dict[str, str],
+    repo_root: Optional[Path] = None,
+    *,
+    check_mounted_cache: bool = True,
 ) -> Plan:
     if mode != config.mode:
         raise ConfigError(f"config mode mismatch: {mode} != {config.mode}")
     if mode == "native":
         return _plan_native(config, environ, repo_root)
-    return _plan_container(config, environ, repo_root)
+    return _plan_container(config, environ, repo_root, check_mounted_cache)
 
 
 def _profile_line(config: Config) -> str:
@@ -1667,16 +1672,29 @@ def _startup_cache_assignment(text: str, name: str) -> tuple[bool, Optional[str]
     if match is None:
         return False, None
     raw = match.group(1).strip()
-    # Only a single-quoted body or an unquoted literal is a plain value: the
-    # interpolation characters inside double quotes are expanded by the shell.
-    # Only a single-quoted body or a bare literal without interpolation characters
-    # is a plain value: $ and backticks inside double quotes are expanded by shell.
-    if ("$" in raw or "`" in raw) and not raw.startswith("'"):
-        return True, None
     try:
-        return True, _unquote(raw, "a startup file setting")
-    except ConfigError:
+        words = shlex.split(raw)
+    except ValueError:
         return True, None
+    if not raw:
+        return True, ""
+    if len(words) != 1:
+        return True, None
+    value = words[0]
+    # Generated shell quoting can concatenate quoted fragments around an apostrophe.
+    # Recognize its canonical form without evaluating shell expansions or commands.
+    if raw == shlex.quote(value):
+        return True, value
+    if raw.startswith("'") and raw.endswith("'") and raw.count("'") == 2:
+        return True, value
+    if (
+        raw.startswith('"')
+        and raw.endswith('"')
+        and raw.count('"') == 2
+        and not any(char in raw for char in "$`\\")
+    ):
+        return True, value
+    return True, None
 
 
 def _startup_file_cache_issue(
@@ -1705,6 +1723,13 @@ def _startup_file_cache_issue(
             "check cannot say what that launch shares; save the setup again to "
             "write plain values into the file",
             key=MM_CACHE_DIR_KEY,
+        )
+    problems = mm_cache_pair_problems(stated)
+    if problems:
+        return Issue(
+            "error",
+            f"{startup}: " + "; ".join(message for _, message in problems),
+            key=problems[0][0],
         )
     if stated == {name: pair.get(name, "") for name in MM_CACHE_KEYS}:
         return None
@@ -1767,12 +1792,6 @@ def _mm_preprocess_cache_issues(plan: Plan, environ: dict[str, str]) -> None:
                 key=MM_CACHE_DIR_KEY,
             )
         )
-    if plan.config.mode == "container" and plan.launch_dir is not None:
-        issue = _startup_file_cache_issue(
-            plan.launch_dir / "config" / STARTUP_BY_PROFILE[plan.config.profile], pair
-        )
-        if issue is not None:
-            plan.issues.append(issue)
 
 
 def _mm_preprocess_cache_line(plan: Plan) -> str:
@@ -1826,7 +1845,10 @@ def _nixl_budget_line(budget: str) -> str:
 
 
 def _plan_container(
-    config: Config, environ: dict[str, str], repo_root: Optional[Path]
+    config: Config,
+    environ: dict[str, str],
+    repo_root: Optional[Path],
+    check_mounted_cache: bool = True,
 ) -> Plan:
     """Plan the ordinary prebuilt-container launch: run.sh plus mounted files.
 
@@ -2056,6 +2078,14 @@ def _plan_container(
                     plan.issues.append(issue)
     _profile_pinned_issues(plan)
     _mm_preprocess_cache_issues(plan, environ)
+
+    if check_mounted_cache:
+        issue = _startup_file_cache_issue(
+            launch_dir / "config" / startup_name,
+            {name: plan.env.get(name, "") for name in MM_CACHE_KEYS},
+        )
+        if issue is not None:
+            plan.issues.append(issue)
 
     plan.next_command = " ".join(quote_command_arg(arg) for arg in plan.argv)
     plan.summary = [

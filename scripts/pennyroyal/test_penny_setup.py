@@ -1462,6 +1462,70 @@ class SetupSessionTests(FixtureMixin):
         self.assertEqual(reloaded.errors, [])
         self.assertIn("image preprocessing cache: off", "\n".join(reloaded.summary))
 
+    def test_native_inherited_cache_errors_can_be_repaired_or_disabled(self):
+        for inherited, key, answer in (
+            ({pc.MM_CACHE_SIZE_KEY: "oops"}, pc.MM_CACHE_SIZE_KEY, "128"),
+            ({pc.MM_CACHE_DIR_KEY: "/dev/shm/cache"}, pc.MM_CACHE_DIR_KEY, "off"),
+            (
+                {pc.MM_CACHE_DIR_KEY: "relative", pc.MM_CACHE_SIZE_KEY: "128"},
+                pc.MM_CACHE_DIR_KEY,
+                "/dev/shm/cache",
+            ),
+        ):
+            with self.subTest(inherited=inherited):
+                code, output, _ = self.run_setup(
+                    ["next"]
+                    + self.basics(str(self.next_model))
+                    + ["n", key, answer, "y"],
+                    environ=inherited,
+                )
+                self.assertEqual(code, 0, output)
+                settings = saved_settings(output)
+                config = pc.load_config("native", settings, inherited, self.repo)
+                plan = pc.build_plan("native", config, inherited, repo_root=self.repo)
+                self.assertEqual(plan.errors, [])
+                self.assertEqual(config.values[key], "" if answer == "off" else answer)
+
+    def test_generated_cache_path_with_shell_quotes_checks_cleanly(self):
+        directory = "/cache/John's photos $literal"
+        code, output, _, _ = self.run_container_setup(
+            environ={pc.MM_CACHE_DIR_KEY: directory, pc.MM_CACHE_SIZE_KEY: "128"}
+        )
+        self.assertEqual(code, 0, output)
+        config = pc.load_config("container", saved_settings(output), {}, self.repo)
+        plan = pc.build_plan("container", config, {}, repo_root=self.repo)
+        self.assertEqual(plan.errors, [])
+        self.assertFalse(
+            [i for i in plan.warnings if i.key in pc.MM_CACHE_KEYS], plan.warnings
+        )
+
+    def test_invalid_mounted_cache_pair_fails_check(self):
+        code, output, _, files = self.run_container_setup()
+        self.assertEqual(code, 0, output)
+        startup = files["start-flash-next-frspec.sh"]
+        startup.write_text(
+            startup.read_text().replace(
+                "PENNY_MM_PREPROCESS_CACHE_DIR=\n",
+                "PENNY_MM_PREPROCESS_CACHE_DIR=relative\n",
+            )
+        )
+        config = pc.load_config("container", saved_settings(output), {}, self.repo)
+        plan = pc.build_plan("container", config, {}, repo_root=self.repo)
+        self.assertTrue(plan.errors)
+        self.assertIn("absolute directory", "\n".join(i.message for i in plan.errors))
+        code, repaired, _, _ = self.run_container_setup(
+            existing=True, config_path=saved_settings(output)
+        )
+        self.assertEqual(code, 0, repaired)
+        repaired_config = pc.load_config(
+            "container", saved_settings(repaired), {}, self.repo
+        )
+        self.assertEqual(
+            pc.build_plan("container", repaired_config, {}, repo_root=self.repo).errors,
+            [],
+        )
+        self.assertIn("PENNY_MM_PREPROCESS_CACHE_DIR=relative", startup.read_text())
+
     def test_an_unusable_inherited_budget_is_correctable_and_not_trimmed(self):
         # An exported value is what this container launch would use, so the save has
         # to end up describing it; one the settings cannot carry is named among the
@@ -1470,7 +1534,7 @@ class SetupSessionTests(FixtureMixin):
         for exported, phrase, fix, wanted in (
             ("oops", "whole number of MiB", ("1", "512"), "512"),
             (" 512 ", "leading or trailing spaces", ("1", "256"), "256"),
-            ("oops", "whole number of MiB", ("2",), ""),
+            ("oops", "whole number of MiB", ("c",), ""),
             # The exact reproduction: the only row offered is re-enter or cancel, so
             # an answer that tries to save past the pair cancels the session instead
             # of writing a settings file and a startup script that disagree.
@@ -1500,9 +1564,9 @@ class SetupSessionTests(FixtureMixin):
                 self.assertIn(phrase, output)
                 self.assertIn("re-enter PENNY_MM_PREPROCESS_CACHE_SIZE_MB", output)
                 # No 'save despite these errors' row: a pair this file cannot state
-                # is not something an operator can save past, so cancel is choice 2.
+                # is not something an operator can save past.
                 self.assertNotIn("save despite these errors", output)
-                if fix[0] == "2":
+                if fix[0] == "c":
                     # Cancelled: nothing is written, and no partial folder is left.
                     self.assertEqual(code, 3, output)
                     continue
@@ -1593,7 +1657,7 @@ class SetupSessionTests(FixtureMixin):
             f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n"
             f"{pc.MM_CACHE_SIZE_KEY}=oops\n"
         )
-        for fix, wanted in ((["1", "512"], "fixed"), (["2"], "cancelled")):
+        for fix, wanted in ((["1", "512"], "fixed"), (["c"], "cancelled")):
             with self.subTest(fix=fix):
                 code, output, path = self.run_setup(
                     ["next"] + self.basics(str(self.next_model)) + ["n", *fix, "y"],
