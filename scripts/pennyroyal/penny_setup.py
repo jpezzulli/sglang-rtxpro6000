@@ -847,6 +847,22 @@ def run_session(
     while True:
         body = proposed_text()
         try:
+            # Validate before the line-oriented file roundtrip can normalize a
+            # value or turn an embedded newline into a different setting.
+            raw_pair = {
+                name: (
+                    answers[name]
+                    if name in answers
+                    and (answers[name] != "" or name in saved or name in cleared)
+                    else environ.get(name, "")
+                )
+                for name in pc.MM_CACHE_KEYS
+            }
+            problems = pc.mm_cache_pair_problems(raw_pair)
+            if problems:
+                raise pc.ConfigError(
+                    "proposed answers (not saved yet): " + problems[0][1]
+                )
             config = pc.config_from_text(
                 mode, body, config_path, "proposed answers (not saved yet)"
             )

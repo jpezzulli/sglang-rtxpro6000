@@ -20,6 +20,10 @@ PENNY_MM_PREPROCESS_CACHE_ARGS=()
 pennyroyal_mm_preprocess_cache_args() {
   local directory="${PENNY_MM_PREPROCESS_CACHE_DIR:-}"
   local budget="${PENNY_MM_PREPROCESS_CACHE_SIZE_MB:-}"
+  if [[ "$directory" == *[$'\n\r\v\f\034\035\036\u0085\u2028\u2029']* ]]; then
+    echo "PENNY_MM_PREPROCESS_CACHE_DIR must not contain line breaks or NUL" >&2
+    exit 1
+  fi
   # One value, exactly as written: a path with padding is a different path, and the
   # configurator refuses the same pair, so neither side launches what the other
   # would not.

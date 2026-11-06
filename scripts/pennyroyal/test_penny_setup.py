@@ -1579,6 +1579,8 @@ class SetupSessionTests(FixtureMixin):
         for directory, budget in (
             ("export PENNY_MM_PREPROCESS_CACHE_DIR=relative", ""),
             ("PENNY_MM_PREPROCESS_CACHE_DIR=relative", "$CACHE_BUDGET"),
+            ("export PENNY_MM_PREPROCESS_CACHE_DIR=relative # scratch", "128"),
+            ("PENNY_MM_PREPROCESS_CACHE_DIR=/cache/photos", "0 # old choice"),
         ):
             with self.subTest(directory=directory, budget=budget):
                 startup.write_text(
@@ -1599,6 +1601,36 @@ class SetupSessionTests(FixtureMixin):
         )
         plan = pc.build_plan("container", config, {}, repo_root=self.repo)
         self.assertTrue([i for i in plan.issues if i.key in pc.MM_CACHE_KEYS])
+
+    def test_inherited_cache_values_are_checked_before_serialization(self):
+        for mode in ("native", "container"):
+            for key, value, replacement in (
+                (pc.MM_CACHE_SIZE_KEY, "128\r", "128"),
+                (pc.MM_CACHE_DIR_KEY, "/cache/photos\n", "/cache/photos"),
+                (
+                    pc.MM_CACHE_DIR_KEY,
+                    "/cache/photos\nNCCL_P2P_DISABLE=1",
+                    "/cache/photos",
+                ),
+            ):
+                with self.subTest(mode=mode, key=key, value=value):
+                    ambient = {pc.MM_CACHE_SIZE_KEY: "128", key: value}
+                    if mode == "container":
+                        code, output, _, _ = self.run_container_setup(
+                            environ=ambient, before_save=(key, replacement)
+                        )
+                    else:
+                        code, output, _ = self.run_setup(
+                            ["next"]
+                            + self.basics(str(self.next_model))
+                            + ["n", key, replacement, "y"],
+                            environ=ambient,
+                        )
+                    self.assertEqual(code, 0, output)
+                    saved = pc.read_env_file(saved_settings(output))
+                    self.assertEqual(saved[key], replacement)
+                    self.assertNotIn("NCCL_P2P_DISABLE", saved)
+                    self.assertIn("Not ready to save", output)
 
     def test_an_unusable_inherited_budget_is_correctable_and_not_trimmed(self):
         # An exported value is what this container launch would use, so the save has

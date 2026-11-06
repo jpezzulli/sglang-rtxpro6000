@@ -759,6 +759,8 @@ def validate_value(spec: KeySpec, value: str, source: str) -> str:
     """Return the normalized value, or raise. Empty always means "not set"."""
     if value == "":
         return ""
+    if spec.name in MM_CACHE_KEYS and (len(value.splitlines()) > 1 or chr(0) in value):
+        raise ConfigError(f"{source}: {spec.name} must not contain line breaks or NUL")
     kind = spec.kind
     if kind == "bool":
         if value.lower() not in TRUE_VALUES + FALSE_VALUES:
@@ -1639,7 +1641,9 @@ def mm_cache_pair_problems(pair: Mapping[str, str]) -> list[tuple[str, str]]:
         value = pair.get(name, "")
         if not value:
             continue
-        if value != value.strip():
+        if len(value.splitlines()) > 1 or chr(0) in value:
+            problems.append((name, f"{name} must not contain line breaks or NUL"))
+        elif value != value.strip():
             problems.append(
                 (name, f"{name} {SPACE_RULE}, got {quote_command_arg(value)}")
             )
@@ -1676,6 +1680,21 @@ def _startup_cache_assignment(text: str, name: str) -> tuple[bool, Optional[str]
     if len(matches) != 1:
         return True, None
     raw = matches[0]
+    quote = None
+    escaped = False
+    for index, char in enumerate(raw):
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and (index == 0 or raw[index - 1] in " \t"):
+            raw = raw[:index].rstrip()
+            break
     # Whitespace before an unquoted value starts a command in Bash; it is not
     # harmless padding around a saved-file value.
     if raw and raw[0].isspace() and raw.strip():
