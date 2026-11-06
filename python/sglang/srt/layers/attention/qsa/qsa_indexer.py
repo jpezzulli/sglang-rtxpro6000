@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -18,7 +18,12 @@ from sglang.srt.layers.attention.qsa.metadata import (
     build_rope_position_matrix,
     pending_ring_groups,
 )
-from sglang.srt.layers.attention.qsa.mqa import qsa_mqa_decode, qsa_mqa_prefill
+from sglang.srt.layers.attention.qsa.mqa import (
+    HAS_TILELANG,
+    qsa_mqa_decode,
+    qsa_mqa_prefill,
+    qsa_mqa_prefill_relative,
+)
 from sglang.srt.layers.layernorm import GemmaRMSNorm
 from sglang.srt.layers.linear import ReplicatedLinear
 from sglang.srt.layers.rotary_embedding.utils import apply_rotary_emb
@@ -38,6 +43,26 @@ def _qsa_prefill_row_chunk_size(rows: int, keys: int, heads: int) -> int:
     max_padded_rows = max(block_q, _QSA_PREFILL_LOGITS_BUDGET_BYTES // bytes_per_row)
     max_padded_rows = max(block_q, max_padded_rows // block_q * block_q)
     return min(rows, max_padded_rows)
+
+
+def _prefill_max_row_keys(indexer_metadata, forward_batch) -> Optional[int]:
+    """The longest request's compressed-block count, from host lengths only.
+
+    The width of request-relative prefill logits. Uses the backend's prefill
+    length tuple when it set one, else the scheduler's ``seq_lens_cpu`` (padding
+    entries only raise the bound). ``None`` when neither exists: reading the
+    device lengths would sync the host. Ported from upstream
+    ``QSAIndexerMetadata.prefill_max_row_keys`` (#45791); kept beside its only
+    caller because stable's metadata struct carries no host length tuple.
+    """
+    lengths = getattr(indexer_metadata, "prefill_sequence_lengths_cpu", None)
+    if lengths is None:
+        lengths = getattr(forward_batch, "seq_lens_cpu", None)
+    if lengths is None or len(lengths) == 0:
+        return None
+    if isinstance(lengths, torch.Tensor):
+        return int(lengths.max()) // indexer_metadata.compress_ratio
+    return max(int(length) for length in lengths) // indexer_metadata.compress_ratio
 
 
 class QSAIndexer(MultiPlatformOp):
@@ -556,7 +581,18 @@ class QSAIndexer(MultiPlatformOp):
         query_positions: torch.Tensor,
         sequence_lengths_for_rows: torch.Tensor,
         stall_diagnostics=None,
+        max_row_keys: Optional[int] = None,
     ) -> torch.Tensor:
+        """Top-k token selection for packed prefill rows.
+
+        ``max_row_keys`` (host int, the longest request's compressed-block count)
+        switches scoring to request-relative logits: [rows, max_row_keys] instead
+        of [rows, all compressed keys of the batch]. The latter caps a chunk at
+        a few dozen rows once a batch holds many long prefixes, so the scoring
+        kernel ran as thousands of one-CTA launches. Selection is unchanged: the
+        top-k reads only each row's own section and returns indices relative to
+        the row's start either way.
+        """
         rows = q.shape[0]
         output = torch.empty(
             (rows, self.token_topk + self.compress_ratio - 1),
@@ -566,8 +602,13 @@ class QSAIndexer(MultiPlatformOp):
         if rows == 0:
             return output
 
+        relative = (
+            max_row_keys is not None and max_row_keys > 0 and q.is_cuda and HAS_TILELANG
+        )
         row_chunk_size = _qsa_prefill_row_chunk_size(
-            rows, compressed_keys.shape[0], q.shape[1]
+            rows,
+            max_row_keys if relative else compressed_keys.shape[0],
+            q.shape[1],
         )
         for row_start in range(0, rows, row_chunk_size):
             row_end = min(row_start + row_chunk_size, rows)
@@ -585,12 +626,27 @@ class QSAIndexer(MultiPlatformOp):
                     stall_diagnostics.set_phase(
                         self.layer_id, f"scoring_rows[{row_start}:{row_end}]"
                     )
-                logits = qsa_mqa_prefill(
-                    q[chunk_slice],
-                    compressed_keys,
-                    row_starts[chunk_slice],
-                    row_ends[chunk_slice],
-                )
+                chunk_starts = row_starts[chunk_slice]
+                if relative:
+                    chunk_lengths = row_ends[chunk_slice] - chunk_starts
+                    logits = qsa_mqa_prefill_relative(
+                        q[chunk_slice],
+                        compressed_keys,
+                        chunk_starts,
+                        row_ends[chunk_slice],
+                        max_row_keys,
+                    )
+                    topk_starts = torch.zeros_like(chunk_starts)
+                    topk_ends = chunk_lengths
+                else:
+                    logits = qsa_mqa_prefill(
+                        q[chunk_slice],
+                        compressed_keys,
+                        chunk_starts,
+                        row_ends[chunk_slice],
+                    )
+                    topk_starts = chunk_starts
+                    topk_ends = row_ends[chunk_slice]
                 if stall_diagnostics is not None:
                     stall_diagnostics.mark_stage(
                         self.layer_id, f"scores_ready[{row_start}:{row_end}]"
@@ -600,8 +656,8 @@ class QSAIndexer(MultiPlatformOp):
                     )
                 block_indices = qsa_fast_topk(
                     logits,
-                    row_starts[chunk_slice],
-                    row_ends[chunk_slice],
+                    topk_starts,
+                    topk_ends,
                     topk=self.block_topk,
                 )
                 if stall_diagnostics is not None:
@@ -825,6 +881,7 @@ class QSAIndexer(MultiPlatformOp):
                 if stall_diagnostics is not None
                 else {}
             ),
+            max_row_keys=_prefill_max_row_keys(indexer_metadata, forward_batch),
         )
 
 
