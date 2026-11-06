@@ -1,5 +1,69 @@
 # Penny Royal release history
 
+## 3.1.6 — Long cached prefixes score per request, and the shared image cache becomes a setting
+
+**Publication pending.** The reviewed runtime candidate is
+`6c5cf32b51b6fead7b0760eba7486e6fb6c5e2cc` (tree
+`fa6098786fff512add3f3ff7ccdb3e777679e446`) on
+`candidate/3.1.6-validation-20261106`, above the published 3.1.5 records at
+`87d2b2c560819864c6e001ee3f94021c05c4d091`. No image, tag, digest or build run
+is recorded yet, so `pennyroyal-v3.1.5` and `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.5`
+stay the published download pair; the dependency baseline is unchanged at its
+published 231 distributions. The same three runtime changes also stand merged on main
+as PRs #162, #155 and #163, and main stands at
+`f555efa62f6dbc578f1ce6485082351cd540cf25` (tree `95a55e4966177591407fc79b0733259fe5fe5488`),
+which differs from the qualified candidate's tree only in formatter-identical files and
+one test comment: main is the integrated runtime, and every number below stays
+attributed to the measured candidate source.
+
+- **QSA prefill scores per request** (port commit `d4703ed417393655ad84b1062b474b674a238393`,
+  merged as PR #162 at `dfd469c3a774789ad0b3476386fdfd9df5a42298`, check run
+  42215032285; adapting upstream sgl-project/sglang PR 45791 at
+  `642e9c1448ccb1f95c3d0fd1153e4f3b8cb478f1` by Shunkangz, ported with benchmarking by
+  Jim Smith): the prefill indexer writes request-relative columns instead of one
+  workspace spanning every compressed key in the batch, so a long cached prefix
+  no longer caps a row chunk at a few dozen rows and splits the TileLang scorer
+  into thousands of one-CTA launches. Scores, selection, causal masking, RoPE
+  and the stall diagnostics are unchanged; the upstream FP8 index-operand
+  infrastructure is not taken on this stable tree. Identified and benchmarked on
+  a cached prefix by [Jim Smith](https://github.com/jhsmith409), whose
+  2026-11-03 message carried the upstream tests and port.
+- **Shared image preprocessing cache** (contributor PR #155, head
+  `559daf0642eab7076a5c1e7e4f0fbb8592fb6a9c`, merged at `40522a63765c84f0c3981e4216fe4a9be9c7a84f`,
+  check run 42216143021; author [lihong](https://github.com/leehom0123), with the
+  accepted corrections `61cb225431e0df33e15f7dd543d4188f3849e8f9` preserved in that
+  PR's history):
+  `--mm-preprocess-cache-dir` with a positive `--mm-preprocess-cache-size-mb`
+  lets compatible tokenizer workers reuse one content-verified CPU artifact
+  instead of decoding the same image again per worker. The store treats its own
+  index as optional — a verified hit survives a failed recency stamp or commit,
+  an unreadable index is a miss, an unlockable shard computes without publishing
+  — and a caller-supplied `mm_hashes` entry no longer overwrites the padded
+  prompt the scheduler owns.
+- **The pair is a Pennyroyal setting now**: `PENNY_MM_PREPROCESS_CACHE_DIR` and
+  `PENNY_MM_PREPROCESS_CACHE_SIZE_MB`, read by all four native recipes and all
+  four container startup files through one shared helper, asked by the
+  configurator, written into a generated launch folder, forwarded by
+  `compose.yaml`, and reported in the startup summary in MiB. Default off; a
+  budget alone stays the existing per-worker cache, `0` included; a startup file
+  mounted into an image older than this one launches unchanged while both lines stay
+  blank and refuses a requested cache by name; and `--check` compares the pair with
+  the two lines of the generated file that decides it, so a hand edit there or a
+  folder predating the settings is named rather than reported as a cache.
+- **Hybrid storage hits are staged whole or not at all** (port commit
+  `e2e26b87d689073164271d253917114912ac5e98`, merged as PR #163 at
+  `f555efa62f6dbc578f1ce6485082351cd540cf25`, check run 42216605655; adapting upstream
+  PR 48421 at `e838360ffd706c1a45a390e30d4c9f01c56bf81c` by Zhangheng): a hybrid prefetch carrying SWA or Mamba
+  component transfers is revoked when host capacity cannot take the whole hit,
+  because the state at a shortened boundary is what the hit query never proved.
+  The request continues through ordinary admission. The KV-only fallback is
+  unchanged, and this is an avoided read rather than a corruption fix.
+- Sampling, the public `tiered` width policy, native-MTP routing and automatic KV
+  sizing are untouched; 27B DFlash2 stays qualified and Flash-Next DFlash2 stays
+  alpha, with the draft-cache host-RAM guidance unchanged. PR #159 is not part of
+  this release. Measurements are in [RESULTS.md](RESULTS.md) and the pending
+  record is [release-3.1.6.json](release-3.1.6.json).
+
 ## 3.1.5 — Hybrid-Mamba checkpoint copies stay within a bounded gather
 
 Built as the single-fix release from merged PR #156, adapting upstream

@@ -59,7 +59,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Your host settings ------------------------------------------------------
-IMAGE="${PENNYROYAL_IMAGE:-ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.5}"
+IMAGE="${PENNYROYAL_IMAGE:-ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6}"
 STARTUP="${PENNYROYAL_STARTUP:-$SCRIPT_DIR/config/start-flash-next-frspec.sh}"
 # Empty means: use the NIXL config the selected startup script names itself.
 NIXL_CONFIG="${PENNYROYAL_NIXL_CONFIG:-}"

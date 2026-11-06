@@ -11,6 +11,84 @@ keeps credited external field reports separate from our measurements, including
 week-long agentic use, Max-Q, both model profiles and multi-GPU deployments.
 The older H3PO raw table remains at its existing link.
 
+## Penny Royal 3.1.6 candidate (November 6, 2026)
+
+Measured on the 3.1.6 candidate source `6c5cf32b51` (tree `fa6098786f`), above the
+published 3.1.5 records at `87d2b2c560`, on one RTX PRO 6000 Blackwell (TP1) capped
+at 450 W with 524,288-token context. Both profiles were launched by their own
+qualification recipe, with ordinary non-greedy sampling and xhigh reasoning, and each
+row names the configuration it was measured on: the Flash-Next rows are the maintained
+450 W native recipe (`configs/pennyroyal/serve-flash-next-frspec.sh`) with
+`PENNY_MTP_POLICY=adaptive` (6 requests / 36 Mamba slots), 32 decimal GB HiCache and
+the shared image preprocessing cache switched on with
+`--mm-preprocess-cache-dir /dev/shm/penny316-mm-qualification
+--mm-preprocess-cache-size-mb 256 --mm-feature-transport cpu`; the 27B rows are the
+27B recipe at fixed block-8 DFlash2, 4 requests / 24 Mamba slots, 96 decimal GB
+HiCache, `.92` memory ratio and the image cache off.
+`tiered` remains the public width policy default, and it is a native-MTP setting only:
+the DFlash2 recipes route their own widths.
+Means are elapsed-weighted over complete native decode intervals and peaks are the
+highest eligible native rate from the same windows, with reasoning included and C4/C6
+figures given as full-batch aggregates, as defined in
+[How we measure current Penny performance](#how-we-measure-current-penny-performance).
+Publication is pending: these are candidate-source measurements, not an image claim.
+
+### Decode rates
+
+| Profile / workload | Mean tok/s | Sampled peak tok/s | Intervals / window | Configuration |
+|---|---:|---:|---:|---|
+| Flash-Next native MTP, single request | **207.545** | **425.32** | 208 over 85.735 s | `adaptive` 6/36, xhigh, 32 decimal GB HiCache, shared image cache on at 256 MiB, CPU feature transport |
+| Flash-Next native MTP, full C4 aggregate | **515.674** | **668.52** | 173 over 112.086 s | as above |
+| Flash-Next native MTP, full C6 aggregate | **451.799** | **689.61** | 209 over 229.724 s | as above, six-request shape |
+| 27B DFlash2, single request | **113.019** | **177.64** | 142 over 150.771 s | xhigh, fixed block-8 DFlash2, 4 requests / 24 Mamba slots, 96 decimal GB HiCache, `.92` memory ratio, image cache off |
+| 27B DFlash2, full C4 aggregate | **420.407** | **556.99** | 118 over 139.494 s | as above |
+
+| Cold prompt time to first token | Flash-Next native MTP | 27B DFlash2 |
+|---|---:|---:|
+| 63,906 tokens | 5.471 s | 10.903 s |
+| 489,921 tokens | 41.854 s | 296.274 s |
+
+Client-measured first token on cold prompts, from the same launches.
+
+### The one matched comparison in this record: fresh prefill on a cached prefix
+
+A separate Flash-Next screen sent 4,000 new input tokens onto a prefix of exactly
+200,000 tokens already resident on the device — a 204,000-token prompt, prefilled in
+4,096-token chunks — with NIXL cache collection disabled and outside callers
+excluded so nothing else shared the batch. Rates are fresh prefill tokens per second
+on the new input only: a prefill measurement on one profile, not a decode rate, and
+not a claim about the headline numbers above. The baseline row is the published 3.1.5
+source; the candidate row is `6c5cf32b51` in isolation.
+
+| Fresh-input prefill tok/s on a 200K cached prefix | Single request | Four concurrent requests |
+|---|---:|---:|
+| 3.1.5 baseline | 11,274.854 | 9,748.596 |
+| 3.1.6 candidate, isolated | **14,200.646 (+25.95%)** | **12,920.912 (+32.54%)** |
+
+### Correctness, cache and behaviour on this candidate
+
+- Focused CPU regression scope for the merged multimodal and manager work: 137 tests
+  with 25 subtests passed and 1 CUDA-only skip; the shared-processor, caller-hash,
+  placeholder and hybrid prompt suites passed at 21 tests and 42 subtests. Five SM120
+  QSA numeric and selection checks passed on the built path (CUDA 13.4, GCC 15).
+- Each profile served 18 reasoning responses, all completing naturally, and both
+  passed the same agentic control (6 model turns, 5 mock tool calls).
+- Vision requests ran with the preprocessing cache off and then on, reusing one
+  identical PNG with a changed prompt and a literal `<image>` tag, preprocessing on a
+  local RTX A4000 and the CPU feature transport. Cold-media timing was not measured,
+  and no HTTP remote-encoder path is claimed here.
+- Retrieval passed on both profiles at 63,906 tokens (`READY`) and 489,921 tokens
+  (three needles). Host-tier restore returned 63,872 KV tokens and 2 Mamba states on
+  both profiles, plus 2,048 sliding-window tokens on 27B; a fresh-process file restore
+  returned 553,792 tokens and 4 Mamba states, plus 4,096 sliding-window tokens on 27B,
+  and a duplicate of that prompt answered 553,792 tokens as a device hit. Four replays
+  at 64K and 490K returned correct answers with natural stops.
+- 27B FP8 with DFlash2 stays qualified and Flash-Next DFlash2 stays alpha. The draft
+  cache is still extra to the target's HiCache figure, so the host-RAM guidance in
+  [CONFIGURATION.md](CONFIGURATION.md#capacity-and-memory) is unchanged.
+- The public width policy default stays `tiered`, native-MTP routing is unchanged, and
+  the new preprocessing cache is off until both of its settings are given.
+
 ## Penny Royal 3.1.3 (October 27, 2026)
 
 Measured on the 3.1.3 candidate source `ef3258749b` (runtime-code parent
