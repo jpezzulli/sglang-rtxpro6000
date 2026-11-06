@@ -8,6 +8,7 @@ to modify another request's input. No Python objects are unpickled from disk.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -30,6 +31,10 @@ T = TypeVar("T")
 _TENSOR_FILE = re.compile(r"tensor-[0-9]+\.npy\Z")
 _OBJECT_DIRECTORY = re.compile(r"(?:\.writing|object)-([0-9]{3})-[a-zA-Z0-9_-]+\Z")
 _LOCK_SHARDS = 256
+# Never equals a real generation, so nothing is retained while the index cannot
+# be read. The stored counter starts at 0 and only ever increases.
+_GENERATION_UNAVAILABLE = -1
+_STORE_ERRORS = (sqlite3.Error, OSError)
 logger = logging.getLogger(__name__)
 
 
@@ -268,6 +273,29 @@ class SharedPreprocessCache:
             ).fetchone()[0]
             return {"entries": count, "size_bytes": size, "generation": generation}
 
+    def _read_generation(self) -> int:
+        """Read the flush counter alone: no retention aggregation, no request failure.
+
+        The whole index sits behind one exclusive file lock, and every writer
+        that cannot afford the disk fails here too. Callers that only need to know
+        whether their snapshot predates a clear must not pay for the size totals,
+        and must not lose the request when the answer cannot be read.
+        """
+        if not self.enabled:
+            return 0
+        try:
+            with self._index() as connection:
+                return connection.execute(
+                    "SELECT generation FROM settings WHERE id=1"
+                ).fetchone()[0]
+        except _STORE_ERRORS as error:
+            logger.warning("Could not read shared preprocessing generation: %s", error)
+            return _GENERATION_UNAVAILABLE
+
+    async def generation(self) -> int:
+        """Read the flush counter off the event loop that serves requests."""
+        return await asyncio.to_thread(self._read_generation)
+
     def _remove_abandoned_files(self) -> None:
         for directory in self.directory.iterdir():
             match = _OBJECT_DIRECTORY.fullmatch(directory.name)
@@ -304,46 +332,59 @@ class SharedPreprocessCache:
     def _lookup(self, request: SharedCacheRequest, codec: _ArtifactCodec):
         broken = []
         value = None
-        with self._index() as connection:
-            entries = connection.execute(
-                "SELECT * FROM entries WHERE key=? AND codec=? "
-                "AND source_size=? AND config_size=?",
-                (
-                    request.key,
-                    _type_name(codec.artifact_type),
-                    len(request.source),
-                    len(request.configuration),
-                ),
-            ).fetchall()
-            for entry in entries:
-                directory = self.directory / entry["id"]
-                try:
-                    # A digest is an index, never the final identity check.
-                    if (directory / "source.bin").read_bytes() != request.source:
+        committed = False
+        try:
+            with self._index() as connection:
+                entries = connection.execute(
+                    "SELECT * FROM entries WHERE key=? AND codec=? "
+                    "AND source_size=? AND config_size=?",
+                    (
+                        request.key,
+                        _type_name(codec.artifact_type),
+                        len(request.source),
+                        len(request.configuration),
+                    ),
+                ).fetchall()
+                for entry in entries:
+                    directory = self.directory / entry["id"]
+                    try:
+                        # A digest is an index, never the final identity check.
+                        if (directory / "source.bin").read_bytes() != request.source:
+                            continue
+                        if (
+                            directory / "configuration.bin"
+                        ).read_bytes() != request.configuration:
+                            continue
+                        value = codec.read(directory)
+                    except (
+                        OSError,
+                        EOFError,
+                        ValueError,
+                        TypeError,
+                        KeyError,
+                        RuntimeError,
+                    ):
+                        connection.execute(
+                            "DELETE FROM entries WHERE id=?", (entry["id"],)
+                        )
+                        broken.append(directory)
                         continue
-                    if (
-                        directory / "configuration.bin"
-                    ).read_bytes() != request.configuration:
-                        continue
-                    value = codec.read(directory)
-                except (
-                    OSError,
-                    EOFError,
-                    ValueError,
-                    TypeError,
-                    KeyError,
-                    RuntimeError,
-                ):
-                    connection.execute("DELETE FROM entries WHERE id=?", (entry["id"],))
-                    broken.append(directory)
-                    continue
-                connection.execute(
-                    "UPDATE entries SET touched=? WHERE id=?",
-                    (time.time_ns(), entry["id"]),
-                )
-                break
-        for directory in broken:
-            shutil.rmtree(directory, ignore_errors=True)
+                    connection.execute(
+                        "UPDATE entries SET touched=? WHERE id=?",
+                        (time.time_ns(), entry["id"]),
+                    )
+                    break
+            committed = True
+        except _STORE_ERRORS as error:
+            # The store is optional: an index that cannot be read, or a disk that
+            # cannot commit its bookkeeping, costs reuse rather than the request.
+            # Artifacts this pass judged broken stay exactly as they are, because
+            # the rolled-back transaction still lists them; removing their files
+            # here would leave a live row pointing at nothing.
+            logger.warning("Shared preprocessing cache is unavailable: %s", error)
+        if committed:
+            for directory in broken:
+                shutil.rmtree(directory, ignore_errors=True)
         return value
 
     def _publish(self, request, value, codec, generation):
@@ -405,10 +446,8 @@ class SharedPreprocessCache:
 
     @contextmanager
     def _shard_locks(self, requests):
-        from contextlib import ExitStack
-
         shards = sorted({_lock_shard(request.key) for request in requests})
-        with ExitStack() as stack:
+        with contextlib.ExitStack() as stack:
             for shard in shards:
                 stack.enter_context(
                     self._file_lock(
@@ -430,7 +469,7 @@ class SharedPreprocessCache:
         if not self.enabled:
             return await compute(list(range(len(requests))))
         if generation is None:
-            generation = self.cache_info()["generation"]
+            generation = await self.generation()
         task = asyncio.create_task(
             self._resolve_many(requests, compute, artifact_type, generation)
         )
@@ -460,13 +499,29 @@ class SharedPreprocessCache:
 
         # Do not fill the default executor with blocking flock waiters: the
         # owner also needs that executor to read and publish its result.
+        locks: contextlib.AbstractContextManager = contextlib.nullcontext()
+        owns_locks = False
         while True:
-            locks = self._shard_locks(missing)
+            candidate = self._shard_locks(missing)
             try:
-                locks.__enter__()
+                candidate.__enter__()
+                locks, owns_locks = candidate, True
                 break
             except BlockingIOError:
                 await asyncio.sleep(0.01)
+            except OSError as error:
+                # Lock files live on the same optional store. Without them this
+                # request can still be answered correctly; it just cannot claim
+                # the key, so it computes and returns without publishing. A live
+                # publisher's temporary directory belongs to its shard lock, and
+                # publishing unclaimed would offer cleanup a directory it does
+                # not own and let two workers retain two copies.
+                logger.warning(
+                    "Could not take shared preprocessing locks; "
+                    "computing without publishing: %s",
+                    error,
+                )
+                break
         try:
             missing_after_lock = []
             for request in missing:
@@ -488,14 +543,21 @@ class SharedPreprocessCache:
                         raise TypeError(
                             "Preprocessor returned an unexpected artifact type"
                         )
-                    try:
-                        await asyncio.to_thread(
-                            self._publish, request, value, codec, generation
-                        )
-                    except (OSError, sqlite3.Error, TypeError, ValueError) as error:
-                        logger.warning(
-                            "Could not retain shared preprocessing artifact: %s", error
-                        )
+                    if owns_locks:
+                        try:
+                            await asyncio.to_thread(
+                                self._publish, request, value, codec, generation
+                            )
+                        except (
+                            OSError,
+                            sqlite3.Error,
+                            TypeError,
+                            ValueError,
+                        ) as error:
+                            logger.warning(
+                                "Could not retain shared preprocessing artifact: %s",
+                                error,
+                            )
                     resolved[request] = value
             return [resolved[request] for request in requests]
         finally:

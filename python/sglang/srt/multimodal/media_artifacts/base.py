@@ -429,7 +429,9 @@ class MediaArtifactCacheMixin:
         return [artifact for artifact in artifacts if artifact is not None]
 
     async def _prepare_shared_artifacts(self, media_data, content_hashes, modality):
-        generation = self.mm_preprocess_cache.cache_info()["generation"]
+        # The shared index is a locked file on disk; reading it here keeps the
+        # tokenizer event loop responsive while another process holds it.
+        generation = await self.mm_preprocess_cache.generation()
         description = self.processor_fingerprint_description
         artifact_type = get_args(get_type_hints(self.prepare_artifact_batch)["return"])[
             0

@@ -1,6 +1,9 @@
 import asyncio
 import tempfile
+import threading
+import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -113,6 +116,60 @@ class TestSharedMediaArtifacts(unittest.TestCase):
             handle_multimodal(args)
         args.mm_preprocess_cache_size_mb = 3
         handle_multimodal(args)
+
+    def test_a_contended_index_does_not_stall_the_tokenizer_loop(self):
+        processor = self.processor()
+        cache = processor.mm_preprocess_cache
+        held, release = threading.Event(), threading.Event()
+
+        def holder():
+            # Another worker holding the one global index lock.
+            with cache._file_lock(Path(cache.directory) / "index.lock"):
+                held.set()
+                release.wait(5)
+
+        thread = threading.Thread(target=holder, daemon=True)
+        thread.start()
+        self.assertTrue(held.wait(5))
+
+        async def run():
+            ticks = 0
+
+            async def heartbeat():
+                nonlocal ticks
+                while True:
+                    await asyncio.sleep(0.01)
+                    ticks += 1
+
+            beat = asyncio.create_task(heartbeat())
+            try:
+                await asyncio.sleep(0.05)
+                before = ticks
+                started = time.perf_counter()
+                preparing = asyncio.create_task(
+                    processor.prepare_media_artifacts([b"a"])
+                )
+                await asyncio.sleep(0.25)
+                self.assertFalse(
+                    preparing.done(), "the request never waited for the index lock"
+                )
+                release.set()
+                artifacts = await asyncio.wait_for(preparing, 5)
+                waited = time.perf_counter() - started
+                self.assertGreaterEqual(
+                    waited, 0.2, "the index lock was never contended"
+                )
+                self.assertGreaterEqual(ticks - before, 15, "the event loop stalled")
+                self.assertEqual(artifacts[0].feature, b"a")
+            finally:
+                release.set()
+                beat.cancel()
+
+        try:
+            asyncio.run(run())
+        finally:
+            thread.join(5)
+        self.assertEqual(cache.cache_info()["entries"], 1)
 
     def test_clear_during_snapshot_does_not_repopulate(self):
         import threading

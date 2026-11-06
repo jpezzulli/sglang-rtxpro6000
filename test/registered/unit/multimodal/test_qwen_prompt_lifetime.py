@@ -8,6 +8,11 @@ from types import SimpleNamespace
 
 import torch
 
+from sglang.srt.managers.schedule_batch import (
+    MultimodalProcessorOutput,
+    _compute_pad_value,
+)
+from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.multimodal.processors.qwen_vl import (
     QwenVLImagePreprocessArtifact,
     QwenVLImageProcessor,
@@ -15,7 +20,7 @@ from sglang.srt.multimodal.processors.qwen_vl import (
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
-register_cpu_ci(est_time=10, suite="base-a-test-cpu")
+register_cpu_ci(est_time=15, suite="base-a-test-cpu")
 
 
 class _Processor(QwenVLImageProcessor):
@@ -55,6 +60,30 @@ def _artifact():
         feature=torch.ones(4, 8),
         model_specific_data={"image_grid_thw": torch.tensor([[1, 2, 2]])},
     )
+
+
+class TestQwenCallerHashes(CustomTestCase):
+    """The composed fast-path prompt must follow a caller-supplied image hash."""
+
+    def test_a_caller_hash_repads_the_composed_prompt(self):
+        processor = _Processor()
+        output = processor.compose_image_artifacts(
+            processor.mm_tokens.image_token + " question", [_artifact()]
+        )
+        internal_pad = output.mm_items[0].pad_value
+        # A KV router replaces the item hash before the request reaches the
+        # scheduler, which would otherwise install the pad tokens composed here.
+        TokenizerManager._apply_caller_mm_hashes(
+            SimpleNamespace(mm_hashes=["12345"]), output
+        )
+        self.assertEqual(
+            output.padded_input_ids,
+            MultimodalProcessorOutput.build_padded_input_ids(
+                output.input_ids, output.mm_items
+            ),
+        )
+        self.assertEqual(output.mm_items[0].pad_value, _compute_pad_value(0x12345))
+        self.assertNotIn(internal_pad, output.padded_input_ids)
 
 
 class TestQwenPromptLifetime(CustomTestCase):

@@ -1,10 +1,13 @@
 """Cross-process behavior of the optional CPU preprocess artifact store."""
 
 import asyncio
+import contextlib
 import errno
 import multiprocessing
 import os
+import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +22,7 @@ from sglang.test.ci.ci_register import register_cpu_ci
 register_cpu_ci(est_time=40, suite="base-a-test-cpu")
 
 try:
+    from sglang.srt.multimodal.cache import shared_preprocess_cache as shared_backend
     from sglang.srt.multimodal.cache.shared_preprocess_cache import (
         SharedCacheRequest,
         SharedPreprocessCache,
@@ -27,6 +31,7 @@ except ModuleNotFoundError as error:
     if error.name != "sglang.srt.multimodal.cache.shared_preprocess_cache":
         raise
     SharedCacheRequest = SharedPreprocessCache = None
+    shared_backend = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +39,68 @@ class ImageArtifact:
     feature: torch.Tensor
     grid: tuple[int, int, int]
     metadata: dict
+
+
+class _UnwellIndex:
+    """A SQLite connection that fails exactly where a full disk would.
+
+    Only the statements the caller names are refused, so a test cannot mistake a
+    swallowed compute or identity error for cache degradation.
+    """
+
+    def __init__(self, connection, refuses):
+        object.__setattr__(self, "_connection", connection)
+        object.__setattr__(self, "_refuses", refuses)
+
+    def execute(self, statement, *parameters):
+        if self._refuses(statement):
+            raise sqlite3.OperationalError("database or disk is full")
+        return self._connection.execute(statement, *parameters)
+
+    def commit(self):
+        if self._refuses("COMMIT"):
+            raise sqlite3.OperationalError("database or disk is full")
+        return self._connection.commit()
+
+    def __setattr__(self, name, value):
+        setattr(self._connection, name, value)
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
+@contextlib.contextmanager
+def unwell_index(refuses):
+    real_connect = sqlite3.connect
+    with patch(
+        "sglang.srt.multimodal.cache.shared_preprocess_cache.sqlite3.connect",
+        side_effect=lambda *args, **kwargs: _UnwellIndex(
+            real_connect(*args, **kwargs), refuses
+        ),
+    ):
+        yield
+
+
+@contextlib.contextmanager
+def full_locks(where):
+    """Make lock-file opens fail the way ENOSPC does, without touching data."""
+    real_open = Path.open
+
+    def opening(self, *args, **kwargs):
+        if where(self):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_open(self, *args, **kwargs)
+
+    with patch.object(Path, "open", opening):
+        yield
+
+
+def all_locks(path):
+    return path.suffix == ".lock"
+
+
+def shard_locks_only(path):
+    return path.parent.name == "locks"
 
 
 def artifact(number):
@@ -374,6 +441,194 @@ class TestSharedPreprocessCache(unittest.IsolatedAsyncioTestCase):
             )
         result = (await self.resolve([request]))[0]
         self.assertEqual(result.feature.tolist(), [[1, 2, 3]])
+
+    async def test_a_full_index_still_serves_a_warm_hit(self):
+        request = SharedCacheRequest("key", b"image", b"config")
+        await self.resolve([request])
+        with unwell_index(lambda statement: "UPDATE entries SET touched" in statement):
+            result = (await self.resolve([request], number=9))[0]
+        self.assertEqual(result.feature.tolist(), [[1, 2, 3]])
+        self.assertEqual(len(self.calls), 1, "the verified artifact was recomputed")
+        self.assertEqual(self.cache.cache_info()["entries"], 1)
+
+    async def test_a_failed_index_commit_still_serves_a_warm_hit(self):
+        request = SharedCacheRequest("key", b"image", b"config")
+        await self.resolve([request])
+        with unwell_index(lambda statement: statement.strip() == "COMMIT"):
+            result = (await self.resolve([request], number=9))[0]
+        self.assertEqual(result.feature.tolist(), [[1, 2, 3]])
+        self.assertEqual(len(self.calls), 1, "the verified artifact was recomputed")
+
+    async def test_an_unusable_index_costs_reuse_not_the_request(self):
+        request = SharedCacheRequest("key", b"image", b"config")
+        with unwell_index(lambda statement: True):
+            result = (await self.resolve([request], number=4))[0]
+        self.assertEqual(result.feature.tolist(), [[4, 2, 3]])
+        self.assertEqual(self.cache.cache_info()["entries"], 0)
+        result = (await self.resolve([request], number=9))[0]
+        self.assertEqual(result.feature.tolist(), [[9, 2, 3]])
+        self.assertEqual(len(self.calls), 2, "recovery should not recompute twice")
+        self.assertEqual(self.cache.cache_info()["entries"], 1)
+        result = (await self.resolve([request], number=5))[0]
+        self.assertEqual(result.feature.tolist(), [[9, 2, 3]])
+        self.assertEqual(len(self.calls), 2)
+
+    async def test_a_generation_that_cannot_be_read_retains_nothing(self):
+        request = SharedCacheRequest("key", b"image", b"config")
+        with unwell_index(lambda statement: statement.startswith("SELECT generation")):
+            result = (await self.resolve([request], number=4))[0]
+        self.assertEqual(result.feature.tolist(), [[4, 2, 3]])
+        self.assertEqual(self.cache.cache_info()["entries"], 0)
+        await self.resolve([request], number=9)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.cache.cache_info()["entries"], 1)
+
+    async def test_lock_files_on_a_full_disk_still_answer_the_request(self):
+        request = SharedCacheRequest("key", b"image", b"config")
+        with full_locks(all_locks):
+            result = (await self.resolve([request], number=4))[0]
+        self.assertEqual(result.feature.tolist(), [[4, 2, 3]])
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(list(Path(self.directory).glob(".writing-*")), [])
+        await self.resolve([request], number=9)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.cache.cache_info()["entries"], 1)
+
+    async def test_shard_lock_failure_computes_without_publishing(self):
+        request = SharedCacheRequest("key", b"image", b"config")
+        with full_locks(shard_locks_only):
+            result = (await self.resolve([request], number=4))[0]
+        self.assertEqual(result.feature.tolist(), [[4, 2, 3]])
+        self.assertEqual(len(self.calls), 1)
+        # An unclaimed key must not be published: cleanup would then be free to
+        # treat this request's files as an abandoned publication.
+        self.assertEqual(self.cache.cache_info()["entries"], 0)
+        self.assertEqual(list(Path(self.directory).glob(".writing-*")), [])
+        self.assertEqual(list(Path(self.directory).glob("object-*")), [])
+        # Once the locks work again, retention and single-flight are back.
+        await self.resolve([request], number=9)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.cache.cache_info()["entries"], 1)
+        result = (await self.resolve([request], number=5))[0]
+        self.assertEqual(result.feature.tolist(), [[9, 2, 3]])
+        self.assertEqual(len(self.calls), 2)
+
+    async def test_a_rolled_back_eviction_removes_nothing(self):
+        request = SharedCacheRequest("key", b"image", b"config")
+        await self.resolve([request])
+        directory = next(Path(self.directory).glob("object-*"))
+        (directory / "tensor-0.npy").write_bytes(b"")
+        with unwell_index(lambda statement: statement.strip() == "COMMIT"):
+            result = (await self.resolve([request], number=9))[0]
+        self.assertEqual(result.feature.tolist(), [[9, 2, 3]])
+        # The rollback restored the row, so its files have to still be there.
+        self.assertTrue(directory.exists())
+        self.assertEqual(self.cache.cache_info()["entries"], 1)
+        self.assertEqual(list(Path(self.directory).glob(".writing-*")), [])
+        # Recovery evicts the damaged artifact for real and retains one copy. The
+        # phase above kept nothing either, since its commit failed as well.
+        result = (await self.resolve([request], number=5))[0]
+        self.assertEqual(result.feature.tolist(), [[5, 2, 3]])
+        self.assertEqual(self.cache.cache_info()["entries"], 1)
+        self.assertFalse(directory.exists())
+        self.assertEqual(len(self.calls), 3)
+
+    async def test_store_trouble_does_not_swallow_a_failing_computation(self):
+        warm = SharedCacheRequest("warm", b"warm", b"config")
+        cold = SharedCacheRequest("cold", b"cold", b"config")
+        await self.resolve([warm])
+
+        async def broken_media(indices):
+            raise OSError(errno.EIO, "cannot read the image")
+
+        for label, refuses in (
+            (
+                "hit bookkeeping",
+                lambda statement: "UPDATE entries SET touched" in statement,
+            ),
+            ("whole index", lambda statement: True),
+        ):
+            with self.subTest(index=label), unwell_index(refuses):
+                with self.assertRaisesRegex(OSError, "cannot read the image"):
+                    await self.cache.resolve_many(
+                        [warm, cold], broken_media, artifact_type=ImageArtifact
+                    )
+        self.assertEqual(self.cache.cache_info()["entries"], 1)
+
+    async def test_a_real_input_error_survives_unavailable_locks(self):
+        request = SharedCacheRequest("key", b"image", b"config")
+
+        async def broken_media(indices):
+            raise OSError(errno.EIO, "cannot read the image")
+
+        with full_locks(all_locks):
+            with self.assertRaisesRegex(OSError, "cannot read the image"):
+                await self.cache.resolve_many(
+                    [request], broken_media, artifact_type=ImageArtifact
+                )
+        self.assertEqual(self.cache.cache_info()["entries"], 0)
+
+    async def test_cancellation_while_the_index_is_blocked_still_cancels(self):
+        request = SharedCacheRequest("key", b"image", b"config")
+        entered, release = threading.Event(), threading.Event()
+        lookup = self.cache._lookup
+
+        def blocked_lookup(*args):
+            entered.set()
+            release.wait(5)
+            return lookup(*args)
+
+        try:
+            with patch.object(self.cache, "_lookup", side_effect=blocked_lookup):
+                task = asyncio.create_task(self.resolve([request]))
+                self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+        finally:
+            release.set()
+        await asyncio.sleep(0.1)
+
+    async def test_the_index_lock_does_not_stall_the_serving_event_loop(self):
+        held, release = threading.Event(), threading.Event()
+
+        def holder():
+            # Another tokenizer or scheduler worker mid-transaction or mid-GC.
+            with self.cache._file_lock(Path(self.directory) / "index.lock"):
+                held.set()
+                release.wait(5)
+
+        thread = threading.Thread(target=holder, daemon=True)
+        thread.start()
+        self.assertTrue(held.wait(5))
+        ticks = 0
+
+        async def heartbeat():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        beat = asyncio.create_task(heartbeat())
+        try:
+            await asyncio.sleep(0.05)
+            before = ticks
+            started = time.perf_counter()
+            reading = asyncio.create_task(self.cache.generation())
+            await asyncio.sleep(0.25)
+            self.assertFalse(reading.done(), "the generation read never waited")
+            release.set()
+            generation = await asyncio.wait_for(reading, 5)
+            waited = time.perf_counter() - started
+            self.assertGreaterEqual(waited, 0.2, "the index lock was never contended")
+            self.assertGreaterEqual(ticks - before, 15, "the event loop stalled")
+            self.assertEqual(generation, 0)
+            self.cache.clear()
+            self.assertEqual(await self.cache.generation(), 1)
+        finally:
+            release.set()
+            beat.cancel()
+            thread.join(5)
 
     async def test_full_filesystem_does_not_fail_the_request(self):
         request = SharedCacheRequest("key", b"image", b"config")
