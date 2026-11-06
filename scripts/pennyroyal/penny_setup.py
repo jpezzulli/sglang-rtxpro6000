@@ -846,43 +846,44 @@ def run_session(
     body = ""
     while True:
         body = proposed_text()
-        try:
-            # Validate before the line-oriented file roundtrip can normalize a
-            # value or turn an embedded newline into a different setting.
-            raw_pair = {
-                name: (
-                    answers[name]
-                    if name in answers
-                    and (answers[name] != "" or name in saved or name in cleared)
-                    else environ.get(name, "")
-                )
-                for name in pc.MM_CACHE_KEYS
-            }
-            problems = pc.mm_cache_pair_problems(raw_pair)
-            if problems:
-                raise pc.ConfigError(
-                    "proposed answers (not saved yet): " + problems[0][1]
-                )
-            config = pc.config_from_text(
-                mode, body, config_path, "proposed answers (not saved yet)"
+        # Validate before the line-oriented file roundtrip can normalize a
+        # value or turn an embedded newline into a different setting.
+        raw_pair = {
+            name: (
+                answers[name]
+                if name in answers
+                and (answers[name] != "" or name in saved or name in cleared)
+                else environ.get(name, "")
             )
-        except pc.ConfigError as exc:
-            key = _key_named_by(str(exc), specs)
-            if key not in pc.MM_CACHE_KEYS:
-                raise
-            # A cache value this save carries, from the previous file or from the
-            # shell, that the settings cannot hold: the menu below names it and lets
-            # the operator fix it or cancel, and it is not something to save past.
-            plan, issues = None, [pc.Issue("error", str(exc), key=key)]
+            for name in pc.MM_CACHE_KEYS
+        }
+        problems = pc.mm_cache_pair_problems(raw_pair)
+        if problems:
+            plan = None
+            issues = [pc.Issue("error", message, key=key) for key, message in problems]
         else:
-            # This save creates a new folder. Validate the proposed pair here;
-            # inspect its actual startup after writing, not the old folder it replaces.
-            plan = pc.build_plan(
-                mode, config, environ, repo_root=repo_root, check_mounted_cache=False
-            )
-            if not plan.errors:
-                break
-            issues = list(plan.errors)
+            try:
+                config = pc.config_from_text(
+                    mode, body, config_path, "proposed answers (not saved yet)"
+                )
+            except pc.ConfigError as exc:
+                key = _key_named_by(str(exc), specs)
+                if key not in pc.MM_CACHE_KEYS:
+                    raise
+                plan, issues = None, [pc.Issue("error", str(exc), key=key)]
+            else:
+                # This save creates a new folder. Inspect its actual startup after
+                # writing, not the old folder the operator is regenerating.
+                plan = pc.build_plan(
+                    mode,
+                    config,
+                    environ,
+                    repo_root=repo_root,
+                    check_mounted_cache=False,
+                )
+                if not plan.errors:
+                    break
+                issues = list(plan.errors)
         prompt.say("")
         prompt.say("Not ready to save — fix these or cancel:")
         for issue in issues:

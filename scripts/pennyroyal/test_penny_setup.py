@@ -1538,12 +1538,17 @@ class SetupSessionTests(FixtureMixin):
         shutil.copytree(source, templates)
         template = templates / "config" / "start-flash-next-frspec.sh"
         original = template.read_text()
-        for missing in (False, True):
-            with self.subTest(missing=missing):
+        for variant in ("edited", "missing", "multiline"):
+            with self.subTest(variant=variant):
+                directory_line = {
+                    "edited": "PENNY_MM_PREPROCESS_CACHE_DIR=/cache/old\n",
+                    "missing": "",
+                    "multiline": "PENNY_MM_PREPROCESS_CACHE_DIR='/cache/old\nother'\n",
+                }[variant]
                 template.write_text(
                     original.replace(
                         "PENNY_MM_PREPROCESS_CACHE_DIR=\n",
-                        "" if missing else "PENNY_MM_PREPROCESS_CACHE_DIR=/cache/old\n",
+                        directory_line,
                     ).replace(
                         "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=\n",
                         "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=128\n",
@@ -1556,9 +1561,9 @@ class SetupSessionTests(FixtureMixin):
                             pc.MM_CACHE_SIZE_KEY: "none",
                         }
                     ),
-                    config_path=self.base / f"template-{missing}.env",
+                    config_path=self.base / f"template-{variant}.env",
                 )
-                if missing:
+                if variant != "edited":
                     self.assertEqual(code, 4, output)
                     self.assertIn("Cannot write", output)
                     self.assertFalse(
@@ -1581,6 +1586,8 @@ class SetupSessionTests(FixtureMixin):
             ("PENNY_MM_PREPROCESS_CACHE_DIR=relative", "$CACHE_BUDGET"),
             ("export PENNY_MM_PREPROCESS_CACHE_DIR=relative # scratch", "128"),
             ("PENNY_MM_PREPROCESS_CACHE_DIR=/cache/photos", "0 # old choice"),
+            ("PENNY_MM_PREPROCESS_CACHE_DIR=#invalid", ""),
+            ("PENNY_MM_PREPROCESS_CACHE_DIR=", "#invalid"),
         ):
             with self.subTest(directory=directory, budget=budget):
                 startup.write_text(
@@ -1601,6 +1608,9 @@ class SetupSessionTests(FixtureMixin):
         )
         plan = pc.build_plan("container", config, {}, repo_root=self.repo)
         self.assertTrue([i for i in plan.issues if i.key in pc.MM_CACHE_KEYS])
+        startup.write_bytes(original.encode() + b"\n# encoded \xe9\n")
+        plan = pc.build_plan("container", config, {}, repo_root=self.repo)
+        self.assertTrue([i for i in plan.warnings if i.key in pc.MM_CACHE_KEYS])
 
     def test_inherited_cache_values_are_checked_before_serialization(self):
         for mode in ("native", "container"):

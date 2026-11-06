@@ -1692,14 +1692,14 @@ def _startup_cache_assignment(text: str, name: str) -> tuple[bool, Optional[str]
                 quote = None
         elif char in "'\"":
             quote = char
-        elif char == "#" and (index == 0 or raw[index - 1] in " \t"):
+        elif char == "#" and index > 0 and raw[index - 1] in " \t":
             raw = raw[:index].rstrip()
             break
     # Whitespace before an unquoted value starts a command in Bash; it is not
     # harmless padding around a saved-file value.
     if raw and raw[0].isspace() and raw.strip():
         return True, None
-    raw = raw.rstrip()
+    raw = raw.rstrip(" \t")
     try:
         words = shlex.split(raw)
     except ValueError:
@@ -1712,6 +1712,9 @@ def _startup_cache_assignment(text: str, name: str) -> tuple[bool, Optional[str]
     # Generated shell quoting can concatenate quoted fragments around an apostrophe.
     # Recognize its canonical form without evaluating shell expansions or commands.
     if raw == shlex.quote(value):
+        return True, value
+    # In an assignment, an adjacent hash is part of the value, not a comment.
+    if raw == value and shlex.quote(raw.replace("#", "a")) == raw.replace("#", "a"):
         return True, value
     if raw.startswith("'") and raw.endswith("'") and raw.count("'") == 2:
         return True, value
@@ -1736,8 +1739,14 @@ def _startup_file_cache_issue(
     """
     try:
         text = startup.read_text(encoding="utf-8")
-    except OSError:
+    except FileNotFoundError:
         return None
+    except (OSError, UnicodeError):
+        return Issue(
+            "warn",
+            f"Cannot read {startup}; its image cache settings are unverified",
+            key=MM_CACHE_DIR_KEY,
+        )
     stated: dict[str, str] = {}
     unknown: set[str] = set()
     for name in MM_CACHE_KEYS:
@@ -2268,6 +2277,8 @@ def _render_startup(template: Path, plan: Plan, disk_tier: str) -> str:
             )
             if len(assignments) != 1 or not _has_setting(text, lhs):
                 raise ConfigError(f"{template}: expected one {lhs}= settings line")
+            if _startup_cache_assignment(text, lhs)[1] is None:
+                raise ConfigError(f"{template}: {lhs} must be a single-line literal")
             text = _set_setting(
                 text, template.name, lhs, quote_command_arg(value) if value else ""
             )
