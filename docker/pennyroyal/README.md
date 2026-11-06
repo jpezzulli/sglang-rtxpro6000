@@ -168,6 +168,8 @@ for the optional DFlash2 profile, which also needs its draft checkpoint:
 
 ```bash
 IMAGE='ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.5'   # the published image for the launch files above; keep it on the same release as RELEASE_REF
+# Passing --image (or saving PENNYROYAL_IMAGE) is how you stay on a published tag: the
+# shipped default names the newest prepared release, and 3.1.6 has no image yet.
 ./run.sh --image "$IMAGE"
 ```
 
