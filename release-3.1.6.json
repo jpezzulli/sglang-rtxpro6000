@@ -2,10 +2,10 @@
   "schema": "release-notes/3.1.6",
   "version": "3.1.6",
   "status": {
-    "is_draft": true,
-    "publication_approved": false,
-    "published": false,
-    "container": "Pending. No tag, build, digest or promotion is recorded for this release: the image has not been built or checked, and the `pennyroyal-v3.1.6` tag has not been cut. Until those fields are filled in, `pennyroyal-v3.1.5` with `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.5` remains the published download pair, and the v3.1.6 default in `run.sh`, `compose.yaml` and `.env.example` names an image that does not exist yet."
+    "is_draft": false,
+    "publication_approved": true,
+    "published": true,
+    "container": "Published as ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6 by promoting the verified digest without rebuilding. The release tag and notes are cut from these publication records."
   },
   "source": {
     "candidate_head": "6c5cf32b51b6fead7b0760eba7486e6fb6c5e2cc",
@@ -13,10 +13,9 @@
     "candidate_ref": "candidate/3.1.6-validation-20261106",
     "candidate_base": "87d2b2c560819864c6e001ee3f94021c05c4d091",
     "candidate_note": "The assembled runtime candidate, reviewed and qualified as the release source. It carries the shared Qwen image preprocessing cache with its accepted corrections, the long-cached-prefix QSA prefill indexer optimisation and the hybrid partial-L3 prefetch guard above the published 3.1.5 lineage. The release preparation on top of it changes no runtime code: it moves the version asset and image defaults and adds the launcher, configurator, startup-file, Compose and report plumbing that makes the accepted optional cache pair reachable from Pennyroyal settings.",
-    "image_source": null,
-    "image_source_note": "Pending: the build source is the integrated release head, recorded when the build starts.",
+    "image_source": "470eada6c67f4096cb35b237b67e1d07f9dae1b6",
+    "image_source_note": "The integrated main after setup PR #164 and release-assets PR #165. The final release tag may add publication documentation; the November 6 runtime measurements remain attributed to candidate 6c5cf32b51.",
     "release_tag": "pennyroyal-v3.1.6",
-    "release_tag_commit": null,
     "merged_prs": [
       {
         "number": 162,
@@ -43,6 +42,22 @@
         "merge_commit": "f555efa62f6dbc578f1ce6485082351cd540cf25",
         "check_run": 42216605655,
         "fixes": "Hybrid HiCache revokes a storage hit it cannot stage whole, ported from upstream"
+      },
+      {
+        "number": 164,
+        "state": "merged into main",
+        "head": "e30f0cc47fed8da73f391229fe817842f0240536",
+        "merge_commit": "404f59b66577747562223f6b3fd325bc1d50b799",
+        "check_run": 42256558750,
+        "fixes": "Carry optional shared image-cache settings through setup and launchers"
+      },
+      {
+        "number": 165,
+        "state": "merged into main",
+        "head": "d2986daae6923d898f13faf495b4116d0728cb4a",
+        "merge_commit": "470eada6c67f4096cb35b237b67e1d07f9dae1b6",
+        "check_run": 42256597799,
+        "fixes": "Prepare version assets and release documentation"
       }
     ],
     "maintainer_ports": [
@@ -68,19 +83,22 @@
       }
     ],
     "integrated_main": {
-      "commit": "f555efa62f6dbc578f1ce6485082351cd540cf25",
-      "tree": "95a55e4966177591407fc79b0733259fe5fe5488",
-      "note": "Current main holds the integrated runtime. Its tree differs from the qualified candidate's only in formatter-identical files and one test comment; every measurement below stays attributed to the candidate source."
-    }
+      "commit": "470eada6c67f4096cb35b237b67e1d07f9dae1b6",
+      "tree": "409f17ac031347c03e0219c0e47704df6afe4b61",
+      "note": "Integrated runtime, reviewed launcher/configurator propagation, version assets and release documentation; this is the image build source."
+    },
+    "release_tag_note": "The immutable release tag adds publication documentation above the image source; resolve pennyroyal-v3.1.6 for its final commit."
   },
   "container": {
-    "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6 (pending)",
-    "candidate_image": null,
-    "digest": null,
-    "build_run": null,
-    "build_url": null,
-    "build_status": "pending: not built",
-    "artifact": null
+    "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6",
+    "candidate_image": "ghcr.io/jpezzulli/sglang-rtxpro6000:build-470eada6c67f4096cb35b237b67e1d07f9dae1b6",
+    "digest": "sha256:facb0cb1b92510f78a3e841fe9551531be4dd8c9c1cbb79144b84400ed965e35",
+    "build_run": 42257180075,
+    "build_url": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/42257180075",
+    "build_status": "success; candidate verified locally and promoted without rebuilding",
+    "artifact": "10 layers; 7,632,786,475 compressed layer bytes; 15,759,425,357 bytes local uncompressed image size",
+    "digest_scope": "OCI index; linux/amd64 manifest sha256:2421772f11871fbe60a6599464cc5be926f0550122161aa2f4d31bd18ef3d6d8; config sha256:31936dafd2ba2f04c4e41fd625ad4ac20e1e9b6e563c399fe358f6b35cf8e6b6",
+    "promotion": "Run https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/42284413700 completed successfully at 2026-11-06T19:59:45Z. Every build step was skipped. The v3.1.6 tag resolves to the verified index digest recorded here."
   },
   "changes": [
     {
@@ -133,9 +151,9 @@
     "cuda": "Five SM120 QSA numeric and selection checks pass on the built path (CUDA 13.4, GCC 15): the same scores and selected blocks as the previous indexer, in the retained-prefix shapes.",
     "serving": "Both profiles served 18 reasoning responses each, all completing naturally, and passed the same agentic control run (6 model turns, 5 mock tool calls). Vision requests were run with the preprocessing cache off and then on, reusing one identical PNG with a changed prompt and a literal <image> tag, with preprocessing on a local RTX A4000 and CPU feature transport; a repeat of the same image was served from the shared directory, and cold-media timing was not measured. Retrieval passed at 63,906 and 489,921 tokens on both profiles. Cold-media timing was not measured, and no HTTP remote-encoder path is claimed.",
     "cache_restore": "Host-tier restore returned 63,872 KV tokens and 2 Mamba states on both profiles (plus 2,048 sliding-window tokens on 27B); a fresh-process file restore returned 553,792 tokens and 4 Mamba states (plus 4,096 sliding-window tokens on 27B), and a duplicate of the same prompt answered 553,792 tokens from the device cache. Four replays at 64K and 490K returned correct answers with natural stops.",
-    "caveats": "Publication facts are pending, not favourable: no image, tag, digest, build run or promotion is recorded. The measured rows name their own launch conditions, and the prefill comparison is a prefill measurement on one profile rather than a decode claim.",
+    "caveats": "The November 6 two-profile native qualification is reused. Container serving checks cover Flash-Next startup, generation and parallel tool-call emission.",
     "dependencies": "No baseline or pin change in this release: docker/pennyroyal/native-baseline.json stays as published for 3.1.5, with the same 231 recorded distributions, and no dependency upgrade is included.",
-    "public_main": "main stands at f555efa62f6dbc578f1ce6485082351cd540cf25 with the integrated runtime; the release records here are prepared on candidate/3.1.6-validation-20261106 at 6c5cf32b51b6fead7b0760eba7486e6fb6c5e2cc, the measured source.",
+    "public_main": "Image source 470eada6c67f4096cb35b237b67e1d07f9dae1b6 includes all five release PRs; the dated runtime qualification remains on 6c5cf32b51.",
     "prefill_comparison": {
       "conditions": "Flash-Next profile only, on the maintained 450 W native qualification recipe with adaptive 6/36 and the shared image cache on at 256 MiB; exactly 200,000 tokens cached on the device plus 4,000 new input tokens, prefilled in 4,096-token chunks; NIXL cache collection disabled and outside callers excluded.",
       "claim": "Fresh-input prefill tokens per second, a prefill measurement and not a decode rate.",
@@ -151,6 +169,20 @@
     "measured_launch": {
       "flash_next": "native configs/pennyroyal/serve-flash-next-frspec.sh, adaptive 6 requests / 36 Mamba slots, xhigh, ordinary sampling, 32 decimal GB HiCache, shared image preprocessing cache on with a 256 MiB budget and the CPU feature transport, one RTX PRO 6000 at 450 W",
       "27b_dflash2": "native configs/pennyroyal/serve-qwen38-27b-dflash2.sh, fixed block-8 DFlash2, xhigh, ordinary sampling, 4 requests / 24 Mamba slots, 96 decimal GB HiCache, .92 memory ratio, image preprocessing cache off, the same card"
+    },
+    "release_setup": "219 setup tests run, 2 skipped, all runnable tests passed; 61 packaging/version tests passed. Final focused regressions and independent review passed on the corrections.",
+    "container": {
+      "checked_date": "2026-11-06",
+      "source": "470eada6c67f4096cb35b237b67e1d07f9dae1b6",
+      "digest": "sha256:facb0cb1b92510f78a3e841fe9551531be4dd8c9c1cbb79144b84400ed965e35",
+      "version_output": "Penny Royal 3.1.6 | source 470eada6c6",
+      "upstream_package_version": "0.5.19+g470eada6c67f",
+      "native_baseline_sha256": "dcb3e395e373d9ca1c3426249901977936ae8356368dc88af820006687964045",
+      "package_checks": "Approved dependency parity, accepted compiled FlashInfer SM120 module, and NIXL POSIX FILE/DRAM support passed.",
+      "runtime_profile": "Flash-Next NVFP4/native NEXTN, tiered policy, medium default reasoning, 4 requests / 24 Mamba slots, 32 GB HiCache, diagnostics off.",
+      "generation": "Streamed READY, natural stop and DONE.",
+      "parallel_tools": "lookup_alpha(ALPHA) and lookup_bravo(BRAVO), valid JSON arguments, distinct IDs, tool_calls finish and DONE.",
+      "native_restoration": "The prior native configuration was restored after smoke. API readiness, streamed generation and parallel tools passed; diagnostics remain off."
     }
   },
   "contributors": [

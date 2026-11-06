@@ -2,19 +2,13 @@
 
 ## 3.1.6 — Long cached prefixes score per request, and the shared image cache becomes a setting
 
-**Publication pending.** The reviewed runtime candidate is
-`6c5cf32b51b6fead7b0760eba7486e6fb6c5e2cc` (tree
-`fa6098786fff512add3f3ff7ccdb3e777679e446`) on
-`candidate/3.1.6-validation-20261106`, above the published 3.1.5 records at
-`87d2b2c560819864c6e001ee3f94021c05c4d091`. No image, tag, digest or build run
-is recorded yet, so `pennyroyal-v3.1.5` and `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.5`
-stay the published download pair; the dependency baseline is unchanged at its
-published 231 distributions. The same three runtime changes also stand merged on main
-as PRs #162, #155 and #163, and main stands at
-`f555efa62f6dbc578f1ce6485082351cd540cf25` (tree `95a55e4966177591407fc79b0733259fe5fe5488`),
-which differs from the qualified candidate's tree only in formatter-identical files and
-one test comment: main is the integrated runtime, and every number below stays
-attributed to the measured candidate source.
+**Published 2026-11-06.** Source tag `pennyroyal-v3.1.6` accompanies
+`ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6`, promoted from the verified image
+without rebuilding. Image source `470eada6c67f4096cb35b237b67e1d07f9dae1b6`
+includes runtime PRs #155, #162 and #163, setup PR #164, and release-assets
+PR #165. The November 6 native measurements remain attributed to qualified
+candidate `6c5cf32b51b6fead7b0760eba7486e6fb6c5e2cc`. Dependency pins are unchanged;
+[release-3.1.6.json](release-3.1.6.json) records the exact image and verification.
 
 - **QSA prefill scores per request** (port commit `d4703ed417393655ad84b1062b474b674a238393`,
   merged as PR #162 at `dfd469c3a774789ad0b3476386fdfd9df5a42298`, check run
@@ -34,8 +28,8 @@ attributed to the measured candidate source.
   accepted corrections `61cb225431e0df33e15f7dd543d4188f3849e8f9` preserved in that
   PR's history):
   `--mm-preprocess-cache-dir` with a positive `--mm-preprocess-cache-size-mb`
-  lets compatible tokenizer workers reuse one content-verified CPU artifact
-  instead of decoding the same image again per worker. The store treats its own
+  lets compatible tokenizer workers reuse content-verified CPU preprocessing
+  artifacts. The store treats its own
   index as optional — a verified hit survives a failed recency stamp or commit,
   an unreadable index is a miss, an unlockable shard computes without publishing
   — and a caller-supplied `mm_hashes` entry no longer overwrites the padded

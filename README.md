@@ -28,7 +28,7 @@ width routing (block 6 for one request, block 4 for two or more) and
 FlashInfer draft-token verification is an **experimental / alpha** profile,
 fully available to opt into.
 
-**3.1.6 (prepared, publication pending):** faster prefill on long cached prefixes, and an opt-in shared image preprocessing cache you can set from the launcher. The image, tag and digest are not published yet, so the download pair is still `pennyroyal-v3.1.5` with `v3.1.5`; see the [3.1.6 notes](RELEASE_NOTES_3.1.6.md).
+**3.1.6 (published 2026-11-06):** faster prefill on long cached prefixes, optional shared image preprocessing, and a hybrid-cache prefetch fix. The verified container is `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6`, promoted without rebuilding. See the [3.1.6 notes](RELEASE_NOTES_3.1.6.md).
 
 **3.1.5 (published 2026-11-03):** bounds temporary GPU memory in hybrid-Mamba checkpoint copies. The release image is `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.5`, promoted without rebuilding; see the [3.1.5 notes](RELEASE_NOTES_3.1.5.md). [3.1.4](RELEASE_NOTES_3.1.4.md), published 2026-10-29, stays available as the previous release.
 
