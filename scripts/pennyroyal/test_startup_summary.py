@@ -255,6 +255,43 @@ class StartupSummaryTest(unittest.TestCase):
         )
         self.assertNotIn("adaptive MTP", output)
 
+    def test_the_image_preprocessing_cache_is_reported_in_its_own_unit(self):
+        # One line per state, and the MiB stated because the two neighbouring
+        # budgets are a decimal-GB RAM tier and a GiB disk budget. The shared
+        # cache names the directory it will keep artifacts in; a budget on its
+        # own says plainly that nothing is shared.
+        base = [
+            "serve",
+            "--model-path",
+            "/models/Flash Next",
+            "--image-processor-backend",
+            "pil",
+        ]
+        shared = self.summary(
+            *base,
+            "--mm-preprocess-cache-dir",
+            "/dev/shm/mm cache",
+            "--mm-preprocess-cache-size-mb",
+            "3072",
+        )
+        self.assertIn(
+            "Image preprocessing cache: shared at /dev/shm/mm cache | 3072 MiB "
+            "(1 MiB = 1048576 bytes, one budget for the whole directory)",
+            shared,
+        )
+        per_worker = self.summary(*base, "--mm-preprocess-cache-size-mb", "0")
+        self.assertIn(
+            "Image preprocessing cache: no shared directory | 0 MiB across the "
+            "tokenizer workers (0 = off)",
+            per_worker,
+        )
+        off = self.summary(*base)
+        self.assertIn(
+            "Image preprocessing cache: off (no shared directory and no saved "
+            "budget)",
+            off,
+        )
+
     def test_all_launcher_argv_match_the_base_exec_blocks(self):
         # The comparison needs the base commit's blobs. A shallow or partial
         # clone may not carry that object at all; say so instead of reporting
@@ -446,6 +483,11 @@ class StartupSummaryTest(unittest.TestCase):
                 # launches in test_request_capacity.py and
                 # test_frspec_kv_capacity.py.
                 "TOKEN_CAP_ARGS=()",
+                # The optional image preprocessing cache expands to nothing when
+                # the pair is unset, which is the default launch this comparison
+                # is about; the flag pairs themselves are launched for real in
+                # test/registered/unit/pennyroyal/test_prebuilt_container_launch.py.
+                "PENNY_MM_PREPROCESS_CACHE_ARGS=()",
                 "PLE_ARGS=(--ple-offload-embedding)",
                 # The disk tier is on by default, and the recipe now keeps the
                 # three NIXL FILE storage-backend arguments in one guarded array

@@ -136,6 +136,48 @@ class FixtureMixin(unittest.TestCase):
         )
 
 
+class AnswersByLabel:
+    """A stdin that answers the question the wizard just printed, not a line count.
+
+    A positional answer list makes a test about two settings depend on the order
+    of every other question the wizard has, and on how many follow-up prompts one
+    menu emits. Anything not named here takes its default, and anything the wizard
+    must have an answer for is named by the label it prints.
+    """
+
+    def __init__(self, stream, answers: dict[str, str], default: str = "") -> None:
+        self.stream, self.answers, self.default, self.position = (
+            stream,
+            answers,
+            default,
+            0,
+        )
+
+    def readline(self, *args) -> str:
+        text = self.stream.getvalue()[self.position :]
+        self.position = len(self.stream.getvalue())
+        for label, answer in self.answers.items():
+            if label in text:
+                return answer + "\n"
+        return self.default + "\n"
+
+
+def launched_cache_flags(plan) -> list[str]:
+    """The cache arguments the exported environment produces, via the shared helper.
+
+    Every launch path builds its flags from these two variables through
+    configs/pennyroyal/mm-preprocess-cache.sh, so the values a save exports are
+    what a real launch would receive: run through the helper itself, they say
+    whether the saved decision actually reached the server command line.
+    """
+    from test_penny_config import run_helper
+
+    return run_helper(
+        directory=plan.env.get(pc.MM_CACHE_DIR_KEY, ""),
+        budget=plan.env.get(pc.MM_CACHE_SIZE_KEY, ""),
+    )["args"]
+
+
 class GpuDiscoveryTests(unittest.TestCase):
     def test_present(self):
         gpus, note = pc.discover_gpus(
@@ -166,12 +208,19 @@ class GpuDiscoveryTests(unittest.TestCase):
 class SetupSessionTests(FixtureMixin):
     """The wizard writes the same file the non-interactive path validates."""
 
+    def advanced_answers(self, mode: str, overrides: dict[str, str]) -> list[str]:
+        """One answer per advanced question, in the order the wizard asks them."""
+        return [
+            overrides.get(name, "") for name in ps.ordered_names(mode, advanced=True)
+        ]
+
     def run_setup(
         self,
         answers: list[str],
         existing: str | None = None,
         config_path: Path | None = None,
         home: Path | None = None,
+        environ: dict[str, str] | None = None,
     ) -> tuple[int, str, Path]:
         path = config_path or self.config_path
         if existing is not None:
@@ -183,7 +232,7 @@ class SetupSessionTests(FixtureMixin):
         code = ps.run_session(
             "native",
             path,
-            {},
+            dict(environ or {}),
             prompt,
             self.repo,
             home=home or self.base / "isolated-home",
@@ -557,6 +606,8 @@ class SetupSessionTests(FixtureMixin):
             "",  # PLE placement menu: Enter keeps ram
             str(self.base / "ple-snap"),  # snapshot path (free text, never empty)
             "",  # WSL2 host memory
+            "",  # image cache directory: blank leaves it off
+            "",  # image cache budget: blank keeps the runtime's own default
             "",  # forward tools
             "3",  # MTP width policy: the third menu row
             "",  # capacity, slots and KV cap: recipe defaults
@@ -596,8 +647,16 @@ class SetupSessionTests(FixtureMixin):
             [""]
             + self.basics(str(self.next_model))
             + ["y"]
-            + [advanced[0], advanced[1], advanced[2], advanced[3], ""]
-            + advanced[5:]
+            + [
+                advanced[0],
+                advanced[1],
+                advanced[2],
+                advanced[3],
+                advanced[4],
+                advanced[5],
+                "",
+            ]
+            + advanced[7:]
             + ["y"],
             existing=f"{pc.PROFILE_KEY}=next\n"
             f"TARGET_MODEL={pc.quote_value(str(self.next_model))}\n"
@@ -655,6 +714,8 @@ class SetupSessionTests(FixtureMixin):
                 "",  # PLE placement menu: Enter keeps ram
                 "/nvme-unused-with-ram",  # free-text path stays free text
                 "",  # WSL2 host memory: Enter keeps false
+                "",  # image cache directory: blank leaves it off
+                "",  # image cache budget: blank keeps the runtime's own default
                 "",  # forward tools: Enter keeps true
                 "",  # MTP width policy: Enter keeps the qualified tiered
                 "",
@@ -723,7 +784,9 @@ class SetupSessionTests(FixtureMixin):
             "",
             str(self.base / "ple-snap"),
             "yes",  # WSL2 host-memory workaround
-            "",
+            "",  # image cache directory: blank leaves it off
+            "",  # image cache budget: blank keeps the runtime's own default
+            "",  # forward tools: Enter keeps true
             "",  # MTP width policy: Enter keeps the qualified tiered
             "",
             "",
@@ -1074,6 +1137,688 @@ class SetupSessionTests(FixtureMixin):
         self.assertIn("not the RAM model cache", asked)
         self.assertIn("separate from the PLE embedding table", asked)
 
+    def test_the_image_cache_pair_is_asked_kept_and_can_be_cleared(self):
+        # Two default-off settings, asked in the advanced section. An answer is
+        # saved like any other and the plan says what it selects; Enter keeps what
+        # is already saved, so `none` (or `off`) is the usable way back to off: it
+        # writes the explicit blank that suppresses an inherited value instead of
+        # leaving the key unsaid. A budget that is not a number is re-asked.
+        advanced = [
+            "",  # PLE placement menu: Enter keeps ram
+            "/ple-unused",  # snapshot path (free text, never empty)
+            "",  # WSL2 host memory
+            # Padding is refused and asked again, because the trimmed path is not
+            # the directory that was typed; the spaces *inside* the answer stay.
+            " /dev/shm/mm cache ",
+            "/dev/shm/mm cache",
+            " 512 ",  # the same rule for the budget
+            "many",  # a junk budget is re-asked...
+            "512",  # ...and this one is the answer
+            "",  # forward tools
+            "",  # MTP width policy: the qualified tiered
+            "",
+            "",
+            "",  # capacity, slots, KV cap: recipe defaults
+            "",
+            "",  # TP ranks and build jobs: recipe defaults
+            "/opt/nixl",
+            str(self.venv / "bin" / "sglang"),
+            str(self.venv / "bin" / "python"),
+        ]
+        existing = (
+            f"{pc.PROFILE_KEY}=next\n"
+            f"TARGET_MODEL={pc.quote_value(str(self.next_model))}\n"
+            f"CACHE_BASE={pc.quote_value(str(self.cache))}\n"
+            f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n"
+            f"{pc.MM_CACHE_DIR_KEY}={pc.quote_value('/dev/shm/mm cache')}\n"
+            f"{pc.MM_CACHE_SIZE_KEY}=512\n"
+        )
+        code, output, path = self.run_setup(
+            [""] + self.basics("") + ["y"] + advanced + ["y"], existing=existing
+        )
+        self.assertEqual(code, 0, output)
+        self.assertIn(
+            "must be a whole number of MiB (1 MiB = 1048576 bytes), got 'many'", output
+        )
+        # Both padded answers were refused by name rather than trimmed into validity.
+        self.assertEqual(output.count(pc.SPACE_RULE), 2)
+        saved = pc.read_env_file(path)
+        self.assertEqual(saved[pc.MM_CACHE_DIR_KEY], "/dev/shm/mm cache")
+        self.assertEqual(saved[pc.MM_CACHE_SIZE_KEY], "512")
+        plan = pc.build_plan(
+            "native",
+            pc.load_config("native", path, {}, self.repo),
+            {},
+            repo_root=self.repo,
+        )
+        self.assertEqual(plan.errors, [])
+        line = next(line for line in plan.summary if "preprocessing cache" in line)
+        self.assertTrue(
+            line.startswith(
+                "image preprocessing cache: shared at '/dev/shm/mm cache' with a "
+                "512 MiB budget (1 MiB = 1024*1024 bytes"
+            ),
+            line,
+        )
+        self.assertIn("a different number needs a fresh directory", line)
+
+        # Enter keeps a saved pair, so the clear word is the only way back; the
+        # explicit blank it saves has to beat a value the caller's shell carries.
+        code, output, path = self.run_setup(
+            [""]
+            + self.basics("")
+            + ["y"]
+            + [advanced[0], advanced[1], advanced[2], "none", "off"]
+            + advanced[6:]
+            + ["y"],
+            existing=existing,
+            config_path=self.base / "cache-cleared.env",
+        )
+        self.assertEqual(code, 0, output)
+        saved = pc.read_env_file(path)
+        self.assertEqual(saved[pc.MM_CACHE_DIR_KEY], "")
+        self.assertEqual(saved[pc.MM_CACHE_SIZE_KEY], "")
+        ambient = {
+            pc.MM_CACHE_DIR_KEY: "/cache/from-the-shell",
+            pc.MM_CACHE_SIZE_KEY: "2048",
+        }
+        cleared = pc.build_plan(
+            "native",
+            pc.load_config("native", path, ambient, self.repo),
+            ambient,
+            repo_root=self.repo,
+        )
+        self.assertEqual(cleared.errors, [])
+        self.assertEqual(cleared.env[pc.MM_CACHE_DIR_KEY], "")
+        self.assertIn("image preprocessing cache: off", "\n".join(cleared.summary))
+
+    def run_pair_setup(
+        self,
+        directory: str,
+        budget: str,
+        environ: dict[str, str] | None = None,
+    ) -> tuple[int, str, Path]:
+        """One native setup with the pair answered; defaults everywhere else.
+
+        The advanced answers are positional, in the order the wizard asks them,
+        like the other wizard tests in this file: the pair sits between the WSL2
+        host-memory menu and the tool-forwarding question.
+        """
+        advanced = [
+            "",  # PLE placement menu: Enter keeps ram
+            "/ple-unused",  # the snapshot path it asks for next
+            "",  # WSL2 host memory
+            directory,
+            budget,
+            "",  # forward tools
+            "",  # MTP width policy: the qualified tiered
+            "",
+            "",
+            "",  # capacity, slots, KV cap: recipe defaults
+            "",
+            "",  # TP ranks and build jobs: recipe defaults
+            "/opt/nixl",
+            str(self.venv / "bin" / "sglang"),
+            str(self.venv / "bin" / "python"),
+        ]
+        code, output, path = self.run_setup(
+            [""]
+            + self.basics(str(self.next_model))
+            + ["y"]
+            + advanced
+            + ["y"],  # the advanced gate, then the save confirmation
+            environ=environ,
+        )
+        return code, output, path
+
+    def test_an_explicit_clear_survives_a_key_the_file_never_had(self):
+        # A fresh setup, the feature carried only by the caller's shell, and the
+        # operator answers `none`: the clear has to be written down as a decision.
+        # Omitting the key instead would leave the next launch inheriting exactly
+        # the value the operator just switched off.
+        ambient = {
+            pc.MM_CACHE_DIR_KEY: "/dev/shm/ambient",
+            pc.MM_CACHE_SIZE_KEY: "128",
+        }
+        code, output, path = self.run_pair_setup("none", "off", environ=ambient)
+        self.assertEqual(code, 0, output)
+        saved = pc.read_env_file(path)
+        self.assertEqual(saved[pc.MM_CACHE_DIR_KEY], "")
+        self.assertEqual(saved[pc.MM_CACHE_SIZE_KEY], "")
+        plan = pc.build_plan(
+            "native",
+            pc.load_config("native", path, ambient, self.repo),
+            ambient,
+            repo_root=self.repo,
+        )
+        self.assertEqual(plan.errors, [])
+        # What the launcher is handed is the blank, so it launches with no flags
+        # even though the shell around this run still carries the pair.
+        self.assertEqual(plan.env[pc.MM_CACHE_DIR_KEY], "")
+        self.assertEqual(plan.env[pc.MM_CACHE_SIZE_KEY], "")
+        self.assertIn("image preprocessing cache: off", "\n".join(plan.summary))
+        self.assertEqual([], launched_cache_flags(plan))
+
+    def test_untouched_default_off_keys_stay_absent_so_inheritance_keeps_working(self):
+        # The clear is a word, not the ordinary blank: a first-time setup that
+        # presses Enter on both questions saves nothing, so exporting the pair and
+        # launching without setup keeps working exactly as the precedence says.
+        code, output, path = self.run_pair_setup(
+            "",
+            "",
+            environ={
+                pc.MM_CACHE_DIR_KEY: "/dev/shm/ambient",
+                pc.MM_CACHE_SIZE_KEY: "64",
+            },
+        )
+        self.assertEqual(code, 0, output)
+        saved = pc.read_env_file(path)
+        self.assertNotIn(pc.MM_CACHE_DIR_KEY, saved)
+        self.assertNotIn(pc.MM_CACHE_SIZE_KEY, saved)
+        inherited = pc.build_plan(
+            "native",
+            pc.load_config("native", path, {}, self.repo),
+            {pc.MM_CACHE_DIR_KEY: "/dev/shm/ambient", pc.MM_CACHE_SIZE_KEY: "64"},
+            repo_root=self.repo,
+        )
+        self.assertEqual(inherited.env[pc.MM_CACHE_DIR_KEY], "/dev/shm/ambient")
+        self.assertEqual(inherited.env[pc.MM_CACHE_SIZE_KEY], "64")
+
+    def test_a_container_save_records_the_pair_its_launch_uses(self):
+        # The generated launch folder reads its own files, so an inherited pair
+        # has to appear in the settings that describe it: freezing it into the
+        # startup script alone made a later reload report a different launch than
+        # the folder actually starts.
+        ambient = {
+            pc.MM_CACHE_DIR_KEY: "/cache/inherited",
+            pc.MM_CACHE_SIZE_KEY: "128",
+        }
+        code, output, launch_dir, files = self.run_container_setup(environ=ambient)
+        self.assertEqual(code, 0, output)
+        settings = saved_settings(output)
+        saved = pc.read_env_file(settings)
+        self.assertEqual(saved[pc.MM_CACHE_DIR_KEY], "/cache/inherited")
+        self.assertEqual(saved[pc.MM_CACHE_SIZE_KEY], "128")
+        startup = files["start-flash-next-frspec.sh"].read_text()
+        self.assertIn("PENNY_MM_PREPROCESS_CACHE_DIR=/cache/inherited", startup)
+        self.assertIn("PENNY_MM_PREPROCESS_CACHE_SIZE_MB=128", startup)
+        # Reloaded with nothing inherited, the settings describe that same launch.
+        reloaded = pc.build_plan(
+            "container",
+            pc.load_config("container", settings, {}, self.repo),
+            {},
+            repo_root=self.repo,
+        )
+        self.assertEqual(reloaded.errors, [])
+        self.assertEqual(reloaded.env[pc.MM_CACHE_DIR_KEY], "/cache/inherited")
+        self.assertIn(
+            "image preprocessing cache: shared at /cache/inherited inside the "
+            "container with a 128 MiB budget",
+            "\n".join(reloaded.summary),
+        )
+
+        # Both keys are recorded, always, because the generated folder decides
+        # from its own file: a save that said nothing at all writes the pair blank,
+        # and an export that turns up afterwards cannot make that folder share a
+        # cache its own startup script never mentions.
+        code, output, _, files = self.run_container_setup(
+            config_path=self.base / "nothing-said.env"
+        )
+        self.assertEqual(code, 0, output)
+        settings = saved_settings(output)
+        saved = pc.read_env_file(settings)
+        self.assertEqual(saved[pc.MM_CACHE_DIR_KEY], "")
+        self.assertEqual(saved[pc.MM_CACHE_SIZE_KEY], "")
+        self.assertIn(
+            "PENNY_MM_PREPROCESS_CACHE_DIR=\n",
+            files["start-flash-next-frspec.sh"].read_text(),
+        )
+        changed = pc.build_plan(
+            "container",
+            pc.load_config(
+                "container",
+                settings,
+                {pc.MM_CACHE_DIR_KEY: "/cache/new", pc.MM_CACHE_SIZE_KEY: "128"},
+                self.repo,
+            ),
+            {pc.MM_CACHE_DIR_KEY: "/cache/new", pc.MM_CACHE_SIZE_KEY: "128"},
+            repo_root=self.repo,
+        )
+        self.assertEqual(changed.errors, [])
+        self.assertIn("image preprocessing cache: off", "\n".join(changed.summary))
+
+        # A budget on its own is recorded the same way, directory half blank:
+        # the per-worker cache this save chose stays the per-worker cache.
+        code, output, _, files = self.run_container_setup(
+            environ={pc.MM_CACHE_SIZE_KEY: "256"},
+            config_path=self.base / "budget-only.env",
+        )
+        self.assertEqual(code, 0, output)
+        saved = pc.read_env_file(saved_settings(output))
+        self.assertEqual(saved[pc.MM_CACHE_DIR_KEY], "")
+        self.assertEqual(saved[pc.MM_CACHE_SIZE_KEY], "256")
+        later = pc.build_plan(
+            "container",
+            pc.load_config(
+                "container",
+                saved_settings(output),
+                {pc.MM_CACHE_DIR_KEY: "/cache/later", pc.MM_CACHE_SIZE_KEY: "64"},
+                self.repo,
+            ),
+            {pc.MM_CACHE_DIR_KEY: "/cache/later", pc.MM_CACHE_SIZE_KEY: "64"},
+            repo_root=self.repo,
+        )
+        self.assertEqual(later.errors, [])
+        self.assertIn(
+            "image preprocessing cache: 256 MiB split across the tokenizer "
+            "workers, no shared directory (0 = off)",
+            "\n".join(later.summary),
+        )
+
+        # Pressing Enter on both questions is the same decision as `none` for a
+        # folder: the questions were asked, the answer was nothing.
+        code, output, _, files = self.run_container_setup(
+            environ=ambient,
+            advanced=self.container_advanced(
+                {pc.MM_CACHE_DIR_KEY: "", pc.MM_CACHE_SIZE_KEY: ""}
+            ),
+            config_path=self.base / "entered-blank-container.env",
+        )
+        self.assertEqual(code, 0, output)
+        saved = pc.read_env_file(saved_settings(output))
+        self.assertEqual(saved[pc.MM_CACHE_DIR_KEY], "")
+        self.assertEqual(saved[pc.MM_CACHE_SIZE_KEY], "")
+        reloaded = pc.build_plan(
+            "container",
+            pc.load_config("container", saved_settings(output), ambient, self.repo),
+            ambient,
+            repo_root=self.repo,
+        )
+        self.assertEqual(reloaded.errors, [])
+        self.assertIn("image preprocessing cache: off", "\n".join(reloaded.summary))
+
+        # The clear, answered in the advanced section of the same container save:
+        # `none` beats the value the shell carries, in the file and in the script.
+        code, output, _, files = self.run_container_setup(
+            environ=ambient,
+            advanced=self.container_advanced(
+                {pc.MM_CACHE_DIR_KEY: "none", pc.MM_CACHE_SIZE_KEY: "off"}
+            ),
+            config_path=self.base / "cleared-container.env",
+        )
+        self.assertEqual(code, 0, output)
+        saved = pc.read_env_file(saved_settings(output))
+        self.assertEqual(saved[pc.MM_CACHE_DIR_KEY], "")
+        self.assertEqual(saved[pc.MM_CACHE_SIZE_KEY], "")
+        startup = files["start-flash-next-frspec.sh"].read_text()
+        self.assertIn("PENNY_MM_PREPROCESS_CACHE_DIR=\n", startup)
+        self.assertIn("PENNY_MM_PREPROCESS_CACHE_SIZE_MB=\n", startup)
+        reloaded = pc.build_plan(
+            "container",
+            pc.load_config("container", saved_settings(output), ambient, self.repo),
+            ambient,
+            repo_root=self.repo,
+        )
+        self.assertEqual(reloaded.errors, [])
+        self.assertIn("image preprocessing cache: off", "\n".join(reloaded.summary))
+
+    def test_native_inherited_cache_errors_can_be_repaired_or_disabled(self):
+        for inherited, key, answer in (
+            ({pc.MM_CACHE_SIZE_KEY: "oops"}, pc.MM_CACHE_SIZE_KEY, "128"),
+            (
+                {pc.MM_CACHE_SIZE_KEY: "$PENNY_HICACHE_SIZE_GB"},
+                pc.MM_CACHE_SIZE_KEY,
+                "128",
+            ),
+            ({pc.MM_CACHE_DIR_KEY: "/dev/shm/cache"}, pc.MM_CACHE_DIR_KEY, "off"),
+            (
+                {pc.MM_CACHE_DIR_KEY: "relative", pc.MM_CACHE_SIZE_KEY: "128"},
+                pc.MM_CACHE_DIR_KEY,
+                "/dev/shm/cache",
+            ),
+        ):
+            with self.subTest(inherited=inherited):
+                code, output, _ = self.run_setup(
+                    ["next"]
+                    + self.basics(str(self.next_model))
+                    + ["n", key, answer, "y"],
+                    environ=inherited,
+                )
+                self.assertEqual(code, 0, output)
+                settings = saved_settings(output)
+                config = pc.load_config("native", settings, inherited, self.repo)
+                plan = pc.build_plan("native", config, inherited, repo_root=self.repo)
+                self.assertEqual(plan.errors, [])
+                self.assertEqual(config.values[key], "" if answer == "off" else answer)
+
+    def test_generated_cache_path_with_shell_quotes_checks_cleanly(self):
+        directory = "/cache/John's photos $literal"
+        code, output, _, _ = self.run_container_setup(
+            environ={pc.MM_CACHE_DIR_KEY: directory, pc.MM_CACHE_SIZE_KEY: "128"}
+        )
+        self.assertEqual(code, 0, output)
+        config = pc.load_config("container", saved_settings(output), {}, self.repo)
+        plan = pc.build_plan("container", config, {}, repo_root=self.repo)
+        self.assertEqual(plan.errors, [])
+        self.assertFalse(
+            [i for i in plan.warnings if i.key in pc.MM_CACHE_KEYS], plan.warnings
+        )
+
+    def test_invalid_mounted_cache_pair_fails_check(self):
+        code, output, _, files = self.run_container_setup()
+        self.assertEqual(code, 0, output)
+        startup = files["start-flash-next-frspec.sh"]
+        startup.write_text(
+            startup.read_text().replace(
+                "PENNY_MM_PREPROCESS_CACHE_DIR=\n",
+                "PENNY_MM_PREPROCESS_CACHE_DIR=relative\n",
+            )
+        )
+        config = pc.load_config("container", saved_settings(output), {}, self.repo)
+        plan = pc.build_plan("container", config, {}, repo_root=self.repo)
+        self.assertTrue(plan.errors)
+        self.assertIn("absolute directory", "\n".join(i.message for i in plan.errors))
+        code, repaired, _, _ = self.run_container_setup(
+            existing=True, config_path=saved_settings(output)
+        )
+        self.assertEqual(code, 0, repaired)
+        repaired_config = pc.load_config(
+            "container", saved_settings(repaired), {}, self.repo
+        )
+        self.assertEqual(
+            pc.build_plan("container", repaired_config, {}, repo_root=self.repo).errors,
+            [],
+        )
+        self.assertIn("PENNY_MM_PREPROCESS_CACHE_DIR=relative", startup.read_text())
+
+    def test_cache_template_pair_is_rewritten_or_rejected_before_saving(self):
+        templates = self.repo / pc.LAUNCH_RELPATH
+        source = templates.resolve()
+        templates.unlink()
+        shutil.copytree(source, templates)
+        template = templates / "config" / "start-flash-next-frspec.sh"
+        original = template.read_text()
+        for variant in ("edited", "missing", "multiline"):
+            with self.subTest(variant=variant):
+                directory_line = {
+                    "edited": "PENNY_MM_PREPROCESS_CACHE_DIR=/cache/old\n",
+                    "missing": "",
+                    "multiline": "PENNY_MM_PREPROCESS_CACHE_DIR='/cache/old\nother'\n",
+                }[variant]
+                template.write_text(
+                    original.replace(
+                        "PENNY_MM_PREPROCESS_CACHE_DIR=\n",
+                        directory_line,
+                    ).replace(
+                        "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=\n",
+                        "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=128\n",
+                    )
+                )
+                code, output, _, files = self.run_container_setup(
+                    advanced=self.container_advanced(
+                        {
+                            pc.MM_CACHE_DIR_KEY: "none",
+                            pc.MM_CACHE_SIZE_KEY: "none",
+                        }
+                    ),
+                    config_path=self.base / f"template-{variant}.env",
+                )
+                if variant != "edited":
+                    self.assertEqual(code, 4, output)
+                    self.assertIn("Cannot write", output)
+                    self.assertFalse(
+                        any(line.startswith("Saved ") for line in output.splitlines())
+                    )
+                else:
+                    self.assertEqual(code, 0, output)
+                    text = files[template.name].read_text()
+                    self.assertIn("PENNY_MM_PREPROCESS_CACHE_DIR=\n", text)
+                    self.assertIn("PENNY_MM_PREPROCESS_CACHE_SIZE_MB=\n", text)
+
+    def test_mounted_cache_assignment_forms_are_not_silently_misread(self):
+        code, output, _, files = self.run_container_setup()
+        self.assertEqual(code, 0, output)
+        startup = files["start-flash-next-frspec.sh"]
+        original = startup.read_text()
+        config = pc.load_config("container", saved_settings(output), {}, self.repo)
+        for directory, budget in (
+            ("export PENNY_MM_PREPROCESS_CACHE_DIR=relative", ""),
+            ("PENNY_MM_PREPROCESS_CACHE_DIR=relative", "$CACHE_BUDGET"),
+            ("export PENNY_MM_PREPROCESS_CACHE_DIR=relative # scratch", "128"),
+            ("PENNY_MM_PREPROCESS_CACHE_DIR=/cache/photos", "0 # old choice"),
+            ("PENNY_MM_PREPROCESS_CACHE_DIR=#invalid", ""),
+            ("PENNY_MM_PREPROCESS_CACHE_DIR=", "#invalid"),
+        ):
+            with self.subTest(directory=directory, budget=budget):
+                startup.write_text(
+                    original.replace(
+                        "PENNY_MM_PREPROCESS_CACHE_DIR=\n", directory + "\n"
+                    ).replace(
+                        "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=\n",
+                        "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=" + budget + "\n",
+                    )
+                )
+                plan = pc.build_plan("container", config, {}, repo_root=self.repo)
+                self.assertTrue(plan.errors)
+        startup.write_text(
+            original.replace(
+                "PENNY_MM_PREPROCESS_CACHE_DIR=\n",
+                "PENNY_MM_PREPROCESS_CACHE_DIR= /cache/photos\n",
+            )
+        )
+        plan = pc.build_plan("container", config, {}, repo_root=self.repo)
+        self.assertTrue([i for i in plan.issues if i.key in pc.MM_CACHE_KEYS])
+        startup.write_bytes(original.encode() + b"\n# encoded \xe9\n")
+        plan = pc.build_plan("container", config, {}, repo_root=self.repo)
+        self.assertTrue([i for i in plan.warnings if i.key in pc.MM_CACHE_KEYS])
+        for directory, budget, expected_dir, expected_budget in (
+            ("", "128\r", "", "128"),
+            ("/cache/photos#v1\u00a0 # keep", "128", "/cache/photos#v1", "128"),
+        ):
+            with self.subTest(directory=directory, budget=budget):
+                startup.write_bytes(
+                    (
+                        f"{pc.MM_CACHE_DIR_KEY}={directory}\n"
+                        f"{pc.MM_CACHE_SIZE_KEY}={budget}\n"
+                    ).encode()
+                )
+                self.assertIsNotNone(
+                    pc._startup_file_cache_issue(
+                        startup,
+                        {
+                            pc.MM_CACHE_DIR_KEY: expected_dir,
+                            pc.MM_CACHE_SIZE_KEY: expected_budget,
+                        },
+                    )
+                )
+
+    def test_inherited_cache_values_are_checked_before_serialization(self):
+        for mode in ("native", "container"):
+            for key, value, replacement in (
+                (pc.MM_CACHE_SIZE_KEY, "128\r", "128"),
+                (pc.MM_CACHE_DIR_KEY, "/cache/photos\n", "/cache/photos"),
+                (
+                    pc.MM_CACHE_DIR_KEY,
+                    "/cache/photos\nNCCL_P2P_DISABLE=1",
+                    "/cache/photos",
+                ),
+            ):
+                with self.subTest(mode=mode, key=key, value=value):
+                    ambient = {pc.MM_CACHE_SIZE_KEY: "128", key: value}
+                    if mode == "container":
+                        code, output, _, _ = self.run_container_setup(
+                            environ=ambient, before_save=(key, replacement)
+                        )
+                    else:
+                        code, output, _ = self.run_setup(
+                            ["next"]
+                            + self.basics(str(self.next_model))
+                            + ["n", key, replacement, "y"],
+                            environ=ambient,
+                        )
+                    self.assertEqual(code, 0, output)
+                    saved = pc.read_env_file(saved_settings(output))
+                    self.assertEqual(saved[key], replacement)
+                    self.assertNotIn("NCCL_P2P_DISABLE", saved)
+                    self.assertIn("Not ready to save", output)
+
+    def test_an_unusable_inherited_budget_is_correctable_and_not_trimmed(self):
+        # An exported value is what this container launch would use, so the save has
+        # to end up describing it; one the settings cannot carry is named among the
+        # correctable inputs instead of refusing the whole save from under the menu,
+        # and it is never trimmed into validity on the operator's behalf.
+        for exported, phrase, fix, wanted in (
+            ("oops", "whole number of MiB", ("1", "512"), "512"),
+            ("$PENNY_HICACHE_SIZE_GB", "whole number of MiB", ("1", "512"), "512"),
+            (" 512 ", "leading or trailing spaces", ("1", "256"), "256"),
+            ("oops", "whole number of MiB", ("c",), ""),
+            # The exact reproduction: the only row offered is re-enter or cancel, so
+            # an answer that tries to save past the pair cancels the session instead
+            # of writing a settings file and a startup script that disagree.
+            ("oops", "whole number of MiB", ("s",), "save-anyway"),
+        ):
+            with self.subTest(exported=exported, fix=fix):
+                destination = self.base / f"unusable-{wanted}.env"
+                if wanted == "save-anyway":
+                    # The only rows offered are re-enter and cancel; an answer that
+                    # tries to save past the pair leaves the session, and the printed
+                    # menu names the refusal.
+                    with self.assertRaises(ps.Cancelled):
+                        self.run_container_setup(
+                            environ={pc.MM_CACHE_SIZE_KEY: exported},
+                            before_save=list(fix),
+                            save="y",
+                            config_path=destination,
+                        )
+                    self.assertFalse(destination.exists())
+                    continue
+                code, output, _, files = self.run_container_setup(
+                    environ={pc.MM_CACHE_SIZE_KEY: exported},
+                    before_save=list(fix),
+                    save="y",
+                    config_path=destination,
+                )
+                self.assertIn(phrase, output)
+                self.assertIn("re-enter PENNY_MM_PREPROCESS_CACHE_SIZE_MB", output)
+                # No 'save despite these errors' row: a pair this file cannot state
+                # is not something an operator can save past.
+                self.assertNotIn("save despite these errors", output)
+                if fix[0] == "c":
+                    # Cancelled: nothing is written, and no partial folder is left.
+                    self.assertEqual(code, 3, output)
+                    continue
+                self.assertEqual(code, 0, output)
+                saved = pc.read_env_file(saved_settings(output))
+                self.assertEqual(saved[pc.MM_CACHE_SIZE_KEY], wanted)
+                self.assertEqual(saved[pc.MM_CACHE_DIR_KEY], "")
+                self.assertIn(
+                    f"PENNY_MM_PREPROCESS_CACHE_SIZE_MB={wanted}".rstrip(),
+                    files["start-flash-next-frspec.sh"].read_text(),
+                )
+
+    def test_a_container_folder_generated_before_the_settings_are_not_claimed(self):
+        # The startup script decides this pair for a container launch. A folder
+        # written before the settings existed has nothing to decide from, so an
+        # exported pair has to be named as that mismatch rather than reported as a
+        # cache this folder would run.
+        ambient = {
+            pc.MM_CACHE_DIR_KEY: "/cache/older-folder",
+            pc.MM_CACHE_SIZE_KEY: "128",
+        }
+        code, output, _, files = self.run_container_setup(
+            answers={"LAUNCH_DIR": str(self.base / "older launch")},
+            environ=ambient,
+            config_path=self.base / "older-folder.env",
+        )
+        self.assertEqual(code, 0, output)
+        startup = files["start-flash-next-frspec.sh"]
+        startup.write_text(
+            "\n".join(
+                line
+                for line in startup.read_text().splitlines()
+                if not line.startswith("PENNY_MM_PREPROCESS_CACHE")
+            )
+            + "\n"
+        )
+        plan = pc.build_plan(
+            "container",
+            pc.load_config("container", saved_settings(output), ambient, self.repo),
+            ambient,
+            repo_root=self.repo,
+        )
+        self.assertEqual(plan.errors, [])
+        warnings = "\n".join(i.message for i in plan.warnings)
+        self.assertIn("predates these settings entirely", warnings)
+        self.assertIn(str(startup), warnings)
+
+        # The same folder the other way round, which is how the settings stay off:
+        # saved without the cache, then given a directory and a budget by hand in the
+        # file that decides. The check has to name both pairs rather than report OFF.
+        code, output, _, files = self.run_container_setup(
+            answers={"LAUNCH_DIR": str(self.base / "hand edited")},
+            config_path=self.base / "hand-edited.env",
+        )
+        self.assertEqual(code, 0, output)
+        startup = files["start-flash-next-frspec.sh"]
+        text = startup.read_text()
+        startup.write_text(
+            text.replace(
+                "PENNY_MM_PREPROCESS_CACHE_DIR=\n",
+                "PENNY_MM_PREPROCESS_CACHE_DIR=/cache/hand-edit\n",
+            ).replace(
+                "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=\n",
+                "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=512\n",
+            )
+        )
+        plan = pc.build_plan(
+            "container",
+            pc.load_config("container", saved_settings(output), {}, self.repo),
+            {},
+            repo_root=self.repo,
+        )
+        self.assertEqual(plan.errors, [])
+        warnings = "\n".join(i.message for i in plan.warnings)
+        self.assertIn("'/cache/hand-edit' / '512'", warnings)
+        self.assertIn("where this configuration says", warnings)
+        self.assertIn(str(startup), warnings)
+
+    def test_a_malformed_saved_budget_is_corrected_by_name_not_saved_past(self):
+        # A value the previous file (or a hand edit) left behind is not allowed to
+        # refuse the whole save from under the menu, and is not something to agree to
+        # either: it is named, re-entered or cancelled, and the untouched half of the
+        # pair stays unsaid, because natively an unsaved key keeps inheriting.
+        existing = (
+            f"{pc.PROFILE_KEY}=next\n"
+            f"TARGET_MODEL={pc.quote_value(str(self.next_model))}\n"
+            f"CACHE_BASE={pc.quote_value(str(self.cache))}\n"
+            f"NIXL_STORAGE_BASE={pc.quote_value(str(self.nixl))}\n"
+            f"{pc.MM_CACHE_SIZE_KEY}=oops\n"
+        )
+        for fix, wanted in ((["1", "512"], "fixed"), (["c"], "cancelled")):
+            with self.subTest(fix=fix):
+                code, output, path = self.run_setup(
+                    ["next"] + self.basics(str(self.next_model)) + ["n", *fix, "y"],
+                    existing=existing,
+                    config_path=self.base / f"carried-{wanted}.env",
+                )
+                self.assertIn(
+                    "PENNY_MM_PREPROCESS_CACHE_SIZE_MB must be a whole number of MiB",
+                    output,
+                )
+                self.assertIn("re-enter PENNY_MM_PREPROCESS_CACHE_SIZE_MB", output)
+                self.assertNotIn("save despite these errors", output)
+                if wanted == "cancelled":
+                    # The file the operator came in with keeps the value that needs
+                    # fixing, and no half-decided new set appears beside it.
+                    self.assertEqual(code, 3, output)
+                    self.assertEqual(path.read_text(), existing)
+                    self.assertEqual(list(path.parent.glob(f"{path.stem}*")), [path])
+                    continue
+                self.assertEqual(code, 0, output)
+                saved = pc.read_env_file(path)
+                self.assertEqual(saved[pc.MM_CACHE_SIZE_KEY], "512")
+                self.assertNotIn(pc.MM_CACHE_DIR_KEY, saved)
+
     def test_small_hicache_size_is_saved_and_only_junk_is_reasked(self):
         # 1 GB is a real choice (the pool code warns about a smaller-than-device
         # pool instead of clamping), while 0/negative/fractional/nonnumeric is
@@ -1152,6 +1897,8 @@ class SetupSessionTests(FixtureMixin):
                 "/nvme-unused-with-ram",  # snapshot path
                 "false",  # online FP8
                 "",  # WSL2 pinned host memory
+                "",  # image cache directory: blank leaves it off
+                "",  # image cache budget: blank keeps the runtime's own default
                 "true",  # unknown tools
                 "",  # MTP width policy: Enter keeps the qualified tiered
                 "",
@@ -1326,6 +2073,14 @@ class SetupSessionTests(FixtureMixin):
             "0 = unlimited budget, not an off switch", output.split("Review")[0]
         )
 
+    def container_advanced(self, overrides: dict[str, str]) -> list[str]:
+        """Container advanced answers by key, in the order the wizard asks them."""
+        wanted = {"PENNY_PLE_NVME_MODEL": str(self.base / "ple-unused"), **overrides}
+        return [
+            wanted.get(name, "")
+            for name in ps.ordered_names("container", advanced=True)
+        ]
+
     def run_container_setup(
         self,
         answers: dict[str, str] | None = None,
@@ -1334,6 +2089,7 @@ class SetupSessionTests(FixtureMixin):
         save: str = "",
         before_save: tuple[str, ...] = (),
         environ: dict[str, str] | None = None,
+        advanced: list[str] | None = None,  # raw answers for the advanced section
         config_path: Path | None = None,
     ) -> tuple[int, str, Path, dict]:
         """Drive the container wizard with the listed answers, keeping defaults.
@@ -1365,10 +2121,11 @@ class SetupSessionTests(FixtureMixin):
         # the advanced gate, and the save confirmation.
         lines = ["" if existing else "1"]
         lines += [given.get(name, "") if name in given else "" for name in names]
-        # The advanced gate, any answer needed by the validation menu (a saved
-        # proposal that is not ready), then the single save gate that also
-        # covers the generated launch files.
-        lines += ["", *before_save, save]
+        # The advanced gate (opened when the caller names answers for it), any
+        # answer needed by the validation menu (a saved proposal that is not
+        # ready), then the single save gate that also covers the generated files.
+        lines += [""] if advanced is None else ["y", *advanced]
+        lines += [*before_save, save]
         out = io.StringIO()
         prompt = ps.Prompt(
             stdin=io.StringIO("".join(line + "\n" for line in lines)), stdout=out
@@ -1509,9 +2266,10 @@ class SetupSessionTests(FixtureMixin):
             + self.basics(str(self.dense_model), draft=str(self.draft_model))
             + [
                 "y",  # yes to the advanced section
-                str(self.base / "ple-unused"),  # junk: the FP8 menu rejects it
-                "false",  # online FP8
+                str(self.base / "ple-unused"),  # junk: the host-memory menu rejects it
                 "false",  # WSL2 host-memory workaround
+                "",  # image cache directory: blank leaves it off
+                "",  # image cache budget: blank keeps the runtime's own default
                 "true",  # unknown tools
                 "",  # max total tokens: blank = sized by the engine
                 "",  # build jobs

@@ -37,7 +37,7 @@ pennyroyal_startup_summary() {
     arg="$1"
     case "$arg" in
       --*=*) key="${arg%%=*}"; value="${arg#*=}" ;;
-      --model-path|--speculative-draft-model-path|--speculative-algorithm|--speculative-token-map|--context-length|--max-total-tokens|--max-running-requests|--max-mamba-cache-size|--kv-cache-dtype|--speculative-draft-kv-cache-dtype|--hicache-size|--hicache-storage-backend|--image-processor-backend|--tp|--speculative-num-steps|--speculative-eagle-topk|--speculative-num-draft-tokens|--speculative-adaptive-config)
+      --model-path|--speculative-draft-model-path|--speculative-algorithm|--speculative-token-map|--context-length|--max-total-tokens|--max-running-requests|--max-mamba-cache-size|--kv-cache-dtype|--speculative-draft-kv-cache-dtype|--hicache-size|--hicache-storage-backend|--image-processor-backend|--mm-preprocess-cache-dir|--mm-preprocess-cache-size-mb|--tp|--speculative-num-steps|--speculative-eagle-topk|--speculative-num-draft-tokens|--speculative-adaptive-config)
         key="$arg"; value="${2:-unspecified}"; if (( $# > 1 )); then shift; fi ;;
       --ple-offload-embedding|--enable-hierarchical-cache|--speculative-adaptive) key="$arg"; value=true ;;
       *) shift; continue ;;
@@ -149,5 +149,17 @@ pennyroyal_startup_summary() {
     "${setting[--hicache-storage-backend]:-none}" "${SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR:-not set}"
   printf '  Media preprocessing: %s (%s); vision encoder stays on model GPU\n' \
     "$media_label" "${setting[--image-processor-backend]:-automatic}"
+  # The optional image preprocessing cache is one directory and one MiB budget;
+  # report what this launch actually asked for, in the unit the flag states.
+  if [[ -n ${setting[--mm-preprocess-cache-dir]:-} ]]; then
+    printf '  Image preprocessing cache: shared at %s | %s MiB (1 MiB = 1048576 bytes, one budget for the whole directory)\n' \
+      "${setting[--mm-preprocess-cache-dir]}" \
+      "${setting[--mm-preprocess-cache-size-mb]:-not set}"
+  elif [[ -n ${setting[--mm-preprocess-cache-size-mb]:-} ]]; then
+    printf '  Image preprocessing cache: no shared directory | %s MiB across the tokenizer workers (0 = off)\n' \
+      "${setting[--mm-preprocess-cache-size-mb]}"
+  else
+    printf '  Image preprocessing cache: off (no shared directory and no saved budget)\n'
+  fi
   printf '  Actual KV capacity and request admission are reported by SGLang after profiling.\n\n'
 }

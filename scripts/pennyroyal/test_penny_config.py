@@ -123,6 +123,53 @@ def make_executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
+def run_helper(directory: str | None = None, budget: str | None = None) -> dict:
+    """Run the real shared launcher helper over one pair, as every launch path does.
+
+    The helper is the contract the eight launch paths read, so parity with it is
+    checked by running it rather than by re-reading its text.
+    """
+    import subprocess
+
+    exports = []
+    if directory is not None:
+        exports.append(("PENNY_MM_PREPROCESS_CACHE_DIR", directory))
+    if budget is not None:
+        exports.append(("PENNY_MM_PREPROCESS_CACHE_SIZE_MB", budget))
+    script = (
+        "set -euo pipefail\n"
+        f'source {str(ROOT / "configs" / "pennyroyal" / "mm-preprocess-cache.sh")!r}\n'
+        + "".join(f"export {name}={value!r}\n" for name, value in exports).replace(
+            "'", '"'
+        )
+        + "pennyroyal_mm_preprocess_cache_args\n"
+        'printf "%s\\0" "${PENNY_MM_PREPROCESS_CACHE_ARGS[@]}"\n'
+    )
+    run = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in (
+                "PENNY_MM_PREPROCESS_CACHE_DIR",
+                "PENNY_MM_PREPROCESS_CACHE_SIZE_MB",
+            )
+        },
+    )
+    # An empty argv array still makes one printf pass, so the empty fields it
+    # leaves behind are the absence of flags rather than a flag called "".
+    payload = run.stdout.encode().split(b"\0")[:-1]
+    return {
+        "args": [item.decode() for item in payload if item],
+        "failed": run.returncode != 0,
+        "stderr": run.stderr,
+    }
+
+
 class FixtureMixin(unittest.TestCase):
     """One reusable layout: repo with stub recipes, venv, model dirs, caches."""
 
@@ -2094,6 +2141,480 @@ class ContainerPlanTests(FixtureMixin):
         self.assertIn("is not a setting of the next-dflash2 profile", messages)
 
 
+class MMPreprocessCachePlanTests(FixtureMixin):
+    """One optional pair of settings, default off, on both launch routes.
+
+    The runtime takes --mm-preprocess-cache-dir only together with a positive
+    --mm-preprocess-cache-size-mb, and keeps the existing per-worker cache when
+    the budget arrives on its own (0 included, which turns that cache off). The
+    plan has to agree with both rules whether the value was saved or inherited,
+    and the summary has to state the unit, because the neighbouring HiCache
+    setting counts decimal GB and the NIXL budget counts GiB.
+    """
+
+    setUp = ContainerPlanTests.setUp
+    container_plan = ContainerPlanTests.container_plan
+    base_values = ContainerPlanTests.base_values
+    generated = ContainerPlanTests.generated
+
+    def test_nothing_saved_changes_nothing(self):
+        for mode in ("native", "container"):
+            with self.subTest(mode=mode):
+                plan = (
+                    self.native_plan(self.native_env())
+                    if mode == "native"
+                    else self.container_plan(self.base_values())
+                )
+                self.assertEqual([i.message for i in plan.errors], [])
+                for name in (pc.MM_CACHE_DIR_KEY, pc.MM_CACHE_SIZE_KEY):
+                    self.assertNotIn(name, plan.env)
+                self.assertIn("image preprocessing cache: off", "\n".join(plan.summary))
+
+    def test_a_saved_pair_survives_the_save_reload_and_names_its_units(self):
+        # A directory with a space and a $ is the case the reader is judged on:
+        # the same value has to come back out of the file it wrote.
+        values = {
+            pc.MM_CACHE_DIR_KEY: "/dev/shm/mm cache $work",
+            pc.MM_CACHE_SIZE_KEY: "512",
+        }
+        plan = self.native_plan({**self.native_env(), **values})
+        self.assertEqual([i.message for i in plan.errors], [])
+        self.assertEqual(plan.env[pc.MM_CACHE_DIR_KEY], "/dev/shm/mm cache $work")
+        self.assertEqual(plan.env[pc.MM_CACHE_SIZE_KEY], "512")
+        line = next(line for line in plan.summary if "preprocessing cache" in line)
+        self.assertIn("shared at '/dev/shm/mm cache $work'", line)
+        self.assertIn("512 MiB budget (1 MiB = 1024*1024 bytes", line)
+        self.assertIn("a different number needs a fresh directory", line)
+        reloaded = pc.load_config("native", self.config_path, {}, self.repo)
+        self.assertEqual(
+            reloaded.values[pc.MM_CACHE_DIR_KEY], "/dev/shm/mm cache $work"
+        )
+
+    def test_a_budget_on_its_own_is_still_the_per_worker_cache(self):
+        for budget in ("0", "256"):
+            with self.subTest(budget=budget):
+                plan = self.native_plan(
+                    {**self.native_env(), pc.MM_CACHE_SIZE_KEY: budget}
+                )
+                self.assertEqual([i.message for i in plan.errors], [])
+                self.assertEqual(plan.env[pc.MM_CACHE_SIZE_KEY], budget)
+                line = next(
+                    line for line in plan.summary if "preprocessing cache" in line
+                )
+                self.assertIn(f"{budget} MiB split across the tokenizer workers", line)
+                self.assertIn("no shared directory", line)
+
+    def test_a_directory_needs_a_positive_budget_from_either_source(self):
+        cases = (
+            # saved values, inherited environment, the error the plan must name
+            ({pc.MM_CACHE_DIR_KEY: "/dev/shm/mm"}, {}, "needs a positive"),
+            (
+                {pc.MM_CACHE_DIR_KEY: "/dev/shm/mm", pc.MM_CACHE_SIZE_KEY: "0"},
+                {pc.MM_CACHE_SIZE_KEY: "2048"},
+                "needs a positive",
+            ),
+            (
+                {
+                    pc.MM_CACHE_DIR_KEY: "/dev/shm/mm",
+                    pc.MM_CACHE_SIZE_KEY: "",
+                },
+                {pc.MM_CACHE_SIZE_KEY: "2048"},
+                "needs a positive",
+            ),
+            # An inherited value is never validated on the way in, so a negative
+            # one has to be refused by the plan rather than reaching the server,
+            # with the same rule the launcher helper applies to it.
+            (
+                {pc.MM_CACHE_DIR_KEY: "/dev/shm/mm"},
+                {pc.MM_CACHE_SIZE_KEY: "-512"},
+                "whole number of MiB",
+            ),
+            (
+                {pc.MM_CACHE_DIR_KEY: "relative/mm"},
+                {pc.MM_CACHE_SIZE_KEY: "512"},
+                "must be an absolute directory",
+            ),
+            ({}, {pc.MM_CACHE_SIZE_KEY: "many"}, "must be a whole number of MiB"),
+        )
+        for saved, environ, reason in cases:
+            with self.subTest(saved=saved, environ=environ):
+                plan = self.native_plan({**self.native_env(), **saved}, environ=environ)
+                self.assertIn(reason, self.messages(plan, "error"))
+
+    def test_an_inherited_pair_reaches_the_recipe_and_a_saved_blank_suppresses_it(self):
+        inherited = self.native_plan(
+            self.native_env(),
+            environ={
+                pc.MM_CACHE_DIR_KEY: "/cache/inherited",
+                pc.MM_CACHE_SIZE_KEY: "1024",
+            },
+        )
+        self.assertEqual([i.message for i in inherited.errors], [])
+        self.assertEqual(inherited.env[pc.MM_CACHE_DIR_KEY], "/cache/inherited")
+        self.assertEqual(
+            inherited.origins[pc.MM_CACHE_DIR_KEY], "inherited environment"
+        )
+        # Saving the directory blank is a decision to stay off, and it holds even
+        # against an exported budget: nothing is forwarded but the blank.
+        cleared = self.native_plan(
+            {
+                **self.native_env(),
+                pc.MM_CACHE_DIR_KEY: "",
+                pc.MM_CACHE_SIZE_KEY: "",
+            },
+            environ={
+                pc.MM_CACHE_DIR_KEY: "/cache/inherited",
+                pc.MM_CACHE_SIZE_KEY: "1024",
+            },
+        )
+        self.assertEqual([i.message for i in cleared.errors], [])
+        self.assertEqual(cleared.env[pc.MM_CACHE_DIR_KEY], "")
+        self.assertEqual(cleared.env[pc.MM_CACHE_SIZE_KEY], "")
+        self.assertIn("image preprocessing cache: off", "\n".join(cleared.summary))
+
+    def test_the_container_says_the_pair_in_the_file_the_launch_reads(self):
+        plan = self.container_plan(
+            {
+                **self.base_values(),
+                pc.MM_CACHE_DIR_KEY: "/cache/mm work",
+                pc.MM_CACHE_SIZE_KEY: "2048",
+            }
+        )
+        self.assertEqual([i.message for i in plan.errors], [])
+        startup = self.generated(plan)[
+            self.base / "launch out" / "config" / "start-flash-next-frspec.sh"
+        ]
+        self.assertIn("PENNY_MM_PREPROCESS_CACHE_DIR='/cache/mm work'", startup)
+        self.assertIn("PENNY_MM_PREPROCESS_CACHE_SIZE_MB=2048", startup)
+        self.assertIn(
+            "image preprocessing cache: shared at '/cache/mm work' inside the "
+            "container",
+            "\n".join(plan.summary),
+        )
+        # Only /cache and /dev/shm are writable places a container launch has
+        # already provided, so anywhere else is named rather than assumed.
+        elsewhere = self.container_plan(
+            {
+                **self.base_values(),
+                pc.MM_CACHE_DIR_KEY: "/tmp/mm",
+                pc.MM_CACHE_SIZE_KEY: "2048",
+            }
+        )
+        self.assertIn(
+            "is not under /cache or /dev/shm", self.messages(elsewhere, "warn")
+        )
+        self.assertEqual([i.message for i in elsewhere.errors], [])
+
+    def pair_refusal(self, directory: str, budget: str, route: str) -> str:
+        """What the plan says about one pair, saved or straight from the shell."""
+        values = {pc.MM_CACHE_DIR_KEY: directory, pc.MM_CACHE_SIZE_KEY: budget}
+        try:
+            if route == "saved":
+                plan = self.native_plan({**self.native_env(), **values})
+            else:
+                # Nothing saved: the values reach the plan from the environment,
+                # where resolve() trims them and the launcher helper does not.
+                plan = self.native_plan(self.native_env(), environ=values)
+        except pc.ConfigError as exc:  # refused while the file was read
+            return str(exc)
+        return "\n".join(issue.message for issue in plan.issues)
+
+    def test_the_plan_and_the_shared_helper_accept_the_same_values(self):
+        # The helper is what every launch path runs, so the plan has to refuse and
+        # accept exactly what it does, from either source, including values
+        # resolution would trim: a leading space is not the directory a recipe
+        # receives when the value was exported rather than saved.
+        cases = (
+            # directory, budget, the phrase both sides must produce (None = accepted)
+            ("/dev/shm/test", "512", None),
+            ("/dev/shm/test", "001", None),  # leading zeros are still whole MiB
+            ("/dev/shm/test", "0", "needs a positive"),
+            ("/dev/shm/test", "000", "needs a positive"),
+            # Bash arithmetic is signed 64-bit; a budget beyond it is still a
+            # positive number of MiB, and both sides have to say so.
+            ("/dev/shm/test", "9223372036854775808", None),
+            ("/dev/shm/test", "", "needs a positive"),
+            ("/dev/shm/test", "many", "whole number of MiB"),
+            ("/dev/shm/test", "1.5", "whole number of MiB"),
+            ("/dev/shm/test", "-512", "whole number of MiB"),
+            ("relative/test", "512", "must be an absolute directory"),
+            (" /dev/shm/test", "512", "must not have leading or trailing spaces"),
+            ("/dev/shm/test ", "512", "must not have leading or trailing spaces"),
+            (" ", "512", "must not have leading or trailing spaces"),
+            ("/dev/shm/test", " 512", "must not have leading or trailing spaces"),
+        )
+        for directory, budget, reason in cases:
+            for route in ("saved", "inherited"):
+                with self.subTest(directory=directory, budget=budget, route=route):
+                    refusal = self.pair_refusal(directory, budget, route)
+                    helper = run_helper(directory=directory, budget=budget)
+                    if reason is None:
+                        self.assertEqual("", refusal)
+                        self.assertEqual(
+                            [
+                                "--mm-preprocess-cache-dir",
+                                directory,
+                                "--mm-preprocess-cache-size-mb",
+                                budget,
+                            ],
+                            helper["args"],
+                            helper,
+                        )
+                    else:
+                        self.assertIn(reason, refusal)
+                        self.assertTrue(helper["failed"], helper)
+                        self.assertIn(reason, helper["stderr"])
+        # A budget on its own is the legacy per-worker shape on both sides.
+        for budget, reason in (
+            ("0", None),
+            ("256", None),
+            ("007", None),
+            (" 512", "spaces"),
+        ):
+            for route in ("saved", "inherited"):
+                with self.subTest(budget=budget, route=route):
+                    refusal = self.pair_refusal("", budget, route)
+                    helper = run_helper(budget=budget)
+                    if reason is None:
+                        self.assertEqual("", refusal)
+                        self.assertEqual(
+                            ["--mm-preprocess-cache-size-mb", budget],
+                            helper["args"],
+                            helper,
+                        )
+                    else:
+                        self.assertIn(reason, refusal)
+                        self.assertTrue(helper["failed"], helper)
+                        self.assertIn(reason, helper["stderr"])
+
+    def test_the_mounted_startup_file_is_compared_with_the_pair_in_use(self):
+        # In a container the mounted startup file decides this pair, so the check has
+        # to read its two literal lines and say what differs, instead of reporting a
+        # cache the launch would not use or staying silent about one it cannot see.
+        shipped = ROOT / pc.LAUNCH_RELPATH / "config" / "start-flash-next-frspec.sh"
+        values = self.base_values()
+        ambient = {
+            pc.MM_CACHE_DIR_KEY: "/cache/hand-edit",
+            pc.MM_CACHE_SIZE_KEY: "512",
+        }
+        for label, text_lines, environ, phrase in (
+            # A folder saved with the cache off, then edited by hand in the file
+            # itself: the settings are still off, and --check says which is which.
+            ("hand-edited above the settings", "on", ambient, "'/cache/hand-edit'"),
+            # A folder from before these settings existed, with an exported budget
+            # that its own file never hears about.
+            (
+                "older file, budget exported only",
+                "none",
+                {pc.MM_CACHE_SIZE_KEY: "128"},
+                "predates these settings entirely",
+            ),
+            # A file that computes the value: reported as unverifiable, not guessed.
+            ("computed by the file", "computed", {}, "cannot say what that launch"),
+        ):
+            with self.subTest(case=label):
+                plan = self.container_plan(values, environ=environ)
+                startup = plan.launch_dir / "config" / "start-flash-next-frspec.sh"
+                startup.parent.mkdir(parents=True, exist_ok=True)
+                text = shipped.read_text()
+                if text_lines == "on":
+                    text = text.replace(
+                        "PENNY_MM_PREPROCESS_CACHE_DIR=\n",
+                        "PENNY_MM_PREPROCESS_CACHE_DIR=/cache/hand-edit\n",
+                    ).replace(
+                        "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=\n",
+                        "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=512\n",
+                    )
+                    environ = {}  # the settings themselves say nothing
+                elif text_lines == "none":
+                    text = "\n".join(
+                        line
+                        for line in text.splitlines()
+                        if not line.startswith("PENNY_MM_PREPROCESS_CACHE")
+                    )
+                else:
+                    text = text.replace(
+                        "PENNY_MM_PREPROCESS_CACHE_DIR=\n",
+                        'PENNY_MM_PREPROCESS_CACHE_DIR="$(umask; echo /cache/x)"\n',
+                    )
+                startup.write_text(text + "\n")
+                plan = self.container_plan(values, environ=environ)
+                self.assertEqual(plan.errors, [])
+                warnings = self.messages(plan, "warn")
+                self.assertIn(str(startup), warnings)
+                self.assertIn(phrase, warnings)
+        # Agreeing on the same pair says nothing: a fresh save writes the file from
+        # these settings, and the check has no reason to mention it.
+        plan = self.container_plan(
+            {
+                **values,
+                pc.MM_CACHE_DIR_KEY: "/cache/agree",
+                pc.MM_CACHE_SIZE_KEY: "256",
+            }
+        )
+        startup = plan.launch_dir / "config" / "start-flash-next-frspec.sh"
+        startup.parent.mkdir(parents=True, exist_ok=True)
+        text = (
+            ROOT / pc.LAUNCH_RELPATH / "config" / "start-flash-next-frspec.sh"
+        ).read_text()
+        startup.write_text(
+            text.replace(
+                "PENNY_MM_PREPROCESS_CACHE_DIR=\n",
+                "PENNY_MM_PREPROCESS_CACHE_DIR=/cache/agree\n",
+            ).replace(
+                "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=\n",
+                "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=256\n",
+            )
+            + "\n"
+        )
+        plan = self.container_plan(
+            {
+                **values,
+                pc.MM_CACHE_DIR_KEY: "/cache/agree",
+                pc.MM_CACHE_SIZE_KEY: "256",
+            }
+        )
+        self.assertEqual(plan.errors, [])
+        self.assertNotIn("image preprocessing cache", self.messages(plan, "warn"))
+
+    def test_an_ambient_value_the_file_overrides_cannot_break_the_launch(self):
+        # The pair the check reads is the pair the launch gets: a saved line (or a
+        # saved blank) answers for the key, so what the shell happens to carry about
+        # it cannot raise a refusal for a value nothing uses. Root reproduced this in
+        # both modes, with a relative directory and a junk budget on the ambient side.
+        for ambient in (
+            {pc.MM_CACHE_DIR_KEY: "relative/oops"},
+            {pc.MM_CACHE_SIZE_KEY: "oops"},
+            {
+                pc.MM_CACHE_DIR_KEY: " /dev/shm/from-the-shell ",
+                pc.MM_CACHE_SIZE_KEY: " 128 ",
+            },
+            {pc.MM_CACHE_SIZE_KEY: "-3"},
+        ):
+            with self.subTest(saved="a pair", ambient=ambient):
+                plan = self.native_plan(
+                    {
+                        **self.native_env(),
+                        pc.MM_CACHE_DIR_KEY: "/cache/valid",
+                        pc.MM_CACHE_SIZE_KEY: "64",
+                    },
+                    environ=ambient,
+                )
+                self.assertEqual([i.message for i in plan.errors], [])
+                self.assertEqual(plan.env[pc.MM_CACHE_DIR_KEY], "/cache/valid")
+                self.assertEqual(plan.env[pc.MM_CACHE_SIZE_KEY], "64")
+            with self.subTest(saved="both blank", ambient=ambient):
+                plan = self.native_plan(
+                    {
+                        **self.native_env(),
+                        pc.MM_CACHE_DIR_KEY: "",
+                        pc.MM_CACHE_SIZE_KEY: "",
+                    },
+                    environ=ambient,
+                )
+                self.assertEqual([i.message for i in plan.errors], [])
+                self.assertIn("image preprocessing cache: off", "\n".join(plan.summary))
+        # An ambient value that *is* the answer is still checked as written, padding
+        # included, because the recipe forwards exactly what it is handed.
+        plan = self.native_plan(
+            self.native_env(),
+            environ={
+                pc.MM_CACHE_DIR_KEY: " /dev/shm/from-the-shell",
+                pc.MM_CACHE_SIZE_KEY: "64",
+            },
+        )
+        self.assertIn(
+            "must not have leading or trailing spaces", self.messages(plan, "error")
+        )
+
+    def test_a_saved_pair_with_leading_zero_budget_still_launches(self):
+        # 001 MiB is the same budget to the plan, to the helper and to the
+        # server's own argument parser; refusing it in one of the three is the
+        # drift this check exists for.
+        plan = self.native_plan(
+            {
+                **self.native_env(),
+                pc.MM_CACHE_DIR_KEY: "/dev/shm/test",
+                pc.MM_CACHE_SIZE_KEY: "001",
+            }
+        )
+        self.assertEqual([i.message for i in plan.errors], [])
+        self.assertEqual(plan.env[pc.MM_CACHE_SIZE_KEY], "001")
+        self.assertIn("with a 001 MiB budget", "\n".join(plan.summary))
+
+    def test_the_container_save_records_the_pair_the_generated_launch_uses(self):
+        # An inherited pair used to be frozen into the generated startup script
+        # while the settings file said nothing, so a later reload in a clean
+        # environment reported a different launch than the one on disk.
+        environ = {
+            pc.MM_CACHE_DIR_KEY: "/cache/inherited",
+            pc.MM_CACHE_SIZE_KEY: "128",
+        }
+        plan = self.container_plan(self.base_values(), environ=environ)
+        self.assertEqual([i.message for i in plan.errors], [])
+        startup = self.generated(plan)[
+            self.base / "launch out" / "config" / "start-flash-next-frspec.sh"
+        ]
+        self.assertIn("PENNY_MM_PREPROCESS_CACHE_DIR=/cache/inherited", startup)
+        self.assertIn("PENNY_MM_PREPROCESS_CACHE_SIZE_MB=128", startup)
+        # The settings a save writes therefore have to carry the pair too; the
+        # wizard is the writer, and this is the reload half of that agreement.
+        written = pc.serialize_env(
+            [
+                (
+                    "advanced (optional)",
+                    [
+                        (pc.MM_CACHE_DIR_KEY, plan.env[pc.MM_CACHE_DIR_KEY]),
+                        (pc.MM_CACHE_SIZE_KEY, plan.env[pc.MM_CACHE_SIZE_KEY]),
+                    ],
+                )
+            ],
+            header=(f"{pc.PROFILE_KEY}=next",),
+        )
+        settings = self.base / "agreed.env"
+        settings.write_text(written)
+        reloaded = pc.build_plan(
+            "container",
+            pc.load_config("container", settings, {}, self.repo),
+            {},
+            repo_root=self.repo,
+        )
+        self.assertEqual(reloaded.env[pc.MM_CACHE_DIR_KEY], "/cache/inherited")
+        self.assertEqual(reloaded.env[pc.MM_CACHE_SIZE_KEY], "128")
+        self.assertIn(
+            "image preprocessing cache: shared at /cache/inherited inside the "
+            "container with a 128 MiB budget",
+            "\n".join(reloaded.summary),
+        )
+
+    def test_compose_and_the_environment_examples_carry_the_pair(self):
+        compose = (ROOT / pc.COMPOSE_RELPATH).read_text()
+        self.assertIn(
+            "PENNY_MM_PREPROCESS_CACHE_DIR: ${PENNY_MM_PREPROCESS_CACHE_DIR:-}",
+            compose,
+        )
+        self.assertIn(
+            "PENNY_MM_PREPROCESS_CACHE_SIZE_MB: ${PENNY_MM_PREPROCESS_CACHE_SIZE_MB:-}",
+            compose,
+        )
+        # An empty passthrough has to behave like an unset one on the image's own
+        # route, or the entrypoint would hand the recipe an empty budget.
+        self.assertIn(
+            "PENNY_MM_PREPROCESS_CACHE_DIR",
+            (ROOT / "docker" / "pennyroyal" / "entrypoint.sh").read_text(),
+        )
+        for example in (
+            ROOT / "configs" / "pennyroyal" / "pennyroyal.env.example",
+            ROOT / "docker" / "pennyroyal" / ".env.example",
+        ):
+            with self.subTest(example=str(example)):
+                text = example.read_text()
+                self.assertIn(
+                    "#PENNY_MM_PREPROCESS_CACHE_DIR=/dev/shm/pennyroyal", text
+                )
+                self.assertIn("#PENNY_MM_PREPROCESS_CACHE_SIZE_MB=3072", text)
+
+
 class ContainerLaunchGenerationTests(FixtureMixin):
     """The generated files, and the disk-tier choice that has to agree in both.
 
@@ -2586,6 +3107,11 @@ class ContainerLaunchGenerationTests(FixtureMixin):
             # caller exported rather than a saved literal, and the startup file
             # states it as the default of that same expansion.
             pc.MTP_POLICY_KEY,
+            # The image preprocessing cache pair is a setting of the startup file
+            # itself, on the line the save writes, exactly like the capacity
+            # knobs; only the Compose path takes it from the environment.
+            pc.MM_CACHE_DIR_KEY,
+            pc.MM_CACHE_SIZE_KEY,
         }
         missing = [
             name

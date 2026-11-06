@@ -144,6 +144,21 @@ and the width is routed the same way: block 6 for one running request, block
 draft tokens with FlashInfer's SM120 kernel
 (`--linear-attn-verify-backend flashinfer`, fixed in the startup file).
 
+Image preprocessing is shared between the tokenizer workers by two more lines in
+the same settings block: `PENNY_MM_PREPROCESS_CACHE_DIR`, a private directory
+inside the container (`/cache/<name>` or `/dev/shm/<name>` are writable with the
+mounts and `--shm-size` this launcher already uses), and
+`PENNY_MM_PREPROCESS_CACHE_SIZE_MB`, its budget in MiB. Both are blank in the
+shipped files, which is no shared cache and no change to the launch. A budget
+alone is still the per-worker cache the workers already had, `0` turns that cache
+off, and a directory needs a positive budget. The directory keeps the budget its
+index recorded, so a changed budget needs a fresh directory. A `--container` save
+writes your pair into these two lines; the Compose path, which has no startup
+file, forwards them from `.env` instead. The settings above belong to your file; the
+helper that turns them into flags comes from the image you start, so a retained
+older pin launches unchanged while both lines stay blank, and refuses a cache
+requested there by name instead of ignoring it.
+
 ## Start and verify
 
 Run from your launch-file folder, using the image tag from the release.

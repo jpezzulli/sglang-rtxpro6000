@@ -36,6 +36,17 @@ services:
       # hatch. The 27b profile is unaffected (Triton GDN, no Next conversion).
       SGLANG_SM120_ONLINE_MXFP8: ${SGLANG_SM120_ONLINE_MXFP8:-}
       SGLANG_MM_PREPROCESS_DEVICE: ${SGLANG_MM_PREPROCESS_DEVICE:-cpu}
+      # Optional shared image preprocessing cache, off by default: one private
+      # directory inside the container and the MiB (1024*1024 bytes) budget it may
+      # use. Both blank means no cache flag at all, exactly as before the settings
+      # existed. A budget on its own is the existing per-worker cache, where 0
+      # turns that cache off; a directory needs a positive budget, and a directory
+      # keeps the budget its own index recorded, so a changed budget means a fresh
+      # directory. /cache/<name> and /dev/shm/<name> are the two places the
+      # existing mounts and --shm-size already allow. A startup file states the
+      # same pair in its own settings block; this path has no startup file.
+      PENNY_MM_PREPROCESS_CACHE_DIR: ${PENNY_MM_PREPROCESS_CACHE_DIR:-}
+      PENNY_MM_PREPROCESS_CACHE_SIZE_MB: ${PENNY_MM_PREPROCESS_CACHE_SIZE_MB:-}
       SGLANG_FORWARD_UNKNOWN_TOOLS: ${SGLANG_FORWARD_UNKNOWN_TOOLS:-true}
       # Optional launcher-level reasoning-effort default (unset keeps the
       # recipe's qualified medium; per-request reasoning_effort still wins).

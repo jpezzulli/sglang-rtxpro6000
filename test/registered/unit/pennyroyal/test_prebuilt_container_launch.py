@@ -11,6 +11,8 @@ stub and the server binary is a capturing script that records its argv.
 import csv
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -50,6 +52,8 @@ CONTROLLED = (
     "MAX_MAMBA_CACHE_SIZE",
     "MAX_TOTAL_TOKENS",
     "SGLANG_MM_PREPROCESS_DEVICE",
+    "PENNY_MM_PREPROCESS_CACHE_DIR",
+    "PENNY_MM_PREPROCESS_CACHE_SIZE_MB",
     "SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR",
     "FLASHINFER_GDN_FP16_ACCUM_MMA",
     "PENNY_MTP_POLICY",
@@ -84,6 +88,8 @@ def qualified_defaults() -> dict[str, str]:
         "MAX_MAMBA_CACHE_SIZE": "",
         "MAX_TOTAL_TOKENS": "",
         "SGLANG_MM_PREPROCESS_DEVICE": "",
+        "PENNY_MM_PREPROCESS_CACHE_DIR": "",
+        "PENNY_MM_PREPROCESS_CACHE_SIZE_MB": "",
     }
 
 
@@ -563,6 +569,43 @@ def image_root(tmp_path: Path) -> tuple[Path, Path, Path]:
     return root, capture, env_capture
 
 
+# The FR-Spec launchers hash the checkpoint tokenizer and refuse anything but the
+# qualified one, which a synthetic checkpoint cannot be. Reporting that one digest
+# lets the FR-Spec routes be checked on the argv they actually build; every other
+# digest (the FR-Spec map, the chat template) is still computed for real.
+QUALIFIED_TOKENIZER_SHA256 = (
+    "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+)
+
+
+def qualified_tokenizer_path(tmp_path: Path) -> str:
+    directory = tmp_path / "qualified tokenizer bin"
+    directory.mkdir(exist_ok=True)
+    real = shutil.which("sha256sum")
+    stub = directory / "sha256sum"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'for argument in "$@"; do\n'
+        '  case "$argument" in\n'
+        "    */tokenizer.json)\n"
+        f"      printf '{QUALIFIED_TOKENIZER_SHA256}  {{}}\\n' \"$argument\"\n"
+        "      exit 0 ;;\n"
+        "  esac\n"
+        "done\n"
+        f'exec "{real}" "$@"\n'
+    )
+    stub.chmod(0o755)
+    return str(directory)
+
+
+def qualified_env(tmp_path: Path, **extra: str) -> dict[str, str]:
+    return {
+        "PATH": f"{qualified_tokenizer_path(tmp_path)}:{os.environ['PATH']}",
+        **extra,
+    }
+
+
 def prepared_config(
     tmp_path: Path,
     *names: str,
@@ -571,6 +614,8 @@ def prepared_config(
     media: str | None = None,
     tp: str | None = None,
     policy: str | None = None,
+    mm_cache: str | None = None,
+    mm_budget: str | None = None,
 ) -> Path:
     """Copy the shipped examples into the operator's own directory and edit the
     settings there, which is exactly what an operator does before starting."""
@@ -606,6 +651,21 @@ def prepared_config(
         if tp is not None:
             assert "TP_SIZE=1\n" in text, name
             text = text.replace("TP_SIZE=1\n", f"TP_SIZE={tp}\n")
+        if mm_cache is not None or mm_budget is not None:
+            # The settings block, not the shell, decides these there too: this is
+            # the edit ./configure-penny --container makes for an operator.
+            assert "PENNY_MM_PREPROCESS_CACHE_DIR=\n" in text, name
+            assert "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=\n" in text, name
+            if mm_cache is not None:
+                text = text.replace(
+                    "PENNY_MM_PREPROCESS_CACHE_DIR=\n",
+                    f"PENNY_MM_PREPROCESS_CACHE_DIR={shlex.quote(mm_cache)}\n",
+                )
+            if mm_budget is not None:
+                text = text.replace(
+                    "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=\n",
+                    f"PENNY_MM_PREPROCESS_CACHE_SIZE_MB={mm_budget}\n",
+                )
         if policy is not None:
             # The settings block, not the shell, is where a container operator
             # chooses the width policy: this is the edit ./configure-penny makes.
@@ -1435,6 +1495,329 @@ def test_a_generated_launch_runs_the_policy_the_setup_saved(tmp_path):
         policy_file,
         steps,
     )
+
+
+# ------------------------------------- optional shared image preprocessing cache
+
+# One directory plus one MiB budget, and the pair means the same thing on every
+# public launch path: the four native recipes (which read the exported pair, the
+# route the built-in container profiles and Compose take) and their four mounted
+# startup copies (whose settings block decides, the way ./configure-penny writes
+# it). Both the FR-Spec pair are checked here: the recipe with the pinned
+# tokenizer cannot complete against a stand-in checkpoint, but the pair is still
+# resolved, and refused, before that check runs.
+CACHE_PROFILES = (
+    ("serve-flash-next.sh", "start-flash-next.sh"),
+    ("serve-flash-next-frspec.sh", "start-flash-next-frspec.sh"),
+    ("serve-flash-next-dflash2.sh", "start-flash-next-dflash2.sh"),
+    ("serve-qwen38-27b-dflash2.sh", "start-27b-dflash2.sh"),
+)
+
+
+def test_the_image_cache_pair_reaches_the_real_argv_on_every_launch_path(tmp_path):
+    directory = "/mm cache with space/shared"
+    for recipe_name, startup_name in CACHE_PROFILES:
+        for startup, via_entrypoint in (
+            (RECIPES / recipe_name, False),
+            (
+                prepared_config(
+                    tmp_path, startup_name, mm_cache=directory, mm_budget="3072"
+                )
+                / startup_name,
+                True,
+            ),
+        ):
+            # The recipe route reads the exported pair; the mounted copy reads
+            # the same pair from its own settings block, which is what a
+            # ./configure-penny --container save writes.
+            env = qualified_env(tmp_path)
+            if not via_entrypoint:
+                env.update(
+                    {
+                        "PENNY_MM_PREPROCESS_CACHE_DIR": directory,
+                        "PENNY_MM_PREPROCESS_CACHE_SIZE_MB": "3072",
+                    }
+                )
+            result, argv, _, _ = launch(
+                tmp_path, startup, through_entrypoint=via_entrypoint, env=env
+            )
+            assert result.returncode == 0, (startup, result.stderr, result.stdout)
+            assert f"Image preprocessing cache: shared at {directory} | 3072 MiB" in (
+                result.stdout
+            ), (startup, result.stdout)
+            assert argv_after(argv, "--mm-preprocess-cache-dir") == directory, startup
+            assert argv_after(argv, "--mm-preprocess-cache-size-mb") == "3072", startup
+
+
+def image_root_without(tmp_path: Path, *helper_names: str) -> Path:
+    """The stand-in image one release older: this tree with those helpers gone.
+
+    A mounted startup file is read from whichever image the operator chose, and a
+    retained image pin is a documented choice, so a new launch file inside an older
+    image is a real launch rather than a hypothetical.
+    """
+    root, _, _ = image_root(tmp_path)
+    (root / "configs").unlink()
+    (root / "configs" / "pennyroyal").mkdir(parents=True)
+    for entry in (REPO / "configs" / "pennyroyal").iterdir():
+        if entry.name not in helper_names:
+            (root / "configs" / "pennyroyal" / entry.name).symlink_to(entry)
+    return root
+
+
+def test_an_image_without_the_helper_launches_unchanged_and_says_why_when_asked(
+    tmp_path,
+):
+    # The pair is off by default, and the shared helper is a new file: an image
+    # pinned to v3.1.5 does not carry it. Every mounted startup file therefore has
+    # to launch that image exactly as it launched before these settings existed,
+    # and refuse by name - rather than quietly ignoring - a cache it cannot build.
+    image_root_without(tmp_path, "mm-preprocess-cache.sh")
+    for startup_name in (
+        "start-flash-next.sh",
+        "start-flash-next-frspec.sh",
+        "start-flash-next-dflash2.sh",
+        "start-27b-dflash2.sh",
+    ):
+        startup = prepared_config(tmp_path, startup_name) / startup_name
+        result, argv, _, _ = launch(tmp_path, startup, env=qualified_env(tmp_path))
+        assert result.returncode == 0, (startup_name, result.stderr)
+        assert "--mm-preprocess-cache-dir" not in argv, startup_name
+        assert "--mm-preprocess-cache-size-mb" not in argv, startup_name
+        assert "Image preprocessing cache: off" in result.stdout, startup_name
+
+    # Asked for, and refused with the file that is missing named, because a
+    # silently ignored cache setting is how an operator ends up wondering why
+    # nothing changed.
+    startup = (
+        prepared_config(
+            tmp_path,
+            "start-flash-next.sh",
+            mm_cache="/cache/mm work",
+            mm_budget="256",
+        )
+        / "start-flash-next.sh"
+    )
+    result, argv, _, _ = launch(tmp_path, startup, env=qualified_env(tmp_path))
+    assert result.returncode != 0, argv
+    assert "mm-preprocess-cache.sh" in result.stderr, result.stderr
+    assert "v3.1.6" in result.stderr, result.stderr
+
+
+def test_the_built_in_image_profiles_take_the_same_pair(tmp_path):
+    # The route a bare `docker run` of the image takes: the entrypoint plus a
+    # profile name, with no mounted startup file to carry the settings. The pair
+    # has to reach the server argv there too, on all four built-in profiles.
+    directory = "/mm cache with space/shared"
+    for profile in ("next", "next-plain", "next-dflash2", "27b"):
+        result, argv, _, _ = launch(
+            tmp_path,
+            None,
+            profile=profile,
+            env=qualified_env(
+                tmp_path,
+                **{
+                    "PENNY_MM_PREPROCESS_CACHE_DIR": directory,
+                    "PENNY_MM_PREPROCESS_CACHE_SIZE_MB": "3072",
+                },
+            ),
+        )
+        assert result.returncode == 0, (profile, result.stderr, result.stdout)
+        assert argv_after(argv, "--mm-preprocess-cache-dir") == directory, profile
+        assert argv_after(argv, "--mm-preprocess-cache-size-mb") == "3072", profile
+
+    # Nothing exported: the built-in profile launches without either flag, which
+    # is the launch every existing image user gets after this update.
+    result, argv, _, _ = launch(
+        tmp_path, None, profile="next-plain", env=qualified_env(tmp_path)
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--mm-preprocess-cache-dir" not in argv
+    assert "--mm-preprocess-cache-size-mb" not in argv
+    assert "Image preprocessing cache: off" in result.stdout, result.stdout
+
+    # An explicit blank, which is what saving `none` writes into a settings file:
+    # Compose forwards it as an empty passthrough and the entrypoint has to read
+    # that as 'turned off', not as 'unset, so let an ambient value through'.
+    result, argv, _, _ = launch(
+        tmp_path,
+        None,
+        profile="next-plain",
+        env=qualified_env(
+            tmp_path,
+            **{
+                "PENNY_MM_PREPROCESS_CACHE_DIR": "",
+                "PENNY_MM_PREPROCESS_CACHE_SIZE_MB": "",
+            },
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--mm-preprocess-cache-dir" not in argv
+    assert "--mm-preprocess-cache-size-mb" not in argv
+    assert "Image preprocessing cache: off" in result.stdout, result.stdout
+
+
+def test_a_budget_without_a_directory_is_still_the_per_worker_cache(tmp_path):
+    # The setting pair has to keep the old behaviour for anyone who only ever
+    # sets the budget: one flag, no directory, and an explicit 0 that means the
+    # per-worker cache is off. Nothing is asked for, nothing is launched, and the
+    # report says so.
+    startup = prepared_config(tmp_path, "start-flash-next.sh") / "start-flash-next.sh"
+    for budget in ("0", "256"):
+        for target, via_entrypoint, env in (
+            (
+                RECIPES / "serve-flash-next.sh",
+                False,
+                {"PENNY_MM_PREPROCESS_CACHE_SIZE_MB": budget},
+            ),
+            (startup, True, {}),
+        ):
+            if via_entrypoint:
+                target = (
+                    prepared_config(tmp_path, "start-flash-next.sh", mm_budget=budget)
+                    / "start-flash-next.sh"
+                )
+            result, argv, _, _ = launch(
+                tmp_path, target, through_entrypoint=via_entrypoint, env=env
+            )
+            assert result.returncode == 0, (budget, target, result.stderr)
+            assert argv_after(argv, "--mm-preprocess-cache-size-mb") == budget
+            assert "--mm-preprocess-cache-dir" not in argv
+            assert (
+                f"Image preprocessing cache: no shared directory | {budget} MiB"
+                in result.stdout
+            ), result.stdout
+
+    # Neither setting at all: no flag, and the report says the cache is off. That
+    # is the launch every existing saved file and startup script still has.
+    result, argv, _, _ = launch(
+        tmp_path, RECIPES / "serve-flash-next.sh", through_entrypoint=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--mm-preprocess-cache-size-mb" not in argv
+    assert "--mm-preprocess-cache-dir" not in argv
+    assert "Image preprocessing cache: off" in result.stdout, result.stdout
+
+
+def test_a_directory_without_a_positive_budget_stops_the_launch(tmp_path):
+    # Refused on both routes, before the model loads, with the reason naming both
+    # settings: a shared store without a budget is undefined, not unlimited. The
+    # mounted copy is refused from its own settings block, so neither a
+    # hand-edited nor a generated launch folder can carry the broken pair, and
+    # the FR-Spec route is refused before its pinned-tokenizer check.
+    directory = {"PENNY_MM_PREPROCESS_CACHE_DIR": "/dev/shm/mm"}
+    zeroed = {**directory, "PENNY_MM_PREPROCESS_CACHE_SIZE_MB": "0"}
+    relative = {**directory, "PENNY_MM_PREPROCESS_CACHE_SIZE_MB": "512"}
+    relative["PENNY_MM_PREPROCESS_CACHE_DIR"] = "relative/mm"
+    plain = (
+        prepared_config(tmp_path, "start-flash-next.sh", mm_cache="/dev/shm/mm")
+        / "start-flash-next.sh"
+    )
+    frspec = (
+        prepared_config(tmp_path, "start-flash-next-frspec.sh", mm_cache="/dev/shm/mm")
+        / "start-flash-next-frspec.sh"
+    )
+    for startup, via_entrypoint, env, reason in (
+        (RECIPES / "serve-flash-next.sh", False, directory, "needs a positive"),
+        (RECIPES / "serve-flash-next.sh", False, zeroed, "needs a positive"),
+        (RECIPES / "serve-flash-next.sh", False, relative, "must be an absolute"),
+        (plain, True, {}, "needs a positive"),
+        (frspec, True, {}, "needs a positive"),
+    ):
+        result, argv, _, _ = launch(
+            tmp_path, startup, through_entrypoint=via_entrypoint, env=env
+        )
+        assert result.returncode != 0 and argv is None, (startup, env, result.stdout)
+        assert reason in result.stderr, (startup, env, result.stderr)
+
+
+def test_a_generated_launch_keeps_the_image_cache_pair_it_was_saved(tmp_path):
+    """Saved settings, generated files, the docker recorder and the image stand-in.
+
+    The pair a setup answered is the pair the launch runs: it is written into the
+    generated startup script, an inherited shell value cannot steer it, editing
+    the line the save wrote is how it changes, and saving nothing leaves the
+    shipped blank line, which is off.
+    """
+    sys.path.insert(0, str(REPO / "scripts" / "pennyroyal"))
+    import penny_config as pc  # noqa: E402
+
+    host_root = tmp_path / "model share"
+    cache = tmp_path / "cache root"
+    nixl = tmp_path / "nixl root"
+    for directory in (host_root, cache, nixl):
+        directory.mkdir(parents=True)
+    model = make_checkpoint(host_root / "penny-model", "generated")
+    saved = {
+        "HOST_MODELS_ROOT": str(host_root),
+        "HOST_CACHE_BASE": str(cache),
+        "HOST_NIXL_STORAGE_BASE": str(nixl),
+        "LAUNCH_DIR": str(tmp_path / "generated"),
+        "TARGET_MODEL": "/models/penny-model",
+        "PENNY_MM_PREPROCESS_CACHE_DIR": "/cache/mm work",
+        "PENNY_MM_PREPROCESS_CACHE_SIZE_MB": "1024",
+    }
+    env_file = tmp_path / "container.env"
+    env_file.write_text(
+        pc.serialize_env(
+            [("", sorted(saved.items()))], header=(f"{pc.PROFILE_KEY}=next-plain",)
+        )
+    )
+    # A different pair in the caller's shell: the saved settings win, as they do
+    # for every other setting, so no stray export can rewrite the launch folder.
+    plan = pc.build_plan(
+        "container",
+        pc.load_config("container", env_file, {}, REPO),
+        {
+            "PENNY_MM_PREPROCESS_CACHE_DIR": "/dev/shm/from-the-shell",
+            "PENNY_MM_PREPROCESS_CACHE_SIZE_MB": "4096",
+        },
+        repo_root=REPO,
+    )
+    assert [issue.message for issue in plan.errors] == []
+    assert plan.env["PENNY_MM_PREPROCESS_CACHE_DIR"] == "/cache/mm work", plan.env
+    pc.write_container_files(plan)
+    startup = plan.launch_dir / "config" / "start-flash-next.sh"
+    generated = startup.read_text()
+    assert "PENNY_MM_PREPROCESS_CACHE_DIR='/cache/mm work'" in generated, generated
+    assert "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=1024" in generated, generated
+    startup.write_text(
+        generated.replace("TARGET_MODEL=/models/penny-model", f'TARGET_MODEL="{model}"')
+    )
+
+    def server_arguments(**exported):
+        # The generated script, run by the image's own exec path, with whatever
+        # the caller's shell happens to carry.
+        result, server_argv, _, _ = launch(tmp_path, startup, env=exported)
+        assert result.returncode == 0, result.stderr
+        return server_argv
+
+    argv = server_arguments()
+    assert argv_after(argv, "--mm-preprocess-cache-dir") == "/cache/mm work", argv
+    assert argv_after(argv, "--mm-preprocess-cache-size-mb") == "1024", argv
+    # An inherited value does not steer a generated launch either: the settings
+    # block the save wrote is the one place the pair lives.
+    argv = server_arguments(
+        PENNY_MM_PREPROCESS_CACHE_DIR="/dev/shm/from-the-shell",
+        PENNY_MM_PREPROCESS_CACHE_SIZE_MB="4096",
+    )
+    assert argv_after(argv, "--mm-preprocess-cache-dir") == "/cache/mm work", argv
+    assert argv_after(argv, "--mm-preprocess-cache-size-mb") == "1024", argv
+    # The documented way to change it is the setting the save wrote.
+    startup.write_text(
+        startup.read_text()
+        .replace(
+            "PENNY_MM_PREPROCESS_CACHE_DIR='/cache/mm work'",
+            "PENNY_MM_PREPROCESS_CACHE_DIR=",
+        )
+        .replace(
+            "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=1024",
+            "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=",
+        )
+    )
+    argv = server_arguments()
+    assert "--mm-preprocess-cache-dir" not in argv, argv
+    assert "--mm-preprocess-cache-size-mb" not in argv, argv
 
 
 def test_native_frspec_disk_tier_off_needs_no_nixl_root(tmp_path):

@@ -27,7 +27,7 @@
 #                              The two choices are separate and must agree.
 #   --nvme-ple                 keep the io_uring-permitting seccomp setting for the
 #                              independent NVMe PLE reader while NIXL is off
-#   --image NAME               container image (default: v3.1.5)
+#   --image NAME               container image (default: v3.1.6)
 #   --port HOST_PORT           published server port (default: 8001)
 #   --gpu IDS                  GPU id list, e.g. 0 or 0,1 (default: 0)
 #   --models DIR               host models root, mounted read-only at /models
@@ -47,6 +47,13 @@
 # 'fixed-w4' (block 4 at every concurrency) to choose from, and the choice also
 # sets the launch width. ./configure-penny --container writes your answer into
 # that line.
+# The optional shared image preprocessing cache works the same way: the startup
+# script names PENNY_MM_PREPROCESS_CACHE_DIR and PENNY_MM_PREPROCESS_CACHE_SIZE_MB
+# in its settings block, both blank (no shared cache, and no change to the
+# launch), and ./configure-penny --container writes a saved pair into those two
+# lines. The directory is the path inside the container — /cache/<name> or
+# /dev/shm/<name> are writable with the mounts and --shm-size this launcher
+# already uses — and the budget is MiB, one bound for the whole directory.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

@@ -38,7 +38,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 # --------------------------------------------------------------------------
 # Profiles, recipes, and the keys a saved configuration may hold
@@ -115,6 +115,24 @@ CONTAINER_PASSTHROUGH_KEYS = (
 # Settings that only mean something while the disk tier is mounted, so a
 # generated launch with the tier off does not carry them at all.
 DISK_ONLY_KEYS = ("SGLANG_HICACHE_NIXL_MAX_CACHE_GB",)
+# The optional image preprocessing cache is one pair: a private directory the
+# tokenizer workers share, and the MiB (1024*1024 bytes) budget that directory
+# may use. Neither setting exists by default, which is how every launch stayed
+# exactly what it was before the pair existed: a budget on its own is the
+# existing per-worker cache, an explicit 0 included. The pair is the startup
+# file's own setting on the container routes, exactly like the width policy, so
+# it is not in the passthrough list above; compose.yaml forwards it for the
+# operators who run an image profile instead of a startup file.
+MM_CACHE_DIR_KEY = "PENNY_MM_PREPROCESS_CACHE_DIR"
+MM_CACHE_SIZE_KEY = "PENNY_MM_PREPROCESS_CACHE_SIZE_MB"
+# The budget rule in the one wording the validator, the plan check and the
+# launcher helper all use, so a refusal reads the same from any of the three.
+MIB_BUDGET_RULE = "must be a whole number of MiB (1 MiB = 1048576 bytes)"
+ABSOLUTE_DIR_RULE = "must be an absolute directory"
+SPACE_RULE = "must not have leading or trailing spaces"
+# A budget is a count of MiB, so digits and nothing else: this is the same rule the
+# shared launcher helper applies, leading zeros included.
+WHOLE_MIB_RE = re.compile(r"^[0-9]+$")
 # The one public selector for the native-MTP width policy, and the profiles that
 # have it at all: the DFlash2 profiles route their own widths and never read it.
 MTP_POLICY_KEY = "PENNY_MTP_POLICY"
@@ -306,6 +324,26 @@ SHARED_KEYS: tuple[KeySpec, ...] = (
         "mm-device",
         default="cpu",
         prompt="Media preprocessing device (cpu or cuda:N)",
+    ),
+    KeySpec(
+        MM_CACHE_DIR_KEY,
+        "private directory the tokenizer workers share for image preprocessing "
+        "(blank = off; needs a positive budget; inside a container this is the "
+        "path in the container, e.g. /cache/<name> or /dev/shm/<name>)",
+        "path",
+        advanced=True,
+        prompt="Shared image preprocessing cache directory "
+        "(blank = off; a positive MiB budget is required with it)",
+    ),
+    KeySpec(
+        MM_CACHE_SIZE_KEY,
+        "image preprocessing cache budget in MiB (1 MiB = 1024*1024 bytes); "
+        "blank = the runtime's own default, 0 = no cache at all, and a shared "
+        "directory needs a positive value",
+        "mib",
+        advanced=True,
+        prompt="Image preprocessing cache budget in MiB "
+        "(0 = off; a shared directory needs a positive value)",
     ),
     KeySpec(
         "SGLANG_FORWARD_UNKNOWN_TOOLS",
@@ -721,6 +759,8 @@ def validate_value(spec: KeySpec, value: str, source: str) -> str:
     """Return the normalized value, or raise. Empty always means "not set"."""
     if value == "":
         return ""
+    if spec.name in MM_CACHE_KEYS and (len(value.splitlines()) > 1 or chr(0) in value):
+        raise ConfigError(f"{source}: {spec.name} must not contain line breaks or NUL")
     kind = spec.kind
     if kind == "bool":
         if value.lower() not in TRUE_VALUES + FALSE_VALUES:
@@ -747,6 +787,15 @@ def validate_value(spec: KeySpec, value: str, source: str) -> str:
                 f"{source}: {spec.name} must be a non-negative "
                 f"integer, got {value!r}"
             )
+        return value
+    if kind == "mib":
+        # Padding is refused before the numeric rule, with the same wording the
+        # shared launcher helper uses, so a saved value and an exported one fail
+        # the same way.
+        if value != value.strip():
+            raise ConfigError(f"{source}: {spec.name} {SPACE_RULE}, got {value!r}")
+        if not WHOLE_MIB_RE.match(value):
+            raise ConfigError(f"{source}: {spec.name} {MIB_BUDGET_RULE}, got {value!r}")
         return value
     if kind == "positive-int":
         if not _POSITIVE_INT_RE.match(value):
@@ -1214,13 +1263,18 @@ def _adopt(
 
 
 def build_plan(
-    mode: str, config: Config, environ: dict[str, str], repo_root: Optional[Path] = None
+    mode: str,
+    config: Config,
+    environ: dict[str, str],
+    repo_root: Optional[Path] = None,
+    *,
+    check_mounted_cache: bool = True,
 ) -> Plan:
     if mode != config.mode:
         raise ConfigError(f"config mode mismatch: {mode} != {config.mode}")
     if mode == "native":
         return _plan_native(config, environ, repo_root)
-    return _plan_container(config, environ, repo_root)
+    return _plan_container(config, environ, repo_root, check_mounted_cache)
 
 
 def _profile_line(config: Config) -> str:
@@ -1270,6 +1324,8 @@ def _plan_native(
         "SGLANG_SM120_ONLINE_MXFP8",
         "SGLANG_MM_PREPROCESS_DEVICE",
         "SGLANG_FORWARD_UNKNOWN_TOOLS",
+        MM_CACHE_DIR_KEY,
+        MM_CACHE_SIZE_KEY,
         "MAX_RUNNING_REQUESTS",
         "MAX_MAMBA_CACHE_SIZE",
         "MAX_TOTAL_TOKENS",
@@ -1367,6 +1423,7 @@ def _plan_native(
     )
     disk_tier = plan.env.get("NIXL", "on")
     _profile_pinned_issues(plan)
+    _mm_preprocess_cache_issues(plan, environ)
     # With the disk tier off the recipe needs no NIXL root at all, so a missing
     # or unwritable one must not hold the launch up (and nothing is deleted).
     if disk_tier == "on":
@@ -1391,6 +1448,7 @@ def _plan_native(
         _disk_tier_line(disk_tier, nixl_base),
         f"GPU: {gpu}",
         _hicache_size_line(plan.env.get("PENNY_HICACHE_SIZE_GB", ""), config.profile),
+        _mm_preprocess_cache_line(plan),
     ]
     # The width policy is a setting of the native-MTP profiles only, so the
     # DFlash2 summaries keep saying what they said before.
@@ -1541,6 +1599,269 @@ def _mtp_policy_line(chosen: str, profile: str, origin: str = "") -> str:
     )
 
 
+MM_CACHE_KEYS = (MM_CACHE_DIR_KEY, MM_CACHE_SIZE_KEY)
+
+
+def mm_cache_effective_pair(
+    config: Config, environ: Mapping[str, str]
+) -> dict[str, str]:
+    """The pair one launch uses: the file's value, else what the shell exports.
+
+    A key saved blank is an answer, not an absence, and it suppresses the exported
+    value; a key the file does not mention is what the environment carries. This is
+    the one resolution the check and the configurator share, so the pair that is
+    validated, the pair that is saved and the pair a startup file is asked to state
+    cannot drift apart into three different launches.
+    """
+    return {
+        name: config.values[name] if name in config.values else environ.get(name, "")
+        for name in MM_CACHE_KEYS
+    }
+
+
+def mm_cache_pair_problems(pair: Mapping[str, str]) -> list[tuple[str, str]]:
+    """The rules one effective pair has to satisfy, as (key, message) refusals.
+
+    A directory without a positive budget is the one combination the runtime refuses:
+    the budget bounds the retained artifacts and the directory's own index records it,
+    so a changed budget needs a fresh directory. A budget alone stays the per-worker
+    cache each worker already has, 0 included. Padding fails rather than being trimmed
+    away, because a recipe forwards what it receives verbatim and a padded value would
+    otherwise launch a different path than the one the operator wrote.
+    """
+    problems: list[tuple[str, str]] = []
+    for name, rule, reason in (
+        (MM_CACHE_DIR_KEY, lambda value: value.startswith("/"), ABSOLUTE_DIR_RULE),
+        (
+            MM_CACHE_SIZE_KEY,
+            lambda value: bool(WHOLE_MIB_RE.match(value)),
+            MIB_BUDGET_RULE,
+        ),
+    ):
+        value = pair.get(name, "")
+        if not value:
+            continue
+        if len(value.splitlines()) > 1 or chr(0) in value:
+            problems.append((name, f"{name} must not contain line breaks or NUL"))
+        elif value != value.strip():
+            problems.append(
+                (name, f"{name} {SPACE_RULE}, got {quote_command_arg(value)}")
+            )
+        elif not rule(value):
+            problems.append((name, f"{name} {reason}, got {quote_command_arg(value)}"))
+    directory, budget = (pair.get(name, "") for name in MM_CACHE_KEYS)
+    if directory.startswith("/") and (
+        budget == "" or (WHOLE_MIB_RE.match(budget) and not budget.strip("0"))
+    ):
+        problems.append(
+            (
+                MM_CACHE_SIZE_KEY,
+                f"{MM_CACHE_DIR_KEY}={quote_command_arg(directory)} needs a positive "
+                f"{MM_CACHE_SIZE_KEY} budget in MiB, got {budget or 'nothing'}; a "
+                "directory on its own is not a cache, and no cache at all is what "
+                "every launch does today",
+            )
+        )
+    return problems
+
+
+def _startup_cache_assignment(text: str, name: str) -> tuple[bool, Optional[str]]:
+    """What one startup file states about a cache key: present, and literal or not.
+
+    Only the two literal assignment lines this project's own settings block carries
+    are read. The file is never sourced or evaluated, so a computed value is reported
+    as unverifiable rather than guessed at.
+    """
+    matches = re.findall(
+        rf"^[ \t]*(?:export[ \t]+)?{re.escape(name)}=(.*)$", text, re.MULTILINE
+    )
+    if not matches:
+        return False, None
+    if len(matches) != 1:
+        return True, None
+    raw = matches[0]
+    quote = None
+    escaped = False
+    for index, char in enumerate(raw):
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and index > 0 and raw[index - 1] in " \t":
+            raw = raw[:index].rstrip(" \t")
+            break
+    # Whitespace before an unquoted value starts a command in Bash; it is not
+    # harmless padding around a saved-file value.
+    if raw and raw[0].isspace() and raw.strip():
+        return True, None
+    raw = raw.rstrip(" \t")
+    try:
+        words = shlex.split(raw)
+    except ValueError:
+        return True, None
+    if not raw:
+        return True, ""
+    if len(words) != 1:
+        return True, None
+    value = words[0]
+    # Generated shell quoting can concatenate quoted fragments around an apostrophe.
+    # Recognize its canonical form without evaluating shell expansions or commands.
+    if raw == shlex.quote(value):
+        return True, value
+    # In an assignment, an adjacent hash is part of the value, not a comment.
+    if raw == value and shlex.quote(raw.replace("#", "a")) == raw.replace("#", "a"):
+        return True, value
+    if raw.startswith("'") and raw.endswith("'") and raw.count("'") == 2:
+        return True, value
+    if (
+        raw.startswith('"')
+        and raw.endswith('"')
+        and raw.count('"') == 2
+        and not any(char in raw for char in "$`\\")
+    ):
+        return True, value
+    return True, None
+
+
+def _startup_file_cache_issue(
+    startup: Path, pair: Mapping[str, str]
+) -> Optional[Issue]:
+    """Compare the mounted startup file's own two lines with the pair in use.
+
+    That file decides this pair for a container launch, so a hand edit there, or a
+    folder written before the settings existed, has to be named rather than reported
+    as a cache the launch would use.
+    """
+    try:
+        text = startup.read_bytes().decode("utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError):
+        return Issue(
+            "warn",
+            f"Cannot read {startup}; its image cache settings are unverified",
+            key=MM_CACHE_DIR_KEY,
+        )
+    stated: dict[str, str] = {}
+    unknown: set[str] = set()
+    for name in MM_CACHE_KEYS:
+        present, value = _startup_cache_assignment(text, name)
+        stated[name] = value if present and value is not None else ""
+        if present and value is None:
+            unknown.add(name)
+    problems = [
+        (key, message)
+        for key, message in mm_cache_pair_problems(stated)
+        if key not in unknown
+    ]
+    if problems:
+        return Issue(
+            "error",
+            f"{startup}: " + "; ".join(message for _, message in problems),
+            key=problems[0][0],
+        )
+    if unknown:
+        return Issue(
+            "warn",
+            f"{startup} computes the image preprocessing cache settings, so this "
+            "check cannot say what that launch shares; save the setup again to "
+            "write plain values into the file",
+            key=MM_CACHE_DIR_KEY,
+        )
+    if stated == {name: pair.get(name, "") for name in MM_CACHE_KEYS}:
+        return None
+    return Issue(
+        "warn",
+        f"{startup} states image preprocessing cache "
+        f"{stated[MM_CACHE_DIR_KEY]!r} / {stated[MM_CACHE_SIZE_KEY]!r} where this "
+        "configuration says "
+        f"{pair.get(MM_CACHE_DIR_KEY, '')!r} / {pair.get(MM_CACHE_SIZE_KEY, '')!r}; "
+        "the mounted file decides the container launch, so edit those two lines or "
+        "save the setup again to write them from these settings"
+        + (
+            ""
+            if any(stated.values())
+            else " (a file with neither line predates these settings entirely)"
+        ),
+        key=MM_CACHE_DIR_KEY,
+    )
+
+
+def _mm_preprocess_cache_issues(plan: Plan, environ: dict[str, str]) -> None:
+    """Check the image preprocessing cache pair this launch will really use.
+
+    The pair is resolved once (see `mm_cache_effective_pair`), the shared rules are
+    applied to that pair alone, and the startup file this container launch mounts is
+    compared against it. An ambient value that a saved line overrides is never quoted
+    back as this launch's problem, because nothing uses it.
+    """
+    pair = {name: plan.env.get(name, "") for name in MM_CACHE_KEYS}
+    for key, message in mm_cache_pair_problems(pair):
+        plan.issues.append(Issue("error", message, key=key))
+    # `_adopt` trims an inherited value on the way into the plan, so padding on that
+    # route is only visible on the environment entry it came from.
+    for name in MM_CACHE_KEYS:
+        if name in plan.config.values:
+            continue
+        exported = environ.get(name, "")
+        if exported and exported != exported.strip():
+            plan.issues.append(
+                Issue(
+                    "error",
+                    f"{name} {SPACE_RULE}, got {quote_command_arg(exported)}",
+                    key=name,
+                )
+            )
+    directory = pair[MM_CACHE_DIR_KEY]
+    if (
+        directory.startswith("/")
+        and plan.config.mode == "container"
+        and not directory.startswith(("/cache/", "/dev/shm/"))
+    ):
+        plan.issues.append(
+            Issue(
+                "warn",
+                f"{MM_CACHE_DIR_KEY}={quote_command_arg(directory)} is not under "
+                "/cache or /dev/shm: those are the two writable places a container "
+                "launch already provides (the mounted cache directory and "
+                "--shm-size), and anywhere else lives in the container's own layer "
+                "and disappears with it.",
+                key=MM_CACHE_DIR_KEY,
+            )
+        )
+
+
+def _mm_preprocess_cache_line(plan: Plan) -> str:
+    """Say what this launch asks the preprocessing cache to do, in MiB.
+
+    The three states are different decisions: a shared directory, the existing
+    per-worker cache, and nothing. The unit is stated because the neighbouring
+    HiCache setting counts decimal GB and the NIXL budget counts GiB.
+    """
+    directory = plan.env.get(MM_CACHE_DIR_KEY, "")
+    budget = plan.env.get(MM_CACHE_SIZE_KEY, "")
+    where = " inside the container" if plan.config.mode == "container" else ""
+    if directory:
+        return (
+            f"image preprocessing cache: shared at {quote_command_arg(directory)}"
+            f"{where} with a "
+            f"{budget} MiB budget (1 MiB = 1024*1024 bytes, one budget for the "
+            "whole directory; the directory keeps the budget its index "
+            "recorded, so a different number needs a fresh directory)"
+        )
+    if budget:
+        return (
+            f"image preprocessing cache: {budget} MiB split across the "
+            "tokenizer workers, no shared directory (0 = off)"
+        )
+    return "image preprocessing cache: off (no directory and no budget given)"
+
+
 def _nixl_budget_line(budget: str) -> str:
     """Name the NIXL disk budget honestly: 0 means no cap, not cache off.
 
@@ -1566,7 +1887,10 @@ def _nixl_budget_line(budget: str) -> str:
 
 
 def _plan_container(
-    config: Config, environ: dict[str, str], repo_root: Optional[Path]
+    config: Config,
+    environ: dict[str, str],
+    repo_root: Optional[Path],
+    check_mounted_cache: bool = True,
 ) -> Plan:
     """Plan the ordinary prebuilt-container launch: run.sh plus mounted files.
 
@@ -1602,6 +1926,8 @@ def _plan_container(
         "SGLANG_SM120_ONLINE_MXFP8",
         "SGLANG_MM_PREPROCESS_DEVICE",
         "SGLANG_FORWARD_UNKNOWN_TOOLS",
+        MM_CACHE_DIR_KEY,
+        MM_CACHE_SIZE_KEY,
         "MAX_RUNNING_REQUESTS",
         "MAX_MAMBA_CACHE_SIZE",
         "MAX_TOTAL_TOKENS",
@@ -1793,6 +2119,15 @@ def _plan_container(
                 if issue:
                     plan.issues.append(issue)
     _profile_pinned_issues(plan)
+    _mm_preprocess_cache_issues(plan, environ)
+
+    if check_mounted_cache:
+        issue = _startup_file_cache_issue(
+            launch_dir / "config" / startup_name,
+            {name: plan.env.get(name, "") for name in MM_CACHE_KEYS},
+        )
+        if issue is not None:
+            plan.issues.append(issue)
 
     plan.next_command = " ".join(quote_command_arg(arg) for arg in plan.argv)
     plan.summary = [
@@ -1813,6 +2148,7 @@ def _plan_container(
         f"API port: {port}",
         f"GPU: {gpu}",
         _hicache_size_line(plan.env.get("PENNY_HICACHE_SIZE_GB", ""), config.profile),
+        _mm_preprocess_cache_line(plan),
     ]
     policy_line = _mtp_policy_line(
         plan.env.get(MTP_POLICY_KEY, ""),
@@ -1916,6 +2252,11 @@ def _render_startup(template: Path, plan: Plan, disk_tier: str) -> str:
         "export SGLANG_MM_PREPROCESS_DEVICE": plan.env.get(
             "SGLANG_MM_PREPROCESS_DEVICE", ""
         ),
+        # The optional image preprocessing cache pair, stated the same way the
+        # capacity knobs are: this file is what a container launch reads, and a
+        # blank (the default) leaves the shipped blank line, which is off.
+        MM_CACHE_DIR_KEY: plan.env.get(MM_CACHE_DIR_KEY, ""),
+        MM_CACHE_SIZE_KEY: plan.env.get(MM_CACHE_SIZE_KEY, ""),
         "MAX_RUNNING_REQUESTS": plan.env.get("MAX_RUNNING_REQUESTS", ""),
         "MAX_MAMBA_CACHE_SIZE": plan.env.get("MAX_MAMBA_CACHE_SIZE", ""),
         # The disk tier always has to be stated: run.sh decides the mount
@@ -1928,6 +2269,20 @@ def _render_startup(template: Path, plan: Plan, disk_tier: str) -> str:
         MTP_POLICY_KEY: plan.env.get(MTP_POLICY_KEY, ""),
     }
     for lhs, value in choices.items():
+        if lhs in MM_CACHE_KEYS:
+            # Clearing a value must replace template edits too. Missing or repeated
+            # anchors cannot produce a launcher that represents the saved pair.
+            assignments = re.findall(
+                rf"^[ \t]*(?:export[ \t]+)?{re.escape(lhs)}=", text, re.MULTILINE
+            )
+            if len(assignments) != 1 or not _has_setting(text, lhs):
+                raise ConfigError(f"{template}: expected one {lhs}= settings line")
+            if _startup_cache_assignment(text, lhs)[1] is None:
+                raise ConfigError(f"{template}: {lhs} must be a single-line literal")
+            text = _set_setting(
+                text, template.name, lhs, quote_command_arg(value) if value else ""
+            )
+            continue
         # A knob this profile's recipe pins is not the configurator's to write:
         # the shipped file stays the truth for it, so a generated script can
         # never claim a setting the launch line ignores (see the plan check in

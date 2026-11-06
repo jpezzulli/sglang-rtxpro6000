@@ -574,6 +574,25 @@ Video decoding, sampling, and initial frame preparation remain on CPU. The two
 profiles do not support audio input. GPU JPEG decoding retains the CPU fallback
 for unsupported image formats; an out-of-memory error still fails the request.
 
+Every tokenizer worker preprocesses the same image again by default. Two
+settings share that work instead: a private directory, and the MiB budget it may
+use.
+
+```bash
+export PENNY_MM_PREPROCESS_CACHE_DIR=/dev/shm/pennyroyal-mm
+export PENNY_MM_PREPROCESS_CACHE_SIZE_MB=3072
+```
+
+Both are unset, so the launch is what it was. A budget on its own stays the
+existing per-worker cache (`0` turns that cache off), and a directory needs a
+positive budget with it. The budget is one global bound across the workers, not
+one each, and the directory records it, so a changed budget means a fresh
+directory. Artifacts use the directory's backing filesystem: host RAM on tmpfs
+or disk space on a disk-backed directory. Nothing is deleted when you stop using
+it. The same pair is a setting in
+every container startup file and in the configurator's advanced section; see
+[Configuration](CONFIGURATION.md#shared-image-preprocessing-cache).
+
 CPU mode uses host RAM and CPU time. A secondary GPU uses auxiliary VRAM and
 adds transfers. Peak usage depends on dimensions, image count, and concurrency.
 Backend pixel differences select a distinct persistence identity; older cache
