@@ -2194,9 +2194,18 @@ class UnifiedRadixCache(BasePrefixCache):
                 if shortfall > 0:
                     self.evict_host(shortfall)
                 host_indices = cc.mem_pool_host.alloc(alloc_len)
-            if host_indices is None and not buffer_mode:
+            if host_indices is None and not buffer_mode and not info.comp_xfers:
                 # Memory-pressure fallback: a shorter page-aligned prefix.
-                # (Cache mode only — buffer mode parks for the full hit.)
+                # (Cache mode only — buffer mode parks for the full hit.) A
+                # hybrid prefetch also carries SWA/Mamba component transfers
+                # queried at the full boundary. Their trailing keys can be
+                # re-targeted onto a shorter hit, but that new boundary was
+                # never proven present by this hit query: the trailing state may
+                # exist (the older path then succeeds) or be absent (completion
+                # validation discards the recovery). Revoke instead of launching
+                # that unverified shorter I/O. Stable has no prefetch retry: the
+                # request is admitted by the normal path, which recomputes the
+                # still-uncached span.
                 available_size = cc.mem_pool_host.available_size()
                 alloc_len = min(
                     operation.storage_hit_count,
