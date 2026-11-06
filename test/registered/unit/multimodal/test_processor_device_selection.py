@@ -55,6 +55,7 @@ class TestFastImageProcessorDevice(CustomTestCase):
             disable_fast_image_processor=False,
             mm_process_config={},
             mm_preprocess_cache_size_mb=0,
+            mm_preprocess_cache_dir=None,
             trust_mm_content_hashes=False,
             mm_io_worker_num=1,
             mm_processor_worker_num=1,

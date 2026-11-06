@@ -2957,6 +2957,13 @@ class ServerArgs:
         "tokenizer workers and does not reserve GPU memory.",
         NS("mm"),
     ] = None
+    mm_preprocess_cache_dir: A[
+        Optional[str],
+        "Private local directory for a shared CPU artifact cache across tokenizer "
+        "workers. Prefer tmpfs. With this option, the size budget is global; "
+        "raw media is always verified, including caller-provided hashes.",
+        NS("mm"),
+    ] = None
     trust_mm_content_hashes: A[
         bool,
         "Trust caller-provided multimodal SHA-256 content hashes. This can "
@@ -4401,8 +4408,7 @@ class ServerArgs:
         if cfg.enable_http2:
             if not 0 < cfg.http2_max_concurrent_streams < 2**32:
                 raise ValueError(
-                    "--http2-max-concurrent-streams must be between 1 and "
-                    "4294967295."
+                    "--http2-max-concurrent-streams must be between 1 and 4294967295."
                 )
 
             try:
@@ -4428,6 +4434,16 @@ class ServerArgs:
             and cfg.mm_preprocess_cache_size_mb < 0
         ):
             raise ValueError("mm_preprocess_cache_size_mb must be non-negative")
+        if cfg.mm_preprocess_cache_dir is not None:
+            if not cfg.mm_preprocess_cache_dir.strip():
+                raise ValueError("mm_preprocess_cache_dir must not be empty")
+            if (
+                not cfg.mm_preprocess_cache_size_mb
+                or cfg.mm_preprocess_cache_size_mb <= 0
+            ):
+                raise ValueError(
+                    "A shared preprocessing cache requires a positive explicit size budget"
+                )
         if cfg.mm_process_config is not None:
             if not isinstance(cfg.mm_process_config, dict):
                 raise TypeError(
@@ -5051,8 +5067,10 @@ class ServerArgs:
             ),
             (
                 "OOT platform without piecewise support",
-                lambda: current_platform.is_out_of_tree()
-                and not current_platform.support_piecewise_cuda_graph(),
+                lambda: (
+                    current_platform.is_out_of_tree()
+                    and not current_platform.support_piecewise_cuda_graph()
+                ),
             ),
             (
                 "MoE A2A backend",
@@ -5063,14 +5081,18 @@ class ServerArgs:
             ("LoRA", lambda: bool(cfg.lora_paths) or cfg.enable_lora),
             (
                 "multimodal model",
-                lambda: self.get_model_config().is_multimodal
-                and not self.get_model_config().is_multimodal_piecewise_cuda_graph_supported,
+                lambda: (
+                    self.get_model_config().is_multimodal
+                    and not self.get_model_config().is_multimodal_piecewise_cuda_graph_supported
+                ),
             ),
             (
                 "GGUF quantization",
-                lambda: cfg.load_format == "gguf"
-                or resolved_view(self).quantization == "gguf"
-                or check_gguf_file(cfg.model_path),
+                lambda: (
+                    cfg.load_format == "gguf"
+                    or resolved_view(self).quantization == "gguf"
+                    or check_gguf_file(cfg.model_path)
+                ),
             ),
             ("DLLM (diffusion LLM)", lambda: cfg.dllm_algorithm is not None),
             (
@@ -5085,8 +5107,9 @@ class ServerArgs:
             ("symmetric memory", lambda: cfg.enable_symm_mem),
             (
                 "expert distribution recorder",
-                lambda: cfg.enable_eplb
-                or cfg.expert_distribution_recorder_mode is not None,
+                lambda: (
+                    cfg.enable_eplb or cfg.expert_distribution_recorder_mode is not None
+                ),
             ),
             (
                 "context parallel (attn_cp_size > 1)",
@@ -5126,8 +5149,10 @@ class ServerArgs:
             # CP all_gather replay size mismatch under BCG.
             (
                 "context parallel (attn_cp_size > 1)",
-                lambda: self._resolved().attn_cp_size > 1
-                and not supports_prefill_cp_bcg(self),
+                lambda: (
+                    self._resolved().attn_cp_size > 1
+                    and not supports_prefill_cp_bcg(self)
+                ),
             ),
             # Capture builds a dummy extend forward with attn_dcp_metadata=None.
             (
@@ -5141,14 +5166,18 @@ class ServerArgs:
             ),
             (
                 "unvalidated a2a backend",
-                lambda: resolved_view(self).moe_a2a_backend
-                not in ("none", "deepep", "megamoe", "flashinfer"),
+                lambda: (
+                    resolved_view(self).moe_a2a_backend
+                    not in ("none", "deepep", "megamoe", "flashinfer")
+                ),
             ),
             # Multimodal prefill replay faults under BCG; allowlisted archs opt back in.
             (
                 "multimodal model",
-                lambda: self.get_model_config().is_multimodal
-                and not self.get_model_config().is_multimodal_breakable_cuda_graph_supported,
+                lambda: (
+                    self.get_model_config().is_multimodal
+                    and not self.get_model_config().is_multimodal_breakable_cuda_graph_supported
+                ),
             ),
         ]
         for name, predicate in rules:
@@ -10002,7 +10031,6 @@ class ServerArgs:
         # is only kept once the record is resolved, because `page_size` below
         # is resolution-written.
         if not hasattr(self, "_mamba_cache_chunk_size"):
-
             try:
                 from sglang.kernels.ops.attention.fla.chunk_delta_h import (
                     CHUNK_SIZE as FLA_CHUNK_SIZE,

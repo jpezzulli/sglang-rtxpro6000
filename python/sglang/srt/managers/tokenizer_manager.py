@@ -93,6 +93,7 @@ from sglang.srt.managers.mm_utils import wrap_shm_features
 from sglang.srt.managers.multimodal_processor import get_mm_processor, import_processors
 from sglang.srt.managers.schedule_batch import (
     MultimodalDataItem,
+    MultimodalProcessorOutput,
     get_request_return_hidden_states_mode,
 )
 from sglang.srt.managers.scheduler_input_blocker import input_blocker_guard_region
@@ -1090,37 +1091,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 token_type_ids = mm_inputs.token_type_ids
                 if not isinstance(token_type_ids, list):
                     token_type_ids = token_type_ids.flatten().tolist()
-            # Caller-supplied per-image hashes (external KV routers, e.g.
-            # routing-aware orchestrators that compute a content-addressed
-            # hash before dispatch). Setting MultimodalDataItem.hash here
-            # short-circuits the internal hash_feature() recompute inside
-            # set_pad_value(), making the derived pad_value deterministic
-            # from the caller's hash. That alignment lets the router's
-            # routing decision agree with sglang's prefix-cache key for
-            # the same image. On any per-item parse error or list-length
-            # mismatch we fall back to the internal recompute so a
-            # malformed mm_hashes never blocks a request.
-            caller_mm_hashes = getattr(obj, "mm_hashes", None)
-            if caller_mm_hashes and mm_inputs and mm_inputs.mm_items:
-                if len(caller_mm_hashes) != len(mm_inputs.mm_items):
-                    logger.warning(
-                        "mm_hashes length (%d) != mm_items length (%d); "
-                        "ignoring caller hashes for this request.",
-                        len(caller_mm_hashes),
-                        len(mm_inputs.mm_items),
-                    )
-                else:
-                    for item, hex_hash in zip(mm_inputs.mm_items, caller_mm_hashes):
-                        if not isinstance(item, MultimodalDataItem):
-                            continue
-                        try:
-                            item.set_hash(int(hex_hash, 16))
-                        except (TypeError, ValueError):
-                            logger.warning(
-                                "Ignoring malformed mm_hashes entry %r; "
-                                "this item will fall back to hash_feature().",
-                                hex_hash,
-                            )
+            self._apply_caller_mm_hashes(obj, mm_inputs)
             if (
                 envs.SGLANG_MM_PRECOMPUTE_HASH.get()
                 and mm_inputs
@@ -1136,6 +1107,65 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         return self._create_tokenized_object(
             obj, input_text, input_ids, input_embeds, mm_inputs, token_type_ids
         )
+
+    @staticmethod
+    def _apply_caller_mm_hashes(obj: GenerateReqInput, mm_inputs) -> None:
+        """Adopt caller-supplied per-item hashes and keep the prompt padding in step.
+
+        Caller hashes come from external KV routers that compute a
+        content-addressed hash before dispatch. Setting ``MultimodalDataItem.hash``
+        here short-circuits the internal ``hash_feature()`` recompute inside
+        ``set_pad_value()``, making the derived ``pad_value`` deterministic from the
+        caller's hash, which lets the router's routing decision agree with sglang's
+        prefix-cache key for the same image. On any per-item parse error or
+        list-length mismatch we fall back to the internal recompute so a malformed
+        ``mm_hashes`` never blocks a request.
+
+        ``set_hash`` also replaces ``pad_value``, so a processor that already
+        flattened the padded prompt (the Qwen-VL image fast path, for one) is left
+        holding pad tokens no item owns anymore. The scheduler installs that stale
+        sequence as ``origin_input_ids`` while the vision mask follows the items,
+        so the pads and the embeddings disagree. Rebuild such a sequence from the
+        final values, and let it go unknown (``None``, which makes the scheduler
+        re-pad locally) if any item no longer has a pad value. A processor that
+        deliberately left the prompt unpadded stays unpadded: model-specific
+        scheduler padding owns that prompt and must not be handed a pre-padded
+        sequence just because a caller supplied hashes.
+        """
+        caller_mm_hashes = getattr(obj, "mm_hashes", None)
+        if not caller_mm_hashes or mm_inputs is None or not mm_inputs.mm_items:
+            return
+        if len(caller_mm_hashes) != len(mm_inputs.mm_items):
+            logger.warning(
+                "mm_hashes length (%d) != mm_items length (%d); "
+                "ignoring caller hashes for this request.",
+                len(caller_mm_hashes),
+                len(mm_inputs.mm_items),
+            )
+            return
+        replaced_hash = False
+        for index, (item, hex_hash) in enumerate(
+            zip(mm_inputs.mm_items, caller_mm_hashes)
+        ):
+            if not isinstance(item, MultimodalDataItem):
+                continue
+            try:
+                item.set_hash(int(hex_hash, 16))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Ignoring malformed mm_hashes entry %r for item %d; "
+                    "this item will fall back to hash_feature().",
+                    hex_hash,
+                    index,
+                )
+            else:
+                replaced_hash = True
+        if replaced_hash and mm_inputs.padded_input_ids is not None:
+            mm_inputs.padded_input_ids = (
+                MultimodalProcessorOutput.build_padded_input_ids(
+                    mm_inputs.input_ids, mm_inputs.mm_items
+                )
+            )
 
     @staticmethod
     def _normalize_mm_content_hashes(obj: GenerateReqInput) -> None:
