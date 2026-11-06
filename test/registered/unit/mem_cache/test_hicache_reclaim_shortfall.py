@@ -472,7 +472,7 @@ class TestHiRadixLoadBackShortfall(unittest.TestCase):
         )
         parent.__eq__ = lambda other: other is cache.root_node
         cache.root_node = object()
-        cache.ancester = parent
+        cache.ancester = parent  # codespell:ignore ancester
         return cache, node, evicted, load_state
 
     def test_load_back_evicts_only_the_device_shortfall(self):
