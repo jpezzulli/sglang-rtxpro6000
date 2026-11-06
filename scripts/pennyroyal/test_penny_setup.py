@@ -1465,6 +1465,11 @@ class SetupSessionTests(FixtureMixin):
     def test_native_inherited_cache_errors_can_be_repaired_or_disabled(self):
         for inherited, key, answer in (
             ({pc.MM_CACHE_SIZE_KEY: "oops"}, pc.MM_CACHE_SIZE_KEY, "128"),
+            (
+                {pc.MM_CACHE_SIZE_KEY: "$PENNY_HICACHE_SIZE_GB"},
+                pc.MM_CACHE_SIZE_KEY,
+                "128",
+            ),
             ({pc.MM_CACHE_DIR_KEY: "/dev/shm/cache"}, pc.MM_CACHE_DIR_KEY, "off"),
             (
                 {pc.MM_CACHE_DIR_KEY: "relative", pc.MM_CACHE_SIZE_KEY: "128"},
@@ -1526,6 +1531,75 @@ class SetupSessionTests(FixtureMixin):
         )
         self.assertIn("PENNY_MM_PREPROCESS_CACHE_DIR=relative", startup.read_text())
 
+    def test_cache_template_pair_is_rewritten_or_rejected_before_saving(self):
+        templates = self.repo / pc.LAUNCH_RELPATH
+        source = templates.resolve()
+        templates.unlink()
+        shutil.copytree(source, templates)
+        template = templates / "config" / "start-flash-next-frspec.sh"
+        original = template.read_text()
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                template.write_text(
+                    original.replace(
+                        "PENNY_MM_PREPROCESS_CACHE_DIR=\n",
+                        "" if missing else "PENNY_MM_PREPROCESS_CACHE_DIR=/cache/old\n",
+                    ).replace(
+                        "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=\n",
+                        "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=128\n",
+                    )
+                )
+                code, output, _, files = self.run_container_setup(
+                    advanced=self.container_advanced(
+                        {
+                            pc.MM_CACHE_DIR_KEY: "none",
+                            pc.MM_CACHE_SIZE_KEY: "none",
+                        }
+                    ),
+                    config_path=self.base / f"template-{missing}.env",
+                )
+                if missing:
+                    self.assertEqual(code, 4, output)
+                    self.assertIn("Cannot write", output)
+                    self.assertFalse(
+                        any(line.startswith("Saved ") for line in output.splitlines())
+                    )
+                else:
+                    self.assertEqual(code, 0, output)
+                    text = files[template.name].read_text()
+                    self.assertIn("PENNY_MM_PREPROCESS_CACHE_DIR=\n", text)
+                    self.assertIn("PENNY_MM_PREPROCESS_CACHE_SIZE_MB=\n", text)
+
+    def test_mounted_cache_assignment_forms_are_not_silently_misread(self):
+        code, output, _, files = self.run_container_setup()
+        self.assertEqual(code, 0, output)
+        startup = files["start-flash-next-frspec.sh"]
+        original = startup.read_text()
+        config = pc.load_config("container", saved_settings(output), {}, self.repo)
+        for directory, budget in (
+            ("export PENNY_MM_PREPROCESS_CACHE_DIR=relative", ""),
+            ("PENNY_MM_PREPROCESS_CACHE_DIR=relative", "$CACHE_BUDGET"),
+        ):
+            with self.subTest(directory=directory, budget=budget):
+                startup.write_text(
+                    original.replace(
+                        "PENNY_MM_PREPROCESS_CACHE_DIR=\n", directory + "\n"
+                    ).replace(
+                        "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=\n",
+                        "PENNY_MM_PREPROCESS_CACHE_SIZE_MB=" + budget + "\n",
+                    )
+                )
+                plan = pc.build_plan("container", config, {}, repo_root=self.repo)
+                self.assertTrue(plan.errors)
+        startup.write_text(
+            original.replace(
+                "PENNY_MM_PREPROCESS_CACHE_DIR=\n",
+                "PENNY_MM_PREPROCESS_CACHE_DIR= /cache/photos\n",
+            )
+        )
+        plan = pc.build_plan("container", config, {}, repo_root=self.repo)
+        self.assertTrue([i for i in plan.issues if i.key in pc.MM_CACHE_KEYS])
+
     def test_an_unusable_inherited_budget_is_correctable_and_not_trimmed(self):
         # An exported value is what this container launch would use, so the save has
         # to end up describing it; one the settings cannot carry is named among the
@@ -1533,6 +1607,7 @@ class SetupSessionTests(FixtureMixin):
         # and it is never trimmed into validity on the operator's behalf.
         for exported, phrase, fix, wanted in (
             ("oops", "whole number of MiB", ("1", "512"), "512"),
+            ("$PENNY_HICACHE_SIZE_GB", "whole number of MiB", ("1", "512"), "512"),
             (" 512 ", "leading or trailing spaces", ("1", "256"), "256"),
             ("oops", "whole number of MiB", ("c",), ""),
             # The exact reproduction: the only row offered is re-enter or cancel, so

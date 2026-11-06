@@ -395,8 +395,9 @@ def _ask_cuda_id(prompt: Prompt, spec: pc.KeySpec, default: str) -> str:
 
 
 def _key_named_by(message: str, specs: dict) -> str:
-    """Which setting a validator's complaint is about, by the name it quotes."""
-    return next((name for name in specs if name in message), "")
+    """Read the validator's field prefix, never a name inside its rejected value."""
+    field = message.partition(": ")[2].split(" ", 1)[0]
+    return field if field in specs else ""
 
 
 def _ask_default_off(

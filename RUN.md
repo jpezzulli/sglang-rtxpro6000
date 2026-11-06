@@ -587,8 +587,9 @@ Both are unset, so the launch is what it was. A budget on its own stays the
 existing per-worker cache (`0` turns that cache off), and a directory needs a
 positive budget with it. The budget is one global bound across the workers, not
 one each, and the directory records it, so a changed budget means a fresh
-directory. Everything runs on host memory or tmpfs; no GPU memory is involved,
-and nothing is deleted when you stop using it. The same pair is a setting in
+directory. Artifacts use the directory's backing filesystem: host RAM on tmpfs
+or disk space on a disk-backed directory. Nothing is deleted when you stop using
+it. The same pair is a setting in
 every container startup file and in the configurator's advanced section; see
 [Configuration](CONFIGURATION.md#shared-image-preprocessing-cache).
 

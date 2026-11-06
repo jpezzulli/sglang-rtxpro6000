@@ -201,7 +201,8 @@ export PENNY_MM_PREPROCESS_CACHE_SIZE_MB=3072
   its own index, so a later launch that asks for a different number is refused:
   changing the budget means pointing at a fresh directory. Nothing is deleted
   for you, and an LRU-evicted artifact is simply recomputed on the next request.
-- **It costs host memory or tmpfs, not GPU memory**, and it is separate from the
+- **Artifacts use the directory's backing filesystem**: host RAM on tmpfs, or disk
+  space on a disk-backed directory. This is separate from the
   `PENNY_HICACHE_SIZE_GB` RAM tier and the `SGLANG_HICACHE_NIXL_MAX_CACHE_GB`
   disk budget. The cache is content-addressed on the exact source bytes and the
   full processor configuration, so a different backend or preprocessing device

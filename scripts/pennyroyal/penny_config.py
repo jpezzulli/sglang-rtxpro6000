@@ -1647,7 +1647,7 @@ def mm_cache_pair_problems(pair: Mapping[str, str]) -> list[tuple[str, str]]:
             problems.append((name, f"{name} {reason}, got {quote_command_arg(value)}"))
     directory, budget = (pair.get(name, "") for name in MM_CACHE_KEYS)
     if directory.startswith("/") and (
-        budget == "" or (WHOLE_MIB_RE.match(budget) and int(budget) <= 0)
+        budget == "" or (WHOLE_MIB_RE.match(budget) and not budget.strip("0"))
     ):
         problems.append(
             (
@@ -1668,10 +1668,19 @@ def _startup_cache_assignment(text: str, name: str) -> tuple[bool, Optional[str]
     are read. The file is never sourced or evaluated, so a computed value is reported
     as unverifiable rather than guessed at.
     """
-    match = re.search(rf"^{re.escape(name)}=(.*)$", text, re.MULTILINE)
-    if match is None:
+    matches = re.findall(
+        rf"^[ \t]*(?:export[ \t]+)?{re.escape(name)}=(.*)$", text, re.MULTILINE
+    )
+    if not matches:
         return False, None
-    raw = match.group(1).strip()
+    if len(matches) != 1:
+        return True, None
+    raw = matches[0]
+    # Whitespace before an unquoted value starts a command in Bash; it is not
+    # harmless padding around a saved-file value.
+    if raw and raw[0].isspace() and raw.strip():
+        return True, None
+    raw = raw.rstrip()
     try:
         words = shlex.split(raw)
     except ValueError:
@@ -1711,25 +1720,30 @@ def _startup_file_cache_issue(
     except OSError:
         return None
     stated: dict[str, str] = {}
-    unverifiable = False
+    unknown: set[str] = set()
     for name in MM_CACHE_KEYS:
         present, value = _startup_cache_assignment(text, name)
         stated[name] = value if present and value is not None else ""
-        unverifiable = unverifiable or (present and value is None)
-    if unverifiable:
+        if present and value is None:
+            unknown.add(name)
+    problems = [
+        (key, message)
+        for key, message in mm_cache_pair_problems(stated)
+        if key not in unknown
+    ]
+    if problems:
+        return Issue(
+            "error",
+            f"{startup}: " + "; ".join(message for _, message in problems),
+            key=problems[0][0],
+        )
+    if unknown:
         return Issue(
             "warn",
             f"{startup} computes the image preprocessing cache settings, so this "
             "check cannot say what that launch shares; save the setup again to "
             "write plain values into the file",
             key=MM_CACHE_DIR_KEY,
-        )
-    problems = mm_cache_pair_problems(stated)
-    if problems:
-        return Issue(
-            "error",
-            f"{startup}: " + "; ".join(message for _, message in problems),
-            key=problems[0][0],
         )
     if stated == {name: pair.get(name, "") for name in MM_CACHE_KEYS}:
         return None
@@ -2227,6 +2241,18 @@ def _render_startup(template: Path, plan: Plan, disk_tier: str) -> str:
         MTP_POLICY_KEY: plan.env.get(MTP_POLICY_KEY, ""),
     }
     for lhs, value in choices.items():
+        if lhs in MM_CACHE_KEYS:
+            # Clearing a value must replace template edits too. Missing or repeated
+            # anchors cannot produce a launcher that represents the saved pair.
+            assignments = re.findall(
+                rf"^[ \t]*(?:export[ \t]+)?{re.escape(lhs)}=", text, re.MULTILINE
+            )
+            if len(assignments) != 1 or not _has_setting(text, lhs):
+                raise ConfigError(f"{template}: expected one {lhs}= settings line")
+            text = _set_setting(
+                text, template.name, lhs, quote_command_arg(value) if value else ""
+            )
+            continue
         # A knob this profile's recipe pins is not the configurator's to write:
         # the shipped file stays the truth for it, so a generated script can
         # never claim a setting the launch line ignores (see the plan check in
