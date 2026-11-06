@@ -26,5 +26,5 @@ Zhangheng ([#48421](https://github.com/sgl-project/sglang/pull/48421)); and to
 [lihong](https://github.com/leehom0123) for the shared image cache in
 [PR #155](https://github.com/jpezzulli/sglang-rtxpro6000/pull/155).
 
-The image and publication are pending, so [pennyroyal-v3.1.5](RELEASE_NOTES_3.1.5.md)
-remains the published download.
+The container is built and verified. Publication is pending;
+[pennyroyal-v3.1.5](RELEASE_NOTES_3.1.5.md) remains the published download.

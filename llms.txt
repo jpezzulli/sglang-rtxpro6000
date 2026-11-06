@@ -215,7 +215,7 @@ actual answer grading on the qualified sources; extended or repetitive
 reasoning is not penalized and `ask_user` is a valid tool choice. Recorded
 deviations are listed with the measurements.
 
-- [3.1.6 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.6.md): per-request QSA prefill scoring, the shared image preprocessing cache as a launcher setting, the hybrid prefetch guard; publication pending, so no image, tag or digest is claimed.
+- [3.1.6 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.6.md): per-request QSA prefill scoring, the shared image preprocessing cache as a launcher setting, the hybrid prefetch guard; candidate container built and verified; version-tag promotion and publication pending.
 - [3.1.6 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.6.json): candidate source identity and tree, contributor and upstream lineage, measured evidence with its conditions, and the empty publication fields.
 - [3.1.5 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.5.md): chunked hybrid-Mamba checkpoint copy; published 2026-11-03 as pennyroyal-v3.1.5 with the v3.1.5 image tag and public release, evidence separated by hardware.
 - [3.1.5 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.5.json): merged PR identities, build source and digests, upstream lineage, per-hardware evidence, published status and the promotion record.

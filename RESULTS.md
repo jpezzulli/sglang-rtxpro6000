@@ -31,7 +31,8 @@ Means are elapsed-weighted over complete native decode intervals and peaks are t
 highest eligible native rate from the same windows, with reasoning included and C4/C6
 figures given as full-batch aggregates, as defined in
 [How we measure current Penny performance](#how-we-measure-current-penny-performance).
-Publication is pending: these are candidate-source measurements, not an image claim.
+These are dated native measurements on the candidate source. Container verification
+is recorded in [release-3.1.6.json](release-3.1.6.json).
 
 ### Decode rates
 
