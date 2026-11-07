@@ -214,6 +214,25 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         # Alias for better readability
         self.draft_runner = self.draft_worker.model_runner
         self._init_dsa_index_share_state()
+        # Bind the target embed/lm_head into the draft *before* the scheduler
+        # profiles the KV pool (port of upstream sgl-project/sglang#42472).
+        # MTP draft classes allocate their own embedding + lm_head shell which
+        # set_embed_and_head() frees via del + empty_cache once rebound to the
+        # target tensors. In stock ordering that rebinding happens at the tail
+        # of alloc_memory_pool(), i.e. AFTER init_target_memory_pool() has
+        # sized the pool against the shell-inflated footprint, so the KV pool
+        # collapses even though the memory is reclaimable.
+        # With --speculative-token-map this bind is not free to repeat: the
+        # hot-vocab selection materializes a NEW head tensor (a gather, not
+        # an alias) and the previously bound head stays referenced until the
+        # swap lands, so a second bind of unchanged inputs double-allocates
+        # the selected head -- after the KV pools were already sized. Both
+        # methods are therefore guarded to no-op on identical inputs (see
+        # _hot_token_map_key / _lm_head_bind_sig) and alloc_memory_pool()
+        # does not repeat them; a weight reload changes the target tensors
+        # (identity or in-place version), so intentional rebinding passes.
+        self.init_token_map()
+        self.init_lm_head()
         # Eager draft-extend seed buffer (graph paths use their own static ones).
         self.dsa_extend_topk_buf: Optional[torch.Tensor] = None
         self.draft_tp_context = (
@@ -239,8 +258,9 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             req_to_token_pool=req_to_token_pool,
             token_to_kv_pool_allocator=token_to_kv_pool_allocator,
         )
-        self.init_token_map()
-        self.init_lm_head()
+        # The bind pair is NOT repeated here: it happens once in __init__
+        # (before KV pool profiling); re-running it would re-allocate the
+        # hot selection head after the pools were sized (Pennyroyal #159).
 
         if get_spec().speculative_use_rejection_sampling:
             target_vocab_size = self.target_worker.model_config.vocab_size
@@ -306,17 +326,26 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         )
 
     def init_token_map(self):
-        # Load hot token ids
+        # Load hot token ids. Cached by map identity: re-running the same
+        # load would hand init_lm_head a fresh tensor (new identity) and
+        # defeat its bind guard, re-allocating the selected head. Changing
+        # --speculative-token-map (or an explicit reload through the path)
+        # misses the cache and reloads.
+        map_path = get_spec().speculative_token_map
+        cache_key = "eagle3" if self.speculative_algorithm.is_eagle3() else map_path
+        if hasattr(self, "_hot_token_map_key") and self._hot_token_map_key == cache_key:
+            return
         if self.speculative_algorithm.is_eagle3():
-            if get_spec().speculative_token_map is not None:
+            if map_path is not None:
                 logger.warning(
                     "Speculative token map specified, but EAGLE3 models already have this. Ignoring the specified token map."
                 )
             self.hot_token_id = None
-        elif get_spec().speculative_token_map is not None:
-            self.hot_token_id = load_token_map(get_spec().speculative_token_map)
+        elif map_path is not None:
+            self.hot_token_id = load_token_map(map_path)
         else:
             self.hot_token_id = None
+        self._hot_token_map_key = cache_key
 
     def init_lm_head(self):
         from sglang.srt.lora.layers import unwrap_lora_layer
@@ -325,6 +354,22 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         target_lm_head = unwrap_lora_layer(
             getattr(self.target_worker.model_runner.model, "lm_head", None)
         )
+
+        # Bind guard: with a hot-token map the selection below allocates a
+        # new head while the old selection is still referenced, so a re-bind
+        # of unchanged inputs is a double allocation, not a no-op. Same map
+        # (or none) and same target tensors -- by identity and in-place
+        # version -- means already bound: skip. A weight reload mutates or
+        # replaces them, so intentional rebinding passes this gate.
+        _bind_sig = (
+            getattr(self, "_hot_token_map_key", None),
+            head.data_ptr(),
+            head._version,
+            embed.data_ptr(),
+            embed._version,
+        )
+        if getattr(self, "_lm_head_bind_sig", None) == _bind_sig:
+            return
 
         def maybe_share_target_lm_head():
             if (
@@ -390,6 +435,14 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             # Share the embedding and lm_head
             self.draft_runner.model.set_embed_and_head(embed, head)
             maybe_share_target_lm_head()
+
+        self._lm_head_bind_sig = (
+            getattr(self, "_hot_token_map_key", None),
+            _bind_sig[1],
+            _bind_sig[2],
+            _bind_sig[3],
+            _bind_sig[4],
+        )
 
     def init_attention_backend(self):
         # Create multi-step attn backends and cuda graph runners
