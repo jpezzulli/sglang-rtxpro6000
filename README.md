@@ -1,7 +1,7 @@
 # GitHub traffic archive
 
 Repository: `jpezzulli/sglang-rtxpro6000`. Launch: **2026-08-24**.
-Collected: **2026-11-07T05:57:29Z**. Coverage through **2026-11-06** (UTC).
+Collected: **2026-11-08T05:59:37Z**. Coverage through **2026-11-06** (UTC).
 
 Counts are exact sums of GitHub-reported daily counts for the covered dates; the newest dates may be partial and GitHub can revise the overlapping window.
 
@@ -15,13 +15,13 @@ Counts are exact sums of GitHub-reported daily counts for the covered dates; the
 | Current rolling-window clones | 26,321 |
 | Current rolling-window unique cloners | 776 |
 | clones: `sum_of_daily_uniques` | 5,292 |
-| Current stars | 194 |
+| Current stars | 195 |
 | Current forks | 27 |
 
 **No exact lifetime unique-person count is available.** Daily unique values and rolling-window unique values are GitHub metrics. Summing daily uniques does not deduplicate people across days or windows.
 
 Missing dates through latest exposed date: none.
-Not yet exposed: 2026-11-07.
+Not yet exposed: 2026-11-07, 2026-11-08.
 
 ## Daily history
 
@@ -133,7 +133,7 @@ Not yet exposed: 2026-11-07.
 | /jpezzulli/sglang-rtxpro6000/blob/pennyroyal-main-sm120-final/RESULTS.md | 55 | 32 |
 | /jpezzulli/sglang-rtxpro6000/actions | 52 | 4 |
 
-[Latest full snapshot](snapshots/2026-11-07/2026-11-07T055729Z-42344870325-1.json) · [Daily JSON](daily.json) · [Repository stars and forks](repository-metrics.json) · [GHCR package downloads](PACKAGE-DOWNLOADS.md) · [Hugging Face model downloads](HUGGINGFACE-DOWNLOADS.md) · [Immutable first-run raw responses](raw/first-run/)
+[Latest full snapshot](snapshots/2026-11-08/2026-11-08T055937Z-42452883564-1.json) · [Daily JSON](daily.json) · [Repository stars and forks](repository-metrics.json) · [GHCR package downloads](PACKAGE-DOWNLOADS.md) · [Hugging Face model downloads](HUGGINGFACE-DOWNLOADS.md) · [Immutable first-run raw responses](raw/first-run/)
 
 Snapshots retain the aggregate totals, daily arrays, referrers and popular paths as reported together in each collection. They overlap and must not be added together.
 
