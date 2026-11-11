@@ -1,7 +1,7 @@
 # GitHub traffic archive
 
 Repository: `jpezzulli/sglang-rtxpro6000`. Launch: **2026-08-24**.
-Collected: **2026-11-10T07:17:07Z**. Coverage through **2026-11-09** (UTC).
+Collected: **2026-11-11T06:18:31Z**. Coverage through **2026-11-09** (UTC).
 
 Counts are exact sums of GitHub-reported daily counts for the covered dates; the newest dates may be partial and GitHub can revise the overlapping window.
 
@@ -15,13 +15,13 @@ Counts are exact sums of GitHub-reported daily counts for the covered dates; the
 | Current rolling-window clones | 23,331 |
 | Current rolling-window unique cloners | 756 |
 | clones: `sum_of_daily_uniques` | 5,396 |
-| Current stars | 195 |
+| Current stars | 196 |
 | Current forks | 27 |
 
 **No exact lifetime unique-person count is available.** Daily unique values and rolling-window unique values are GitHub metrics. Summing daily uniques does not deduplicate people across days or windows.
 
 Missing dates through latest exposed date: none.
-Not yet exposed: 2026-11-10.
+Not yet exposed: 2026-11-10, 2026-11-11.
 
 ## Daily history
 
@@ -136,7 +136,7 @@ Not yet exposed: 2026-11-10.
 | /jpezzulli/sglang-rtxpro6000/blob/pennyroyal-main-sm120-final/BUILD.md | 53 | 28 |
 | /jpezzulli/sglang-rtxpro6000/actions | 53 | 6 |
 
-[Latest full snapshot](snapshots/2026-11-10/2026-11-10T071707Z-42774195380-1.json) · [Daily JSON](daily.json) · [Repository stars and forks](repository-metrics.json) · [GHCR package downloads](PACKAGE-DOWNLOADS.md) · [Hugging Face model downloads](HUGGINGFACE-DOWNLOADS.md) · [Immutable first-run raw responses](raw/first-run/)
+[Latest full snapshot](snapshots/2026-11-11/2026-11-11T061831Z-42971501256-1.json) · [Daily JSON](daily.json) · [Repository stars and forks](repository-metrics.json) · [GHCR package downloads](PACKAGE-DOWNLOADS.md) · [Hugging Face model downloads](HUGGINGFACE-DOWNLOADS.md) · [Immutable first-run raw responses](raw/first-run/)
 
 Snapshots retain the aggregate totals, daily arrays, referrers and popular paths as reported together in each collection. They overlap and must not be added together.
 
