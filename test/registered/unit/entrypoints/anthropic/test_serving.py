@@ -958,6 +958,85 @@ class TestAnthropicServing(unittest.TestCase):
         self.assertEqual(serving.openai_serving_chat.apply_reasoning_calls, [True])
         self.assertTrue(any("omitted" in r for r in log.output))
 
+    def test_request_thinking_display_updates_is_accepted_and_warns(self):
+        """Claude Code sends ``display='updates'`` (upstream sgl-project/sglang#45129,
+        by JustinTong0323). It parses on both reasoning variants, reasoning stays
+        on, and the same compatibility warning as ``omitted`` names the request."""
+        import logging
+
+        for thinking in (
+            {"type": "adaptive", "display": "updates"},
+            {"type": "enabled", "display": "updates"},
+        ):
+            with self.subTest(thinking=thinking):
+                serving = self._serving()
+                request = self._anthropic_request(thinking=thinking, stream=False)
+                with self.assertLogs(
+                    "sglang.srt.entrypoints.anthropic.serving", level=logging.WARNING
+                ) as log:
+                    serving._convert_to_chat_completion_request(request)
+                self.assertEqual(
+                    serving.openai_serving_chat.apply_reasoning_calls, [True]
+                )
+                self.assertTrue(
+                    any("updates" in r and "omitted" not in r for r in log.output),
+                    f"expected display='updates' warning: {log.output}",
+                )
+
+    def test_request_thinking_display_updates_with_budget_warns_about_both(self):
+        """``enabled`` + supplied budget + ``display='updates'`` keeps the
+        unenforced-budget warning and adds the display warning."""
+        import logging
+
+        serving = self._serving()
+        request = self._anthropic_request(
+            thinking={"type": "enabled", "budget_tokens": 2048, "display": "updates"},
+            stream=False,
+        )
+        with self.assertLogs(
+            "sglang.srt.entrypoints.anthropic.serving", level=logging.WARNING
+        ) as log:
+            serving._convert_to_chat_completion_request(request)
+        self.assertEqual(serving.openai_serving_chat.apply_reasoning_calls, [True])
+        self.assertTrue(
+            any("budget_tokens=2048" in r and "not enforced" in r for r in log.output)
+        )
+        self.assertTrue(any("updates" in r for r in log.output))
+
+    def test_request_thinking_display_summarized_is_accepted_without_warning(self):
+        """``display='summarized'`` (the API default) stays warning-free."""
+        import logging
+
+        serving = self._serving()
+        request = self._anthropic_request(
+            thinking={"type": "adaptive", "display": "summarized"}, stream=False
+        )
+        with self.assertNoLogs(
+            "sglang.srt.entrypoints.anthropic.serving", level=logging.WARNING
+        ):
+            serving._convert_to_chat_completion_request(request)
+        self.assertEqual(serving.openai_serving_chat.apply_reasoning_calls, [True])
+
+    def test_request_thinking_disabled_with_updates_display_is_rejected(self):
+        """``disabled`` still rejects any display, including the new ``updates``."""
+        from pydantic import ValidationError
+
+        with self.assertRaises(ValidationError) as ctx:
+            self._anthropic_request(
+                thinking={"type": "disabled", "display": "updates"}, stream=False
+            )
+        self.assertIn("display", str(ctx.exception))
+
+    def test_request_thinking_unknown_display_is_rejected(self):
+        """The Literal stays strict: an undocumented display value is a 400."""
+        from pydantic import ValidationError
+
+        with self.assertRaises(ValidationError) as ctx:
+            self._anthropic_request(
+                thinking={"type": "adaptive", "display": "full"}, stream=False
+            )
+        self.assertIn("display", str(ctx.exception))
+
     def test_request_output_config_effort_maps_to_reasoning_effort(self):
         """``output_config.effort`` rows map onto ``reasoning_effort``."""
         for anthropic_effort, openai_effort in [
