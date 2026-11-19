@@ -2,10 +2,10 @@
   "schema": "release-notes/3.1.7",
   "version": "3.1.7",
   "status": {
-    "is_draft": false,
+    "is_draft": true,
     "publication_approved": false,
     "published": false,
-    "container": "Pending. No image was built, approved, published or verified for 3.1.7, and no source tag is cut yet, so the published download pair stays pennyroyal-v3.1.6 with ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6. The versioned defaults in these launch files name an image that does not exist until publication; pass --image, or save a PENNYROYAL_IMAGE pin, to start the published release with them."
+    "container": "Candidate. Versioned image promotion and publication pending."
   },
   "source": {
     "candidate_head": "112870adb0c3505078c1f4b31aff4d1b01fb6b56",
@@ -14,7 +14,7 @@
     "candidate_base": "202f266be2d46453e098792fa39057e859fb8095",
     "candidate_note": "The accepted runtime candidate: two functional commits above the published 3.1.6 source, carrying the Anthropic thinking.display=\"updates\" acceptance and the Flash-Next multi-GPU expandable-segments default, plus the draft public notes. The release preparation on top of it moves version assets, image defaults and documentation only; no runtime code changes here.",
     "image_source": null,
-    "image_source_note": "Cut at publication: the reviewed branch head this release is built from, after its PRs are merged. No build source is claimed before it exists.",
+    "image_source_note": "The build workflow records the exact candidate SHA. The verified digest and source will be recorded after image verification.",
     "release_tag": "pennyroyal-v3.1.7",
     "release_tag_commit": null,
     "merged_prs": [],
@@ -22,16 +22,22 @@
       {
         "commit": "8a7cb0be8060eb08501a2b2115c34aa5cc401e3d",
         "issue": 171,
-        "state": "staged on the local candidate branch; pull request not yet submitted",
+        "state": "open",
         "fixes": "Anthropic /v1/messages accepts thinking.display=\"updates\" on adaptive and enabled thinking",
-        "note": "Author Pennyroyal, co-author JustinTong0323, whose upstream fix is the source; authorship is preserved in the commit."
+        "note": "Author Pennyroyal, co-author JustinTong0323, whose upstream fix is the source; authorship is preserved in the commit.",
+        "pr": 172,
+        "head": "c65f596244589007b7ec6087af4bf8d4215f180f",
+        "check_run": 44581255022
       },
       {
         "commit": "d3d2bd613ed4c10b90f193a1f4b348ae9c7e0582",
         "issue": 161,
-        "state": "staged on the local candidate branch; pull request not yet submitted",
+        "state": "open",
         "fixes": "Flash-Next launchers default CUDA expandable segments off above TP1",
-        "note": "Author Pennyroyal, responding to the TP2 field report in issue #161."
+        "note": "Author Pennyroyal, responding to the TP2 field report in issue #161.",
+        "pr": 173,
+        "head": "8cc86e7957ae82f9438aa0ca681056e06d261747",
+        "check_run": 44581257762
       }
     ],
     "upstream_ports": [
@@ -49,7 +55,7 @@
     ]
   },
   "container": {
-    "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.7 (prepared; not built)",
+    "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.7",
     "candidate_image": null,
     "digest": null,
     "build_run": null,
@@ -59,18 +65,22 @@
   "changes": [
     {
       "commit": "8a7cb0be8060eb08501a2b2115c34aa5cc401e3d",
-      "pr": null,
-      "issues": [171],
-      "summary": "Claude Code opens every session with thinking {\"type\":\"adaptive\",\"display\":\"updates\"}; the display literal only knew summarized and omitted, so that first request returned HTTP 400 and the SDK retried without the field. updates is accepted wherever a display was already allowed, and the compatibility warning names the requested display. The backend has no per-step reasoning patch or mid-stream suppressor, so reasoning text is still emitted. Every existing rule is kept: enabled with an absent or null budget, strict disabled (a display on disabled is still rejected), a supplied budget still checked against the 1024 floor, reasoning-effort mapping and streaming untouched, and an undocumented display value still a 400.",
+      "pr": 172,
+      "issues": [
+        171
+      ],
+      "summary": "Claude Code can send thinking.display=\"updates\" with adaptive or enabled thinking on /v1/messages. The server accepts the request and streams ordinary reasoning.",
       "profiles": [
         "Both profiles on the Anthropic /v1/messages route"
       ]
     },
     {
       "commit": "d3d2bd613ed4c10b90f193a1f4b348ae9c7e0582",
-      "pr": null,
-      "issues": [161],
-      "summary": "Every Flash-Next launch path exported PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True unconditionally. That is the qualified TP1 default, but the community TP2 report attributes its CUDA-graph capture failure to the legacy IPC registration path, which cannot export expandable-segments memory. The three native recipes and the three mounted container startup files (so the built-in container profiles and Compose as well) now keep the byte-identical TP1 export and default to expandable_segments:False at TP_SIZE above 1, where a value the launch process already carries outranks the default. Launcher behavior only; the pinned single-GPU 27B recipes are untouched.",
+      "pr": 173,
+      "issues": [
+        161
+      ],
+      "summary": "Multi-GPU Flash-Next launchers default CUDA expandable segments off. An explicit allocator setting reaching the multi-GPU startup process takes precedence.",
       "profiles": [
         "Flash-Next native MTP, FR-Spec and DFlash2 launches at TP2 and above"
       ]
@@ -91,8 +101,8 @@
     "tp2": "No TP2 hardware test was run. Maintainer TP2 qualification stays open and the release notes ask anyone with two RTX PRO 6000s to report a TP_SIZE=2 start, graph capture and served request in issue #161.",
     "performance": "No new measurements are claimed for this release; the dated rows in RESULTS.md stay as recorded and are not restated here.",
     "dependencies": "No baseline or pin change: docker/pennyroyal/native-baseline.json stays as published for 3.1.6, with the same 231 recorded distributions, and no dependency upgrade is included. The upstream SGLang package version is independent of the Penny Royal release version and is unchanged here.",
-    "public_main": "Not integrated on main yet: the candidate branch is staged locally for submission, so no merged PR identity or check run is recorded.",
-    "release_setup": "Checked on CPU for this preparation commit: the packaging, setup and recipe suite passes 327 tests (the default-image, release-asset and generated-run.sh agreement gates included); the CPU container-launch and startup-identity suite passes 41 tests; the Anthropic serving suite passes 87 tests with 15 subtests. The NVMe PLE preparation file cannot run in this CPU-only check environment (no sglang_ssd_stream module), and that is a pre-existing environment limit, not a result."
+    "public_main": "Functional PRs #172 and #173 passed Contributor checks. Candidate image verification is pending.",
+    "release_setup": "Penny ran 327 setup and recipe tests, 41 container-launch and startup identity checks, and 87 Anthropic tests with 15 subtests. On thegrid the candidate CPU PLE preparation suite passed 21 tests and 9 subtests with the unchanged optional plugin from the published 3.1.6 image on its import path."
   },
   "contributors": [
     {
@@ -109,6 +119,11 @@
       "name": "Penny Royal",
       "email": "Pennyroyal@agentmail.to",
       "contribution": "The upstream backport and the launcher change, release assets and release documentation"
+    },
+    {
+      "name": "thushan",
+      "url": "https://github.com/thushan",
+      "contribution": "Reported the Claude Code compatibility issue and supplied the reproduction in #171."
     }
   ]
 }

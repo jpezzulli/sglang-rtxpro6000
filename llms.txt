@@ -23,15 +23,10 @@ The 27B FP8 DFlash2 profile
 is unchanged at fixed block 8. Native width routing ships as the bundled
 tiered policy (block 8 at one running request, block 4 at two or more);
 since 3.1.2 the policy is selectable with `PENNY_MTP_POLICY` and `tiered`
-remains the default. The latest prepared release is Penny Royal 3.1.7
-(2026-11-19), pending: it accepts Anthropic thinking.display="updates" on
-adaptive and enabled requests at /v1/messages while still streaming ordinary
-reasoning (issue #171, a narrow backport of upstream sglang PR 45129 by
-JustinTong0323), and it defaults Flash-Next CUDA expandable segments off above
-TP_SIZE 1 so a stock two-GPU launch no longer ships the setting the issue #161
-field report blames for its graph-capture failure (maintainer TP2 hardware
-qualification is still open; the 27B recipes are untouched). 3.1.7 has no image,
-tag or digest yet, so the published download pair is still Penny Royal 3.1.6
+remains the default. The 3.1.7 candidate accepts thinking.display="updates" on
+Anthropic requests and defaults CUDA expandable segments off for multi-GPU
+Flash-Next. Dual RTX PRO 6000 confirmation is pending in issue #161.
+The current published release is Penny Royal 3.1.6
 (2026-11-06), source tag pennyroyal-v3.1.6 and image
 ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6, promoted without rebuilding at
 index digest sha256:facb0cb1b92510f78a3e841fe9551531be4dd8c9c1cbb79144b84400ed965e35.

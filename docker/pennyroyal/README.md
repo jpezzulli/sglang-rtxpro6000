@@ -52,13 +52,8 @@ is copied out of the image and no image rebuild is needed.
 
 ## Get the launch files
 
-Use matching published source and image tags. Download the small launch-file
-set; a full source checkout is optional. `RELEASE_REF` names the published tag
-(see [release-3.1.7.json](../../release-3.1.7.json) for the current prepared identity, and
-[release-3.1.6.json](../../release-3.1.6.json) for the published pair). The
-`pennyroyal-v3.1.6` source and `v3.1.6` image below are still the published pair, because
-3.1.7 has no tag or image yet; keep
-the two tags together, since startup files and image belong to the same release.
+Download the launch files for the published image. Use the same release for
+`RELEASE_REF` and the image tag. [3.1.6 release record](../../release-3.1.6.json)
 
 ```bash
 RELEASE_REF='pennyroyal-v3.1.6'
