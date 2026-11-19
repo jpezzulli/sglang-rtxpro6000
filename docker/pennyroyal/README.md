@@ -52,12 +52,8 @@ is copied out of the image and no image rebuild is needed.
 
 ## Get the launch files
 
-Use matching published source and image tags. Download the small launch-file
-set; a full source checkout is optional. `RELEASE_REF` names the published tag
-(see [release-3.1.6.json](../../release-3.1.6.json) for the current identity, and
-[release-3.1.5.json](../../release-3.1.5.json) for the previous release). The
-`pennyroyal-v3.1.6` source and `v3.1.6` image below are the published pair; keep
-the two tags together, since startup files and image belong to the same release.
+Download the launch files for the published image. Use the same release for
+`RELEASE_REF` and the image tag. [3.1.6 release record](../../release-3.1.6.json)
 
 ```bash
 RELEASE_REF='pennyroyal-v3.1.6'
@@ -169,7 +165,7 @@ for the optional DFlash2 profile, which also needs its draft checkpoint:
 ```bash
 IMAGE='ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6'   # the published image for the launch files above; keep it on the same release as RELEASE_REF
 # Passing --image (or saving PENNYROYAL_IMAGE) is how you stay on a published tag: the
-# shipped default names the newest prepared release, and 3.1.6 has no image yet.
+# shipped default names the newest prepared release, and 3.1.7 has no image yet.
 ./run.sh --image "$IMAGE"
 ```
 

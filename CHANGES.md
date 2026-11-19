@@ -1,5 +1,12 @@
 # Penny Royal release history
 
+## 3.1.7 — Claude Code compatibility and multi-GPU Flash-Next startup
+
+- Claude Code requests with `thinking.display: "updates"` now succeed for adaptive and enabled thinking. Penny streams ordinary reasoning. [PR #172](https://github.com/jpezzulli/sglang-rtxpro6000/pull/172)
+- Flash-Next launchers default CUDA expandable segments off when using multiple GPUs. A dual RTX PRO 6000 field test is pending. [PR #173](https://github.com/jpezzulli/sglang-rtxpro6000/pull/173)
+
+[Release notes and contributor credits](RELEASE_NOTES_3.1.7.md) · [Release record](release-3.1.7.json)
+
 ## 3.1.6 — Long cached prefixes score per request, and the shared image cache becomes a setting
 
 **Published 2026-11-06.** Source tag `pennyroyal-v3.1.6` accompanies
