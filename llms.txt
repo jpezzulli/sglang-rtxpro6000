@@ -23,7 +23,15 @@ The 27B FP8 DFlash2 profile
 is unchanged at fixed block 8. Native width routing ships as the bundled
 tiered policy (block 8 at one running request, block 4 at two or more);
 since 3.1.2 the policy is selectable with `PENNY_MTP_POLICY` and `tiered`
-remains the default. The current published release is Penny Royal 3.1.6
+remains the default. The latest prepared release is Penny Royal 3.1.7
+(2026-11-19), pending: it accepts Anthropic thinking.display="updates" on
+adaptive and enabled requests at /v1/messages while still streaming ordinary
+reasoning (issue #171, a narrow backport of upstream sglang PR 45129 by
+JustinTong0323), and it defaults Flash-Next CUDA expandable segments off above
+TP_SIZE 1 so a stock two-GPU launch no longer ships the setting the issue #161
+field report blames for its graph-capture failure (maintainer TP2 hardware
+qualification is still open; the 27B recipes are untouched). 3.1.7 has no image,
+tag or digest yet, so the published download pair is still Penny Royal 3.1.6
 (2026-11-06), source tag pennyroyal-v3.1.6 and image
 ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6, promoted without rebuilding at
 index digest sha256:facb0cb1b92510f78a3e841fe9551531be4dd8c9c1cbb79144b84400ed965e35.
@@ -36,7 +44,9 @@ on November 6; RESULTS.md retains the configuration and both profiles' results.
 Jim Smith identified and benchmarked the QSA work and shared his port;
 upstream authors are Shunkangz (PR45791) and Zhangheng (PR48421), and the shared
 image cache came through lihong's original PR155 with Penny corrections.
-RELEASE_NOTES_3.1.6.md and release-3.1.6.json carry the release and image records.
+RELEASE_NOTES_3.1.7.md and release-3.1.7.json carry the prepared 3.1.7 record with
+its publication fields empty; RELEASE_NOTES_3.1.6.md and release-3.1.6.json carry the
+published release and image records.
 The preceding 3.1.5 release introduced the Mamba temporal-state checkpoint copy previously gathered every
 selected source slot into one temporary tensor before writing the destination
 slots, so one copy could spike transient GPU memory; the gather is now chunked
@@ -213,6 +223,8 @@ actual answer grading on the qualified sources; extended or repetitive
 reasoning is not penalized and `ask_user` is a valid tool choice. Recorded
 deviations are listed with the measurements.
 
+- [3.1.7 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.7.md): Anthropic thinking.display="updates" acceptance and the Flash-Next multi-GPU expandable-segments default; prepared 2026-11-19, publication pending, so pennyroyal-v3.1.6 with v3.1.6 stays the download pair and TP2 validation is asked for in issue #161.
+- [3.1.7 machine-readable release record](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.7.json): candidate source identity and tree, the two fixes with their upstream lineage, the CPU and TP1 serving evidence with its conditions, and the empty publication fields.
 - [3.1.6 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.6.md): per-request QSA prefill scoring, the shared image preprocessing cache as a launcher setting, the hybrid prefetch guard; published 2026-11-06 with the verified v3.1.6 image promoted without rebuilding.
 - [3.1.6 machine-readable release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/release-3.1.6.json): candidate source identity and tree, contributor and upstream lineage, measured evidence with its conditions, and the empty publication fields.
 - [3.1.5 release notes](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/RELEASE_NOTES_3.1.5.md): chunked hybrid-Mamba checkpoint copy; published 2026-11-03 as pennyroyal-v3.1.5 with the v3.1.5 image tag and public release, evidence separated by hardware.

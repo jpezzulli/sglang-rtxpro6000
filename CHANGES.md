@@ -1,5 +1,48 @@
 # Penny Royal release history
 
+## 3.1.7 — Claude Code's `updates` display is accepted, and multi-GPU Flash-Next stops asking for expandable segments
+
+**Prepared 2026-11-19; publication pending.** The runtime candidate is
+`112870adb0c3505078c1f4b31aff4d1b01fb6b56` (tree
+`ea055e984cec9d0958c62dc4b71ba98fede38d37`) on
+`work/release-3.1.7-source-20261119`, two commits above the published 3.1.6
+source `202f266be2d46453e098792fa39057e859fb8095`. No image, tag, digest or
+build run exists yet, so the published download pair stays
+`pennyroyal-v3.1.6` with `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6`;
+[release-3.1.7.json](release-3.1.7.json) carries the pending record and
+[the notes](RELEASE_NOTES_3.1.7.md) the public text.
+
+- **`thinking.display: "updates"` parses** (commit
+  `8a7cb0be8060eb08501a2b2115c34aa5cc401e3d`, reported in issue #171; a narrow
+  backport of upstream sgl-project/sglang PR 45129 by
+  [JustinTong0323](https://github.com/JustinTong0323), authorship preserved in
+  the commit): Claude Code starts every session with
+  `{"type":"adaptive","display":"updates"}`, and the `display` literal only knew
+  `summarized` and `omitted`, so that first request returned HTTP 400 and the SDK
+  retried without the field. `updates` is now accepted wherever a display was
+  already allowed, and the compatibility warning names the requested value. The
+  local backend has no per-step reasoning patch knob, so **ordinary reasoning
+  still streams to the client**; every other rule is as before — `disabled` with
+  any display is still a 400, an undocumented display value is still a 400, and
+  an `enabled` budget stays unenforced above the 1024 floor.
+- **Expandable segments default off above TP1 on Flash-Next** (commit
+  `d3d2bd613ed4c10b90f193a1f4b348ae9c7e0582`, reported in issue #161): every
+  Flash-Next launch path used to export `expandable_segments:True`
+  unconditionally, which is the qualified TP1 default but the configuration the
+  community TP2 report blames for its CUDA-graph capture failure, because the
+  legacy IPC registration path cannot export expandable-segments memory. All six
+  Flash-Next entry points — three native recipes and three mounted container
+  startup files, and so Compose and the built-in container profiles too — now keep
+  the byte-identical TP1 export and default to `expandable_segments:False` at
+  `TP_SIZE` 2 or above, with a value the launch process already carries outranking
+  the default. Launcher behavior only: **maintainer TP2 qualification is still
+  open**, and the pinned single-GPU 27B recipes are untouched.
+- Sampling, the public `tiered` width policy, native-MTP routing and automatic KV
+  sizing are untouched; 27B DFlash2 stays qualified and Flash-Next DFlash2 stays
+  alpha, with the draft-cache host-RAM guidance unchanged. PR #159 and the packed
+  PLE prefill remain deferred. No new measurements are claimed here — the dated
+  evidence in [RESULTS.md](RESULTS.md) stands as recorded.
+
 ## 3.1.6 — Long cached prefixes score per request, and the shared image cache becomes a setting
 
 **Published 2026-11-06.** Source tag `pennyroyal-v3.1.6` accompanies

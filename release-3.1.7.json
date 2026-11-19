@@ -1,0 +1,114 @@
+{
+  "schema": "release-notes/3.1.7",
+  "version": "3.1.7",
+  "status": {
+    "is_draft": false,
+    "publication_approved": false,
+    "published": false,
+    "container": "Pending. No image was built, approved, published or verified for 3.1.7, and no source tag is cut yet, so the published download pair stays pennyroyal-v3.1.6 with ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6. The versioned defaults in these launch files name an image that does not exist until publication; pass --image, or save a PENNYROYAL_IMAGE pin, to start the published release with them."
+  },
+  "source": {
+    "candidate_head": "112870adb0c3505078c1f4b31aff4d1b01fb6b56",
+    "candidate_tree": "ea055e984cec9d0958c62dc4b71ba98fede38d37",
+    "candidate_ref": "work/release-3.1.7-source-20261119",
+    "candidate_base": "202f266be2d46453e098792fa39057e859fb8095",
+    "candidate_note": "The accepted runtime candidate: two functional commits above the published 3.1.6 source, carrying the Anthropic thinking.display=\"updates\" acceptance and the Flash-Next multi-GPU expandable-segments default, plus the draft public notes. The release preparation on top of it moves version assets, image defaults and documentation only; no runtime code changes here.",
+    "image_source": null,
+    "image_source_note": "Cut at publication: the reviewed branch head this release is built from, after its PRs are merged. No build source is claimed before it exists.",
+    "release_tag": "pennyroyal-v3.1.7",
+    "release_tag_commit": null,
+    "merged_prs": [],
+    "submissions": [
+      {
+        "commit": "8a7cb0be8060eb08501a2b2115c34aa5cc401e3d",
+        "issue": 171,
+        "state": "staged on the local candidate branch; pull request not yet submitted",
+        "fixes": "Anthropic /v1/messages accepts thinking.display=\"updates\" on adaptive and enabled thinking",
+        "note": "Author Pennyroyal, co-author JustinTong0323, whose upstream fix is the source; authorship is preserved in the commit."
+      },
+      {
+        "commit": "d3d2bd613ed4c10b90f193a1f4b348ae9c7e0582",
+        "issue": 161,
+        "state": "staged on the local candidate branch; pull request not yet submitted",
+        "fixes": "Flash-Next launchers default CUDA expandable segments off above TP1",
+        "note": "Author Pennyroyal, responding to the TP2 field report in issue #161."
+      }
+    ],
+    "upstream_ports": [
+      {
+        "commit": "8a7cb0be8060eb08501a2b2115c34aa5cc401e3d",
+        "issue": 171,
+        "upstream": {
+          "repo": "sgl-project/sglang",
+          "pr": 45129,
+          "url": "https://github.com/sgl-project/sglang/pull/45129",
+          "author": "JustinTong0323"
+        },
+        "summary": "A narrow backport: the display Literal and the compatibility warning. The local backend has no per-step reasoning patch knob, so reasoning emission is unchanged and ordinary reasoning still streams."
+      }
+    ]
+  },
+  "container": {
+    "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.7 (prepared; not built)",
+    "candidate_image": null,
+    "digest": null,
+    "build_run": null,
+    "build_status": "pending",
+    "promotion": null
+  },
+  "changes": [
+    {
+      "commit": "8a7cb0be8060eb08501a2b2115c34aa5cc401e3d",
+      "pr": null,
+      "issues": [171],
+      "summary": "Claude Code opens every session with thinking {\"type\":\"adaptive\",\"display\":\"updates\"}; the display literal only knew summarized and omitted, so that first request returned HTTP 400 and the SDK retried without the field. updates is accepted wherever a display was already allowed, and the compatibility warning names the requested display. The backend has no per-step reasoning patch or mid-stream suppressor, so reasoning text is still emitted. Every existing rule is kept: enabled with an absent or null budget, strict disabled (a display on disabled is still rejected), a supplied budget still checked against the 1024 floor, reasoning-effort mapping and streaming untouched, and an undocumented display value still a 400.",
+      "profiles": [
+        "Both profiles on the Anthropic /v1/messages route"
+      ]
+    },
+    {
+      "commit": "d3d2bd613ed4c10b90f193a1f4b348ae9c7e0582",
+      "pr": null,
+      "issues": [161],
+      "summary": "Every Flash-Next launch path exported PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True unconditionally. That is the qualified TP1 default, but the community TP2 report attributes its CUDA-graph capture failure to the legacy IPC registration path, which cannot export expandable-segments memory. The three native recipes and the three mounted container startup files (so the built-in container profiles and Compose as well) now keep the byte-identical TP1 export and default to expandable_segments:False at TP_SIZE above 1, where a value the launch process already carries outranks the default. Launcher behavior only; the pinned single-GPU 27B recipes are untouched.",
+      "profiles": [
+        "Flash-Next native MTP, FR-Spec and DFlash2 launches at TP2 and above"
+      ]
+    },
+    {
+      "commit": "this release preparation",
+      "pr": null,
+      "summary": "Version assets, container image defaults and release documentation: configs/pennyroyal/pennyroyal.version, penny_config.DEFAULT_IMAGE, compose.yaml, launch/run.sh (default and its help line) and docker's .env.example say 3.1.7, and test_penny_recipes.RELEASED_IMAGE holds them to one release. Public policy is unchanged: tiered stays the width-policy default, 27B DFlash2 stays qualified, Flash-Next DFlash2 stays alpha, and the documented extra host RAM for the draft cache is retained.",
+      "profiles": [
+        "Every profile and both launch routes"
+      ]
+    }
+  ],
+  "validation": {
+    "review": "The two fixes are the accepted runtime scope of this release; the release preparation adds no runtime claim. Codex owns independent review and acceptance of the assets commit.",
+    "cpu": "Candidate acceptance: 122 CPU tests with 15 subtests passed on 112870adb0, covering the display Literal and warning paths, the TP_SIZE-gated allocator export on all six Flash-Next entry points, the alias precedence and the 27B exception.",
+    "serving": "Both native TP1 profiles, Flash-Next with native NEXTN MTP and 27B with DFlash2, returned HTTP 200 for both streaming Anthropic cases, streamed ordinary reasoning, and completed naturally with the NIXL storage tier off.",
+    "tp2": "No TP2 hardware test was run. Maintainer TP2 qualification stays open and the release notes ask anyone with two RTX PRO 6000s to report a TP_SIZE=2 start, graph capture and served request in issue #161.",
+    "performance": "No new measurements are claimed for this release; the dated rows in RESULTS.md stay as recorded and are not restated here.",
+    "dependencies": "No baseline or pin change: docker/pennyroyal/native-baseline.json stays as published for 3.1.6, with the same 231 recorded distributions, and no dependency upgrade is included. The upstream SGLang package version is independent of the Penny Royal release version and is unchanged here.",
+    "public_main": "Not integrated on main yet: the candidate branch is staged locally for submission, so no merged PR identity or check run is recorded.",
+    "release_setup": "Checked on CPU for this preparation commit: the packaging, setup and recipe suite passes 327 tests (the default-image, release-asset and generated-run.sh agreement gates included); the CPU container-launch and startup-identity suite passes 41 tests; the Anthropic serving suite passes 87 tests with 15 subtests. The NVMe PLE preparation file cannot run in this CPU-only check environment (no sglang_ssd_stream module), and that is a pre-existing environment limit, not a result."
+  },
+  "contributors": [
+    {
+      "name": "JustinTong0323",
+      "url": "https://github.com/JustinTong0323",
+      "contribution": "Author of the upstream Anthropic thinking.display=\"updates\" fix (sgl-project/sglang PR 45129), narrowed and backported here with authorship recorded in the commit"
+    },
+    {
+      "name": "paulorsjr",
+      "url": "https://github.com/paulorsjr",
+      "contribution": "Reported the RTX PRO 6000 TP2 graph-capture field report with measurements in issue #161, which the multi-GPU allocator default follows"
+    },
+    {
+      "name": "Penny Royal",
+      "email": "Pennyroyal@agentmail.to",
+      "contribution": "The upstream backport and the launcher change, release assets and release documentation"
+    }
+  ]
+}
