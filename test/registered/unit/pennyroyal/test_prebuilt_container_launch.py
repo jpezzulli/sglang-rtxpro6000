@@ -58,6 +58,8 @@ CONTROLLED = (
     "FLASHINFER_GDN_FP16_ACCUM_MMA",
     "PENNY_MTP_POLICY",
     "TILELANG_CACHE_DIR",
+    "PYTORCH_CUDA_ALLOC_CONF",
+    "PYTORCH_ALLOC_CONF",
     "CUDA_VISIBLE_DEVICES",
     "FAKE_CUDA_DEVICES",
 )
@@ -553,6 +555,8 @@ def image_root(tmp_path: Path) -> tuple[Path, Path, Path]:
         'printf "ple_backend=%s\\n" "${PENNY_PLE_BACKEND:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
         'printf "nccl_p2p_disable=%s\\n" "${NCCL_P2P_DISABLE:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
         'printf "gdn_fp16_accum_mma=%s\\n" "${FLASHINFER_GDN_FP16_ACCUM_MMA:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
+        'printf "alloc_conf=%s\\n" "${PYTORCH_CUDA_ALLOC_CONF:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
+        'printf "alloc_alias=%s\\n" "${PYTORCH_ALLOC_CONF:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
     )
     sglang.chmod(0o755)
     (root / "configs").symlink_to(REPO / "configs")
@@ -1818,6 +1822,103 @@ def test_a_generated_launch_keeps_the_image_cache_pair_it_was_saved(tmp_path):
     argv = server_arguments()
     assert "--mm-preprocess-cache-dir" not in argv, argv
     assert "--mm-preprocess-cache-size-mb" not in argv, argv
+
+
+# ------------------------------------------------------------ TP allocator default
+
+# #161. Every Flash-Next launch path used to export expandable_segments:True
+# unconditionally: the qualified TP1 default, but the community TP2 report
+# blames the legacy IPC CUDA-graph registration on that path, which cannot
+# export expandable-segments memory, and TP2 stays unqualified on our hardware.
+# The assertions below read the environment the recording server binary was
+# exec'd with, so they check what SGLang would actually inherit on every route
+# -- native recipe, built-in profile, and mounted startup file (where TP_SIZE
+# is a settings-block edit, the operator's own mechanism). GPU qualification
+# is not claimed here.
+
+FLASH_NEXT_ROUTES = (
+    ("native", RECIPES / "serve-flash-next.sh", {"through_entrypoint": False}),
+    (
+        "native-frspec",
+        RECIPES / "serve-flash-next-frspec.sh",
+        {"through_entrypoint": False},
+    ),
+    (
+        "native-dflash2",
+        RECIPES / "serve-flash-next-dflash2.sh",
+        {"through_entrypoint": False},
+    ),
+    ("baked-next", None, {"profile": "next"}),
+    ("baked-plain", None, {"profile": "next-plain"}),
+    ("baked-dflash2", None, {"profile": "next-dflash2"}),
+)
+STARTUP_FILES = (
+    "start-flash-next.sh",
+    "start-flash-next-frspec.sh",
+    "start-flash-next-dflash2.sh",
+)
+
+
+def test_tp1_keeps_the_qualified_export_and_tp2_defaults_it_off(tmp_path):
+    for label, startup, route in FLASH_NEXT_ROUTES:
+        _, _, env, _ = launch(tmp_path, startup, env=qualified_env(tmp_path), **route)
+        assert env["alloc_conf"] == "expandable_segments:True", (label, env)
+        _, _, env, _ = launch(
+            tmp_path, startup, env=qualified_env(tmp_path, TP_SIZE="2"), **route
+        )
+        assert env["alloc_conf"] == "expandable_segments:False", (label, env)
+
+    # The mounted startup files take the same switch through the settings line
+    # an operator (or ./configure-penny --container) edits, not the environment.
+    plain = prepared_config(tmp_path, *STARTUP_FILES)
+    for name in STARTUP_FILES:
+        _, _, env, _ = launch(tmp_path, plain / name, env=qualified_env(tmp_path))
+        assert env["alloc_conf"] == "expandable_segments:True", name
+    wider_dir = tmp_path / "tp2"
+    wider_dir.mkdir()
+    wider = prepared_config(wider_dir, *STARTUP_FILES, tp="2")
+    for name in STARTUP_FILES:
+        _, _, env, _ = launch(wider_dir, wider / name, env=qualified_env(wider_dir))
+        assert env["alloc_conf"] == "expandable_segments:False", name
+
+
+def test_tp2_leaves_the_word_to_the_setting_it_replaces(tmp_path):
+    _, _, env, _ = launch(
+        tmp_path,
+        RECIPES / "serve-flash-next.sh",
+        through_entrypoint=False,
+        env=qualified_env(
+            tmp_path, TP_SIZE="2", PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+        ),
+    )
+    assert env["alloc_conf"] == "expandable_segments:True", env
+    # The newer alias alone cannot smuggle the default launch back onto the
+    # broken configuration: the variable the launcher writes outranks it.
+    _, _, env, _ = launch(
+        tmp_path,
+        RECIPES / "serve-flash-next.sh",
+        through_entrypoint=False,
+        env=qualified_env(
+            tmp_path, TP_SIZE="2", PYTORCH_ALLOC_CONF="expandable_segments:True"
+        ),
+    )
+    assert env["alloc_conf"] == "expandable_segments:False", env
+    assert env["alloc_alias"] == "expandable_segments:True", env
+
+
+def test_the_pinned_27b_export_never_follows_the_switch(tmp_path):
+    _, _, env, _ = launch(
+        tmp_path,
+        RECIPES / "serve-qwen38-27b-dflash2.sh",
+        through_entrypoint=False,
+        env=qualified_env(tmp_path, TP_SIZE="2"),
+    )
+    assert env["alloc_conf"] == "expandable_segments:True", env
+    config = prepared_config(tmp_path, "start-27b-dflash2.sh", tp="2")
+    _, _, env, _ = launch(
+        tmp_path, config / "start-27b-dflash2.sh", env=qualified_env(tmp_path)
+    )
+    assert env["alloc_conf"] == "expandable_segments:True", env
 
 
 def test_native_frspec_disk_tier_off_needs_no_nixl_root(tmp_path):

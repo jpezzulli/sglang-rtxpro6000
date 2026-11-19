@@ -147,7 +147,15 @@ export SGLANG_CACHE_DIR="$CACHE_BASE/sglang" SGLANG_JIT_CACHE_DIR="$CACHE_BASE/s
 # unwritable /.tilelang and the import aborts (#65). An explicit value wins.
 export TILELANG_CACHE_DIR="${TILELANG_CACHE_DIR:-$CACHE_BASE/tilelang}"
 mkdir -p "$TILELANG_CACHE_DIR"
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Above TP1 the reported legacy IPC graph registration cannot export
+# expandable-segments memory (#161), so the multi-GPU launch defaults them off;
+# an allocator setting the script already carries still decides, and it
+# outranks PYTORCH_ALLOC_CONF for CUDA.
+if (( TP_SIZE > 1 )); then
+  export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:False}"
+else
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+fi
 export SGLANG_NUMA_BIND_V2=false SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
 export SGLANG_MAMBA_CONV_DTYPE="$MAMBA_CONV_DTYPE"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}" MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
