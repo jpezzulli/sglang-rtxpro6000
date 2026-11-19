@@ -635,15 +635,19 @@ class AnthropicServing:
             # because the local backend has no auto-throttle equivalent.
             # Anything other than ``disabled`` enables reasoning.
             enabled = anthropic_request.thinking.type != "disabled"
-            if anthropic_request.thinking.display == "omitted":
-                # Anthropic 4.7 spec: keep reasoning ON but hide reasoning
-                # text from the client. The OpenAI streaming pipeline has
-                # no equivalent suppress knob — log so operators can see
-                # the request, then proceed with normal reasoning emission.
+            display = anthropic_request.thinking.display
+            if display in ("omitted", "updates"):
+                # Anthropic 4.7 spec: keep reasoning ON but change how the
+                # text reaches the client ('omitted' hides it, 'updates' is
+                # what Claude Code sends). The OpenAI streaming pipeline has
+                # no equivalent suppress/patch knob — log so operators can
+                # see the request, then proceed with normal reasoning
+                # emission.
                 logger.warning(
-                    "Anthropic thinking.display='omitted' is accepted for "
+                    "Anthropic thinking.display=%r is accepted for "
                     "SDK compatibility but reasoning text will still be "
-                    "emitted to the client"
+                    "emitted to the client",
+                    display,
                 )
             self.openai_serving_chat.apply_reasoning_enabled(chat_request, enabled)
 

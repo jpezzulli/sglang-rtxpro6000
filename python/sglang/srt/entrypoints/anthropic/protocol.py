@@ -274,13 +274,14 @@ class AnthropicThinkingParam(BaseModel):
     requires ``budget_tokens`` on ``enabled``, but since we never enforce
     it we also accept it absent or null — clients may send
     ``{"type": "enabled"}`` alone — leaving the budget unset rather than
-    fabricating one. ``display="omitted"`` is accepted but
-    similarly cannot suppress reasoning mid-stream and is logged.
+    fabricating one. ``display="omitted"`` and ``display="updates"`` (the
+    value Claude Code sends) are accepted but similarly cannot suppress or
+    reshape reasoning mid-stream, and are logged.
     """
 
     type: Literal["enabled", "disabled", "adaptive"]
     budget_tokens: Optional[int] = None
-    display: Optional[Literal["summarized", "omitted"]] = None
+    display: Optional[Literal["summarized", "omitted", "updates"]] = None
 
     @model_validator(mode="after")
     def _validate_thinking_shape(self):
