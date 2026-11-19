@@ -243,7 +243,7 @@ export PENNY_MM_PREPROCESS_CACHE_SIZE_MB=3072
 
 | Setting | Default | Notes |
 |---|---|---|
-| `PENNYROYAL_IMAGE` / `--image` | `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.7` (candidate) | Use matching launch files and image tags. An explicit image pin survives setup saves. Update that pin when upgrading. In a hand-edited `run.sh`, keep the `IMAGE=` assignment. In saved setup settings or Compose’s `.env`, removing the pin follows the launcher default. The shared image cache requires 3.1.6 or newer. |
+| `PENNYROYAL_IMAGE` / `--image` | `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.7` | Use matching launch files and image tags. An explicit image pin survives setup saves. Update that pin when upgrading. In a hand-edited `run.sh`, keep the `IMAGE=` assignment. In saved setup settings or Compose’s `.env`, removing the pin follows the launcher default. The shared image cache requires 3.1.6 or newer. |
 | `PENNYROYAL_PORT` / `--port` | 8001 | Published API port. |
 | `PENNYROYAL_USER` / `--user`, `USER_ID`/`GROUP_ID` | `1000:1000` | Numeric identity that must own the writable cache mounts. |
 | `PENNYROYAL_STARTUP` / `--startup` | `config/start-flash-next-frspec.sh` | Selected host startup file; the whole directory is mounted read-only at `/config`. |

@@ -2,10 +2,10 @@
   "schema": "release-notes/3.1.7",
   "version": "3.1.7",
   "status": {
-    "is_draft": true,
-    "publication_approved": false,
-    "published": false,
-    "container": "The candidate passed package checks and the Flash-Next TP1 serving smoke on November 19. Versioned image promotion is pending."
+    "is_draft": false,
+    "publication_approved": true,
+    "published": true,
+    "container": "The published v3.1.7 tag points to the verified image digest."
   },
   "source": {
     "candidate_head": "112870adb0c3505078c1f4b31aff4d1b01fb6b56",
@@ -16,28 +16,36 @@
     "image_source": "c0f6a5372032031002629274efd8f3b7d452df0b",
     "image_source_note": "The image was built and tested from the packaging PR head. Later publication records document that same digest.",
     "release_tag": "pennyroyal-v3.1.7",
-    "release_tag_commit": null,
-    "merged_prs": [],
-    "submissions": [
+    "merged_prs": [
       {
         "commit": "8a7cb0be8060eb08501a2b2115c34aa5cc401e3d",
         "issue": 171,
-        "state": "open",
+        "state": "merged",
         "fixes": "Anthropic /v1/messages accepts thinking.display=\"updates\" on adaptive and enabled thinking",
         "note": "Author Pennyroyal, co-author JustinTong0323, whose upstream fix is the source; authorship is preserved in the commit.",
         "pr": 172,
         "head": "c65f596244589007b7ec6087af4bf8d4215f180f",
-        "check_run": 44581255022
+        "check_run": 44581255022,
+        "merge_commit": "4c0921f383dd9f588ce7a11c3113402a758ad6a6"
       },
       {
         "commit": "d3d2bd613ed4c10b90f193a1f4b348ae9c7e0582",
         "issue": 161,
-        "state": "open",
+        "state": "merged",
         "fixes": "Flash-Next launchers default CUDA expandable segments off above TP1",
         "note": "Author Pennyroyal, responding to the TP2 field report in issue #161.",
         "pr": 173,
         "head": "8cc86e7957ae82f9438aa0ca681056e06d261747",
-        "check_run": 44581257762
+        "check_run": 44581257762,
+        "merge_commit": "b58d724c69deafa0e18ec02bbf282ff4a0466cac"
+      },
+      {
+        "pr": 174,
+        "head": "c0f6a5372032031002629274efd8f3b7d452df0b",
+        "check_run": 44582668084,
+        "fixes": "Version, image defaults, and release documentation",
+        "state": "merged",
+        "merge_commit": "5963a682ddeab6b59925b5d1b456b57dbaabe692"
       }
     ],
     "upstream_ports": [
@@ -52,7 +60,8 @@
         },
         "summary": "A narrow backport: the display Literal and the compatibility warning. The local backend has no per-step reasoning patch knob, so reasoning emission is unchanged and ordinary reasoning still streams."
       }
-    ]
+    ],
+    "release_tag_note": "Resolve the immutable annotated tag for the publication commit. It adds documentation to the tested image source."
   },
   "container": {
     "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.7",
@@ -60,7 +69,13 @@
     "digest": "sha256:135cd55bc1d399631c62365135338d8904cbf9734c1602b9787b90b19b847a8d",
     "build_run": 44582840906,
     "build_status": "success",
-    "promotion": null,
+    "promotion": {
+      "run": 44609281377,
+      "url": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/44609281377",
+      "status": "success",
+      "completed_at": "2026-11-19T20:30:29Z",
+      "rebuilt": false
+    },
     "build_url": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/44582840906",
     "digest_scope": "OCI index",
     "amd64_manifest": "sha256:96d5bf5fdcf78d6971eb61dc4f51f1a1ab871b2c4a74b6b7cf74f833dddd4d59",
@@ -101,13 +116,13 @@
     }
   ],
   "validation": {
-    "review": "The two fixes are the accepted runtime scope of this release; the release preparation adds no runtime claim. Codex owns independent review and acceptance of the assets commit.",
+    "review": "Both source fixes passed independent review. The integrated image passed offline verification and live TP1 checks.",
     "cpu": "Candidate acceptance: 122 CPU tests with 15 subtests passed on 112870adb0, covering the display Literal and warning paths, the TP_SIZE-gated allocator export on all six Flash-Next entry points, the alias precedence and the 27B exception.",
     "serving": "Both native TP1 profiles, Flash-Next with native NEXTN MTP and 27B with DFlash2, returned HTTP 200 for both streaming Anthropic cases, streamed ordinary reasoning, and completed naturally with the NIXL storage tier off.",
     "tp2": "No TP2 hardware test was run. Maintainer TP2 qualification stays open and the release notes ask anyone with two RTX PRO 6000s to report a TP_SIZE=2 start, graph capture and served request in issue #161.",
     "performance": "No new measurements are claimed for this release; the dated rows in RESULTS.md stay as recorded and are not restated here.",
     "dependencies": "No baseline or pin change: docker/pennyroyal/native-baseline.json stays as published for 3.1.6, with the same 231 recorded distributions, and no dependency upgrade is included. The upstream SGLang package version is independent of the Penny Royal release version and is unchanged here.",
-    "public_main": "PRs #172, #173 and #174 passed Contributor checks. The candidate image is from the tested head of #174.",
+    "public_main": "PRs #172–174 passed Contributor checks and merged. The integrated tree matches the tested image source. The final publication changes only documentation.",
     "release_setup": "Penny ran 327 setup and recipe tests, 41 container-launch and startup identity checks, and 87 Anthropic tests with 15 subtests. On thegrid the candidate CPU PLE preparation suite passed 21 tests and 9 subtests with the unchanged optional plugin from the published 3.1.6 image on its import path.",
     "container": {
       "date": "2026-11-19",
