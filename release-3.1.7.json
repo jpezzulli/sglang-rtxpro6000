@@ -5,7 +5,7 @@
     "is_draft": true,
     "publication_approved": false,
     "published": false,
-    "container": "Candidate. Versioned image promotion and publication pending."
+    "container": "The candidate passed package checks and the Flash-Next TP1 serving smoke on November 19. Versioned image promotion is pending."
   },
   "source": {
     "candidate_head": "112870adb0c3505078c1f4b31aff4d1b01fb6b56",
@@ -13,8 +13,8 @@
     "candidate_ref": "work/release-3.1.7-source-20261119",
     "candidate_base": "202f266be2d46453e098792fa39057e859fb8095",
     "candidate_note": "The accepted runtime candidate: two functional commits above the published 3.1.6 source, carrying the Anthropic thinking.display=\"updates\" acceptance and the Flash-Next multi-GPU expandable-segments default, plus the draft public notes. The release preparation on top of it moves version assets, image defaults and documentation only; no runtime code changes here.",
-    "image_source": null,
-    "image_source_note": "The build workflow records the exact candidate SHA. The verified digest and source will be recorded after image verification.",
+    "image_source": "c0f6a5372032031002629274efd8f3b7d452df0b",
+    "image_source_note": "The image was built and tested from the packaging PR head. Later publication records document that same digest.",
     "release_tag": "pennyroyal-v3.1.7",
     "release_tag_commit": null,
     "merged_prs": [],
@@ -56,11 +56,17 @@
   },
   "container": {
     "image": "ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.7",
-    "candidate_image": null,
-    "digest": null,
-    "build_run": null,
-    "build_status": "pending",
-    "promotion": null
+    "candidate_image": "ghcr.io/jpezzulli/sglang-rtxpro6000:build-c0f6a5372032031002629274efd8f3b7d452df0b",
+    "digest": "sha256:135cd55bc1d399631c62365135338d8904cbf9734c1602b9787b90b19b847a8d",
+    "build_run": 44582840906,
+    "build_status": "success",
+    "promotion": null,
+    "build_url": "https://github.com/jpezzulli/sglang-rtxpro6000/actions/runs/44582840906",
+    "digest_scope": "OCI index",
+    "amd64_manifest": "sha256:96d5bf5fdcf78d6971eb61dc4f51f1a1ab871b2c4a74b6b7cf74f833dddd4d59",
+    "config_digest": "sha256:55ec98e55db6f36a55d0d509f36c15c3bdc0e1c705f33e00d5c0384f2afa7546",
+    "compressed_layer_bytes": 7633210028,
+    "local_image_bytes": 15760927050
   },
   "changes": [
     {
@@ -87,7 +93,7 @@
     },
     {
       "commit": "this release preparation",
-      "pr": null,
+      "pr": 174,
       "summary": "Version assets, container image defaults and release documentation: configs/pennyroyal/pennyroyal.version, penny_config.DEFAULT_IMAGE, compose.yaml, launch/run.sh (default and its help line) and docker's .env.example say 3.1.7, and test_penny_recipes.RELEASED_IMAGE holds them to one release. Public policy is unchanged: tiered stays the width-policy default, 27B DFlash2 stays qualified, Flash-Next DFlash2 stays alpha, and the documented extra host RAM for the draft cache is retained.",
       "profiles": [
         "Every profile and both launch routes"
@@ -101,8 +107,17 @@
     "tp2": "No TP2 hardware test was run. Maintainer TP2 qualification stays open and the release notes ask anyone with two RTX PRO 6000s to report a TP_SIZE=2 start, graph capture and served request in issue #161.",
     "performance": "No new measurements are claimed for this release; the dated rows in RESULTS.md stay as recorded and are not restated here.",
     "dependencies": "No baseline or pin change: docker/pennyroyal/native-baseline.json stays as published for 3.1.6, with the same 231 recorded distributions, and no dependency upgrade is included. The upstream SGLang package version is independent of the Penny Royal release version and is unchanged here.",
-    "public_main": "Functional PRs #172 and #173 passed Contributor checks. Candidate image verification is pending.",
-    "release_setup": "Penny ran 327 setup and recipe tests, 41 container-launch and startup identity checks, and 87 Anthropic tests with 15 subtests. On thegrid the candidate CPU PLE preparation suite passed 21 tests and 9 subtests with the unchanged optional plugin from the published 3.1.6 image on its import path."
+    "public_main": "PRs #172, #173 and #174 passed Contributor checks. The candidate image is from the tested head of #174.",
+    "release_setup": "Penny ran 327 setup and recipe tests, 41 container-launch and startup identity checks, and 87 Anthropic tests with 15 subtests. On thegrid the candidate CPU PLE preparation suite passed 21 tests and 9 subtests with the unchanged optional plugin from the published 3.1.6 image on its import path.",
+    "container": {
+      "date": "2026-11-19",
+      "source": "c0f6a5372032031002629274efd8f3b7d452df0b",
+      "version_output": "Penny Royal 3.1.7 | source c0f6a53720",
+      "upstream_package_version": "0.5.19+gc0f6a5372032",
+      "native_baseline_sha256": "dcb3e395e373d9ca1c3426249901977936ae8356368dc88af820006687964045",
+      "package_checks": "Dependency parity, source identity, compiled SM120 module, optional PLE reader and NIXL POSIX FILE/DRAM support passed.",
+      "serving": "Flash-Next TP1 on one RTX PRO 6000, public tiered NEXTN, medium reasoning, 32 GB HiCache and NIXL. Streamed generation and two parallel tool calls passed. Both adaptive and enabled Anthropic thinking requests with display=updates returned HTTP 200, streamed reasoning, answered correctly and ended with end_turn."
+    }
   },
   "contributors": [
     {
