@@ -1,27 +1,27 @@
 # GitHub traffic archive
 
 Repository: `jpezzulli/sglang-rtxpro6000`. Launch: **2026-08-24**.
-Collected: **2026-11-18T07:28:07Z**. Coverage through **2026-11-17** (UTC).
+Collected: **2026-11-19T07:24:03Z**. Coverage through **2026-11-18** (UTC).
 
 Counts are exact sums of GitHub-reported daily counts for the covered dates; the newest dates may be partial and GitHub can revise the overlapping window.
 
 | Metric | Value |
 | --- | ---: |
-| Exact cumulative views since launch through 2026-11-17 | 19,467 |
-| Current rolling-window views | 2,581 |
-| Current rolling-window unique visitors | 533 |
-| views: `sum_of_daily_uniques` | 7,213 |
-| Exact cumulative clones since launch through 2026-11-17 | 176,297 |
-| Current rolling-window clones | 13,071 |
-| Current rolling-window unique cloners | 486 |
-| clones: `sum_of_daily_uniques` | 5,675 |
-| Current stars | 201 |
+| Exact cumulative views since launch through 2026-11-18 | 19,612 |
+| Current rolling-window views | 2,472 |
+| Current rolling-window unique visitors | 531 |
+| views: `sum_of_daily_uniques` | 7,275 |
+| Exact cumulative clones since launch through 2026-11-18 | 176,499 |
+| Current rolling-window clones | 11,200 |
+| Current rolling-window unique cloners | 449 |
+| clones: `sum_of_daily_uniques` | 5,703 |
+| Current stars | 203 |
 | Current forks | 27 |
 
 **No exact lifetime unique-person count is available.** Daily unique values and rolling-window unique values are GitHub metrics. Summing daily uniques does not deduplicate people across days or windows.
 
 Missing dates through latest exposed date: none.
-Not yet exposed: 2026-11-18.
+Not yet exposed: 2026-11-19.
 
 ## Daily history
 
@@ -113,38 +113,39 @@ Not yet exposed: 2026-11-18.
 | 2026-11-15 | 114 | 47 | 60 | 32 |
 | 2026-11-16 | 159 | 60 | 1022 | 37 |
 | 2026-11-17 | 83 | 49 | 51 | 37 |
+| 2026-11-18 | 145 | 62 | 202 | 28 |
 
 ## Referring sites — current rolling-window snapshot
 
 | Source/path | Views | Unique visitors within this snapshot |
 | --- | ---: | ---: |
-| github.com | 175 | 61 |
-| Google | 173 | 95 |
-| reddit.com | 81 | 55 |
-| chiphell.com | 52 | 47 |
-| forums.developer.nvidia.com | 33 | 23 |
-| huggingface.co | 27 | 17 |
+| Google | 178 | 94 |
+| github.com | 162 | 61 |
+| reddit.com | 73 | 53 |
+| chiphell.com | 53 | 48 |
+| forums.developer.nvidia.com | 35 | 27 |
+| huggingface.co | 30 | 19 |
 | search.brave.com | 14 | 8 |
-| teams.public.onecdn.static.microsoft | 7 | 5 |
+| teams.public.onecdn.static.microsoft | 8 | 6 |
 | Bing | 6 | 5 |
-| com.reddit.frontpage | 5 | 5 |
+| DuckDuckGo | 5 | 3 |
 
 ## Popular paths — current rolling-window snapshot
 
 | Source/path | Views | Unique visitors within this snapshot |
 | --- | ---: | ---: |
-| /jpezzulli/sglang-rtxpro6000 | 887 | 373 |
-| /jpezzulli/sglang-rtxpro6000/issues | 187 | 56 |
-| /jpezzulli/sglang-rtxpro6000/releases | 159 | 63 |
-| /jpezzulli/sglang-rtxpro6000/tree/pennyroyal-main-sm120-final | 140 | 79 |
-| /jpezzulli/sglang-rtxpro6000/blob/pennyroyal-main-sm120-final/README.md | 91 | 60 |
-| /jpezzulli/sglang-rtxpro6000/pulls | 73 | 32 |
-| /jpezzulli/sglang-rtxpro6000/blob/pennyroyal-main-sm120-final/docker/pennyroyal/README.md | 61 | 34 |
-| /jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v3.1.6 | 52 | 42 |
-| /jpezzulli/sglang-rtxpro6000/blob/pennyroyal-main-sm120-final/BUILD.md | 38 | 17 |
-| /jpezzulli/sglang-rtxpro6000/tree/pennyroyal-main-sm120-final/docker | 34 | 20 |
+| /jpezzulli/sglang-rtxpro6000 | 853 | 375 |
+| /jpezzulli/sglang-rtxpro6000/issues | 178 | 53 |
+| /jpezzulli/sglang-rtxpro6000/releases | 150 | 59 |
+| /jpezzulli/sglang-rtxpro6000/tree/pennyroyal-main-sm120-final | 143 | 80 |
+| /jpezzulli/sglang-rtxpro6000/blob/pennyroyal-main-sm120-final/README.md | 96 | 61 |
+| /jpezzulli/sglang-rtxpro6000/pulls | 69 | 32 |
+| /jpezzulli/sglang-rtxpro6000/blob/pennyroyal-main-sm120-final/docker/pennyroyal/README.md | 58 | 33 |
+| /jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v3.1.6 | 55 | 43 |
+| /jpezzulli/sglang-rtxpro6000/blob/pennyroyal-main-sm120-final/BUILD.md | 36 | 19 |
+| /jpezzulli/sglang-rtxpro6000/tree/pennyroyal-main-sm120-final/docker | 35 | 21 |
 
-[Latest full snapshot](snapshots/2026-11-18/2026-11-18T072807Z-44259092175-1.json) · [Daily JSON](daily.json) · [Repository stars and forks](repository-metrics.json) · [GHCR package downloads](PACKAGE-DOWNLOADS.md) · [Hugging Face model downloads](HUGGINGFACE-DOWNLOADS.md) · [Immutable first-run raw responses](raw/first-run/)
+[Latest full snapshot](snapshots/2026-11-19/2026-11-19T072403Z-44479296452-1.json) · [Daily JSON](daily.json) · [Repository stars and forks](repository-metrics.json) · [GHCR package downloads](PACKAGE-DOWNLOADS.md) · [Hugging Face model downloads](HUGGINGFACE-DOWNLOADS.md) · [Immutable first-run raw responses](raw/first-run/)
 
 Snapshots retain the aggregate totals, daily arrays, referrers and popular paths as reported together in each collection. They overlap and must not be added together.
 
