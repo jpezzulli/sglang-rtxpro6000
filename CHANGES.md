@@ -2,6 +2,8 @@
 
 ## 3.1.7 — Claude Code compatibility and multi-GPU Flash-Next startup
 
+Published November 19, 2026 as `pennyroyal-v3.1.7` with image `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.7`.
+
 - Claude Code requests with `thinking.display: "updates"` now succeed for adaptive and enabled thinking. Penny streams ordinary reasoning. [PR #172](https://github.com/jpezzulli/sglang-rtxpro6000/pull/172)
 - Flash-Next launchers default CUDA expandable segments off when using multiple GPUs. A dual RTX PRO 6000 field test is pending. [PR #173](https://github.com/jpezzulli/sglang-rtxpro6000/pull/173)
 

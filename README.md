@@ -28,7 +28,7 @@ width routing (block 6 for one request, block 4 for two or more) and
 FlashInfer draft-token verification is an **experimental / alpha** profile,
 fully available to opt into.
 
-**3.1.7 candidate.** Claude Code requests can use `thinking.display: "updates"`. Multi-GPU Flash-Next launchers default CUDA expandable segments off. [Release notes](RELEASE_NOTES_3.1.7.md)
+**3.1.7 (November 19, 2026).** Claude Code requests can use `thinking.display: "updates"`. Multi-GPU Flash-Next launchers default CUDA expandable segments off. The release image is `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.7`. [Release notes](RELEASE_NOTES_3.1.7.md)
 
 **3.1.6 (published 2026-11-06):** faster prefill on long cached prefixes, optional shared image preprocessing, and a hybrid-cache prefetch fix. The verified container is `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6`, promoted without rebuilding. See the [3.1.6 notes](RELEASE_NOTES_3.1.6.md).
 

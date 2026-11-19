@@ -53,10 +53,10 @@ is copied out of the image and no image rebuild is needed.
 ## Get the launch files
 
 Download the launch files for the published image. Use the same release for
-`RELEASE_REF` and the image tag. [3.1.6 release record](../../release-3.1.6.json)
+`RELEASE_REF` and the image tag. [3.1.7 release record](../../release-3.1.7.json)
 
 ```bash
-RELEASE_REF='pennyroyal-v3.1.6'
+RELEASE_REF='pennyroyal-v3.1.7'
 BASE="https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/$RELEASE_REF/docker/pennyroyal/launch"
 mkdir -p pennyroyal/config
 cd pennyroyal
@@ -163,9 +163,7 @@ the target checkpoint; add `--startup config/start-flash-next-dflash2.sh`
 for the optional DFlash2 profile, which also needs its draft checkpoint:
 
 ```bash
-IMAGE='ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6'   # the published image for the launch files above; keep it on the same release as RELEASE_REF
-# Passing --image (or saving PENNYROYAL_IMAGE) is how you stay on a published tag: the
-# shipped default names the newest prepared release, and 3.1.7 has no image yet.
+IMAGE='ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.7'
 ./run.sh --image "$IMAGE"
 ```
 
