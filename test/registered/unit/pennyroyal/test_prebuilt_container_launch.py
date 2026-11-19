@@ -1838,8 +1838,16 @@ def test_a_generated_launch_keeps_the_image_cache_pair_it_was_saved(tmp_path):
 
 FLASH_NEXT_ROUTES = (
     ("native", RECIPES / "serve-flash-next.sh", {"through_entrypoint": False}),
-    ("native-frspec", RECIPES / "serve-flash-next-frspec.sh", {"through_entrypoint": False}),
-    ("native-dflash2", RECIPES / "serve-flash-next-dflash2.sh", {"through_entrypoint": False}),
+    (
+        "native-frspec",
+        RECIPES / "serve-flash-next-frspec.sh",
+        {"through_entrypoint": False},
+    ),
+    (
+        "native-dflash2",
+        RECIPES / "serve-flash-next-dflash2.sh",
+        {"through_entrypoint": False},
+    ),
     ("baked-next", None, {"profile": "next"}),
     ("baked-plain", None, {"profile": "next-plain"}),
     ("baked-dflash2", None, {"profile": "next-dflash2"}),
