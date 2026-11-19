@@ -975,7 +975,9 @@ class TestAnthropicServing(unittest.TestCase):
                     "sglang.srt.entrypoints.anthropic.serving", level=logging.WARNING
                 ) as log:
                     serving._convert_to_chat_completion_request(request)
-                self.assertEqual(serving.openai_serving_chat.apply_reasoning_calls, [True])
+                self.assertEqual(
+                    serving.openai_serving_chat.apply_reasoning_calls, [True]
+                )
                 self.assertTrue(
                     any("updates" in r and "omitted" not in r for r in log.output),
                     f"expected display='updates' warning: {log.output}",
