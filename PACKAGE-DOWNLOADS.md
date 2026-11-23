@@ -2,26 +2,26 @@
 
 Package: [`ghcr.io/jpezzulli/sglang-rtxpro6000`](https://github.com/users/jpezzulli/packages/container/package/sglang-rtxpro6000).
 Published: **2026-09-15**. First captured: **2026-09-16T12:21:06Z**.
-Latest capture: **2026-11-22T06:46:55Z**.
+Latest capture: **2026-11-23T07:37:26Z**.
 
 | Metric | Latest reported | Change from previous archived day |
 | --- | ---: | ---: |
-| Package total downloads | 20,871 | +258 |
-| Version `build-b976bb329cfc1376b7d4589d55871f586d460ad4`, `v2.5.0` | 1,315 | +1 |
-| Version `build-2d6689abdac6f200091e9aa1ae65e95b86d9dd82`, `v2.5.1` | 1,134 | +1 |
-| Version `build-5cd0818abf27cc524ee15b1fedb23070855d9ea6`, `v2.5.2` | 1,400 | +1 |
-| Version `build-d00d88efc8d6281b12be4f4073126aec95038c55`, `v2.5.3` | 1,854 | +2 |
-| Version `build-5d33142c1f3fd3df1548b9682f728fcdd8c7a710`, `v3.0.0` | 953 | +1 |
-| Version `build-6ade93c1a4c52b595ada318466bc41ae190b2709`, `v3.0.1` | 2,382 | +29 |
-| Version `build-6b501b800181756890561fe3107c2ed551c1d302`, `v3.0.2` | 560 | +4 |
-| Version `build-fe5f02ccacb50d3aea10bea2044a9816292e120f`, `v3.1.0` | 204 | +1 |
-| Version `build-94219ff8a381d54a827e0d488e6bc3233079e78d`, `v3.1.1` | 169 | +1 |
-| Version `build-fe35e1d817d1875c57d0cfa54c950427104b4d31`, `v3.1.2` | 351 | +2 |
-| Version `build-ec1f64e850f31f33decee6d925ab2d57a52341c3`, `v3.1.3` | 716 | +1 |
-| Version `build-d777f943062c30d3a52cf247694d6276916b3d23`, `v3.1.4` | 329 | +1 |
-| Version `build-6825003f79580f54f433a8bdc0ca53b812f6dbee`, `v3.1.5` | 253 | +1 |
-| Version `build-470eada6c67f4096cb35b237b67e1d07f9dae1b6`, `v3.1.6` | 996 | +41 |
-| Version `build-c0f6a5372032031002629274efd8f3b7d452df0b`, `build-cache`, `v3.1.7` | 101 | +64 |
+| Package total downloads | 21,222 | +351 |
+| Version `build-b976bb329cfc1376b7d4589d55871f586d460ad4`, `v2.5.0` | 1,321 | +6 |
+| Version `build-2d6689abdac6f200091e9aa1ae65e95b86d9dd82`, `v2.5.1` | 1,140 | +6 |
+| Version `build-5cd0818abf27cc524ee15b1fedb23070855d9ea6`, `v2.5.2` | 1,406 | +6 |
+| Version `build-d00d88efc8d6281b12be4f4073126aec95038c55`, `v2.5.3` | 1,861 | +7 |
+| Version `build-5d33142c1f3fd3df1548b9682f728fcdd8c7a710`, `v3.0.0` | 958 | +5 |
+| Version `build-6ade93c1a4c52b595ada318466bc41ae190b2709`, `v3.0.1` | 2,415 | +33 |
+| Version `build-6b501b800181756890561fe3107c2ed551c1d302`, `v3.0.2` | 567 | +7 |
+| Version `build-fe5f02ccacb50d3aea10bea2044a9816292e120f`, `v3.1.0` | 208 | +4 |
+| Version `build-94219ff8a381d54a827e0d488e6bc3233079e78d`, `v3.1.1` | 173 | +4 |
+| Version `build-fe35e1d817d1875c57d0cfa54c950427104b4d31`, `v3.1.2` | 355 | +4 |
+| Version `build-ec1f64e850f31f33decee6d925ab2d57a52341c3`, `v3.1.3` | 720 | +4 |
+| Version `build-d777f943062c30d3a52cf247694d6276916b3d23`, `v3.1.4` | 333 | +4 |
+| Version `build-6825003f79580f54f433a8bdc0ca53b812f6dbee`, `v3.1.5` | 259 | +6 |
+| Version `build-470eada6c67f4096cb35b237b67e1d07f9dae1b6`, `v3.1.6` | 1,030 | +34 |
+| Version `build-c0f6a5372032031002629274efd8f3b7d452df0b`, `build-cache`, `v3.1.7` | 129 | +28 |
 | Version `flashinfer-sm120-cache` | 0 | +0 |
 
 These are GitHub package download counters, not unique users, successful installations, or repository clones. Container clients may fetch an index, platform manifests, and layers; builds and tests can also contribute downloads.
@@ -98,5 +98,6 @@ These are GitHub package download counters, not unique users, successful install
 | 2026-11-20 | 2026-11-20T07:14:06Z | 20,426 | +182 |
 | 2026-11-21 | 2026-11-21T07:06:01Z | 20,613 | +187 |
 | 2026-11-22 | 2026-11-22T06:46:55Z | 20,871 | +258 |
+| 2026-11-23 | 2026-11-23T07:37:26Z | 21,222 | +351 |
 
 GitHub exposes these counters on the public package pages. Its documented Packages REST responses provide package/version metadata but do not include download counters, so this collector validates and archives the public HTML representation. A markup change fails the package step loudly; the preceding repository-traffic step remains safely committed.
