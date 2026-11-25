@@ -78,6 +78,9 @@ services:
       MAX_RUNNING_REQUESTS: ${MAX_RUNNING_REQUESTS:-}
       MAX_MAMBA_CACHE_SIZE: ${MAX_MAMBA_CACHE_SIZE:-}
       MAX_TOTAL_TOKENS: ${MAX_TOTAL_TOKENS:-}
+    tmpfs:
+      # Without this, sglang's per-worker Prometheus mmap DBs churn /tmp onto the host disk at MB/s.
+      - /tmp:rw,size=2g,mode=1777
     volumes:
       - type: bind
         source: ${HOST_MODELS_ROOT:-./models}
